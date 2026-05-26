@@ -20,9 +20,31 @@ from typing import Optional, Type
 
 import asyncpg
 import httpx
+import logging
+import os
 from pydantic import BaseModel
 
 from boardroom.harness.curator import BuiltPrompt
+
+
+log = logging.getLogger(__name__)
+
+
+def _maybe_langfuse():
+    """Initialize Langfuse if env vars are present; otherwise return None."""
+    pk = os.environ.get("LANGFUSE_PUBLIC_KEY")
+    sk = os.environ.get("LANGFUSE_SECRET_KEY")
+    host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
+    if not pk or not sk:
+        return None
+    try:
+        from langfuse import Langfuse
+        client = Langfuse(public_key=pk, secret_key=sk, host=host)
+        log.info("Langfuse client initialized → %s", host)
+        return client
+    except Exception as e:
+        log.warning("Langfuse init failed (%s); continuing without tracing", e)
+        return None
 
 
 # -------------------------------------------------------------------------
@@ -52,8 +74,8 @@ MODELS: dict[Tier, ModelSpec] = {
     # qwen3-coder:30b for code, glm-4.7-flash for workhorse.
     Tier.REASONING: ModelSpec(
         tier=Tier.REASONING,
-        ollama_name="gemma2:27b",
-        context_limit=8_000,
+        ollama_name="deepseek-r1:32b-qwen-distill-q4_K_M",
+        context_limit=16_000,
         temperature=0.3,
         cost_per_1k_input=0.0,
         cost_per_1k_output=0.0,
@@ -177,7 +199,7 @@ class Router:
         self.pool = pool
         self.gpu_lock = gpu_lock
         self.ollama_url = ollama_url
-        self.langfuse = langfuse_client
+        self.langfuse = langfuse_client if langfuse_client is not None else _maybe_langfuse()
         self._http = httpx.AsyncClient(timeout=600.0)
 
     async def close(self):
@@ -220,23 +242,57 @@ class Router:
 
         agent_name = invocation_type.split(".")[0]
 
+        # Langfuse trace (graceful no-op if not configured)
+        trace = None
+        trace_id = None
+        if self.langfuse:
+            try:
+                trace = self.langfuse.trace(
+                    name=invocation_type,
+                    user_id="boardroom",
+                    session_id=f"phase:{tier.value}",
+                    input={
+                        "layers":         [l.name for l in prompt.layers],
+                        "input_tokens":   prompt.total_tokens,
+                        "model":          model.ollama_name,
+                        "tier":           tier.value,
+                        "downgraded":     downgraded,
+                    },
+                    metadata={"lesson_ids": prompt.lesson_ids},
+                )
+                trace_id = getattr(trace, "id", None)
+            except Exception as e:
+                log.warning("Langfuse trace start failed: %s", e)
+
         async with self.pool.acquire() as conn:
             run_id = await conn.fetchval(
                 """
                 INSERT INTO agent_runs (
                     department, agent_name, invocation_type,
                     model_tier, model_name, triggered_by_event_id,
-                    input_token_count, status
+                    input_token_count, status, langfuse_trace_id
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'running')
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8)
                 RETURNING id
                 """,
                 agent_name, agent_name, invocation_type,
                 tier.value, model.ollama_name, triggered_by_event_id,
-                prompt.total_tokens,
+                prompt.total_tokens, trace_id,
             )
 
         try:
+            generation = None
+            if trace:
+                try:
+                    generation = trace.generation(
+                        name="ollama",
+                        model=model.ollama_name,
+                        model_parameters={"temperature": model.temperature},
+                        input=system_text[:4000],
+                    )
+                except Exception:
+                    generation = None
+
             async with self.gpu_lock.acquire(model.ollama_name):
                 output_text, out_tokens = await self._call_ollama(
                     model=model,
@@ -244,6 +300,20 @@ class Router:
                     schema=output_schema_class,
                 )
             parsed = output_schema_class.model_validate_json(output_text)
+
+            if generation:
+                try:
+                    generation.end(
+                        output=output_text[:4000],
+                        usage={"input": prompt.total_tokens, "output": out_tokens},
+                    )
+                except Exception:
+                    pass
+            if trace:
+                try:
+                    trace.update(output=self._summarize(parsed))
+                except Exception:
+                    pass
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
@@ -271,6 +341,11 @@ class Router:
             return parsed, run_id
 
         except Exception as e:
+            if trace:
+                try:
+                    trace.update(output=f"ERROR: {e}", level="ERROR")
+                except Exception:
+                    pass
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     "UPDATE agent_runs SET status = 'failed', completed_at = NOW(), "

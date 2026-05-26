@@ -66,29 +66,65 @@ async def search_hacker_news(query: str, limit: int = 10) -> list[SearchResult]:
 
 async def search_web(query: str, limit: int = 10) -> list[SearchResult]:
     """
-    Search the web via a self-hosted SearXNG instance. Aggregates results
-    from multiple search engines. Requires SEARXNG_URL env var or a SearXNG
-    instance at localhost:8080.
+    Search the web. Tries SearXNG when configured; otherwise scrapes
+    DuckDuckGo HTML directly so research keeps working without infra.
     """
+    # 1) SearXNG path (when reachable; otherwise immediately fall through)
+    try:
+        async with httpx.AsyncClient(
+            timeout=5.0,
+            headers={"User-Agent": USER_AGENT},
+        ) as client:
+            resp = await client.get(
+                f"{SEARXNG_URL}/search",
+                params={"q": query, "format": "json", "categories": "general"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                out: list[SearchResult] = []
+                for item in data.get("results", [])[:limit]:
+                    out.append(SearchResult(
+                        title=item.get("title", ""),
+                        url=item.get("url", ""),
+                        snippet=(item.get("content", "") or "")[:300],
+                        source="web",
+                    ))
+                if out:
+                    return out
+    except Exception:
+        pass  # fall through
+
+    # 2) DuckDuckGo HTML fallback (no key, no infra)
+    return await _search_duckduckgo(query, limit)
+
+
+async def _search_duckduckgo(query: str, limit: int = 10) -> list[SearchResult]:
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT,
         headers={"User-Agent": USER_AGENT},
+        follow_redirects=True,
     ) as client:
-        resp = await client.get(
-            f"{SEARXNG_URL}/search",
-            params={"q": query, "format": "json", "categories": "general"},
+        resp = await client.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
         )
         resp.raise_for_status()
-        data = resp.json()
+        soup = BeautifulSoup(resp.text, "html.parser")
 
     out: list[SearchResult] = []
-    for item in data.get("results", [])[:limit]:
-        out.append(SearchResult(
-            title=item.get("title", ""),
-            url=item.get("url", ""),
-            snippet=(item.get("content", "") or "")[:300],
-            source="web",
-        ))
+    for result in soup.select("div.result")[: limit * 2]:
+        a = result.select_one("a.result__a")
+        if a is None:
+            continue
+        title = a.get_text(strip=True)
+        href = a.get("href") or ""
+        if not title or not href:
+            continue
+        snippet_el = result.select_one(".result__snippet")
+        snippet = snippet_el.get_text(" ", strip=True)[:300] if snippet_el else ""
+        out.append(SearchResult(title=title, url=str(href), snippet=snippet, source="web"))
+        if len(out) >= limit:
+            break
     return out
 
 

@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
 import { useEventStream } from "../lib/ws";
-import type { StreamMessage } from "../lib/types";
+import { api } from "../lib/api";
+import type { BoardroomEvent, StreamMessage } from "../lib/types";
 import { Badge, Card, SectionTitle } from "./ui";
 
 const EVENT_TONE: Record<string, "red" | "amber" | "green" | "blue" | "default"> = {
@@ -30,7 +32,23 @@ function isEvent(m: StreamMessage): m is Extract<StreamMessage, { type: "event" 
 
 export function EventStream({ keep = 60 }: { keep?: number }) {
   const { recent, connected } = useEventStream(keep);
-  const eventMsgs = recent.filter(isEvent);
+
+  // Prefill from the REST events endpoint so the panel isn't empty when the
+  // harness is idle. Live pushes from the WebSocket merge on top, deduped by id.
+  const [prefill, setPrefill] = useState<BoardroomEvent[]>([]);
+  useEffect(() => {
+    api.events(keep).then(setPrefill).catch(() => {});
+  }, [keep]);
+
+  const live = recent.filter(isEvent).map((m) => m.event);
+  const seen = new Set<number>();
+  const merged: BoardroomEvent[] = [];
+  for (const e of [...live, ...prefill]) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    merged.push(e);
+    if (merged.length >= keep) break;
+  }
 
   return (
     <Card className="lg:col-span-4">
@@ -51,11 +69,10 @@ export function EventStream({ keep = 60 }: { keep?: number }) {
         }
       />
       <ul className="max-h-[520px] space-y-1 overflow-y-auto pr-1 font-mono text-xs">
-        {eventMsgs.length === 0 && (
-          <li className="text-slate-400">Waiting for events…</li>
+        {merged.length === 0 && (
+          <li className="text-slate-400">No events yet — harness has nothing to emit.</li>
         )}
-        {eventMsgs.map((m, i) => {
-          const e = m.event;
+        {merged.map((e) => {
           const tone = EVENT_TONE[e.event_type] ?? "default";
           const sub =
             e.target_type && e.target_id != null
@@ -63,7 +80,7 @@ export function EventStream({ keep = 60 }: { keep?: number }) {
               : (e.target_type ?? "");
           return (
             <li
-              key={`${e.id}-${i}`}
+              key={e.id}
               className="flex items-baseline gap-3 rounded px-1 py-0.5 hover:bg-slate-50"
             >
               <span className="text-slate-400">{fmtTime(e.emitted_at)}</span>
