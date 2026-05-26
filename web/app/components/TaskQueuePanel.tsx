@@ -1,10 +1,11 @@
 "use client";
 
-import { TerminalSquare } from "lucide-react";
+import { ExternalLink, TerminalSquare } from "lucide-react";
 import {
   Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import type { AgentRun, TaskCount } from "../lib/types";
+import { traceUrl } from "../lib/langfuse";
 import { Badge, Card, SectionTitle } from "./ui";
 
 const STATUS_TONE: Record<string, "default" | "blue" | "green" | "amber" | "red"> = {
@@ -16,8 +17,12 @@ const STATUS_TONE: Record<string, "default" | "blue" | "green" | "amber" | "red"
 };
 
 export function TaskQueuePanel({
-  taskCounts, recentRuns,
-}: { taskCounts: TaskCount[]; recentRuns: AgentRun[] }) {
+  taskCounts, recentRuns, langfuseHost,
+}: {
+  taskCounts: TaskCount[];
+  recentRuns: AgentRun[];
+  langfuseHost?: string | null;
+}) {
   const chartData = taskCounts.map((t) => ({
     label: t.label.charAt(0).toUpperCase() + t.label.slice(1),
     value: t.value,
@@ -37,21 +42,35 @@ export function TaskQueuePanel({
         </ResponsiveContainer>
       </div>
       <ul className="space-y-2">
-        {recentRuns.slice(0, 6).map((r) => (
-          <li
-            key={r.id}
-            className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3"
-          >
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="font-mono text-slate-400">R{r.id}</span>
-                <span className="text-slate-400">{r.model_tier}</span>
+        {recentRuns.slice(0, 6).map((r) => {
+          const url = traceUrl(langfuseHost ?? null, r.langfuse_trace_id);
+          return (
+            <li
+              key={r.id}
+              className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-mono text-slate-400">R{r.id}</span>
+                  <span className="text-slate-400">{r.model_tier}</span>
+                  {url && (
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-0.5 text-blue-600 hover:underline"
+                      title="Open in Langfuse"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                </div>
+                <div className="truncate text-sm font-medium text-slate-800">{r.invocation_type}</div>
               </div>
-              <div className="truncate text-sm font-medium text-slate-800">{r.invocation_type}</div>
-            </div>
-            <Badge tone={STATUS_TONE[r.status] ?? "default"}>{r.status}</Badge>
-          </li>
-        ))}
+              <Badge tone={STATUS_TONE[r.status] ?? "default"}>{r.status}</Badge>
+            </li>
+          );
+        })}
         {recentRuns.length === 0 && (
           <li className="text-xs text-slate-400">No runs yet.</li>
         )}

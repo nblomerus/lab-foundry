@@ -12,6 +12,7 @@ Run with:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -21,6 +22,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from boardroom.api import snapshot, stream
+
+
+async def _init_conn(conn: asyncpg.Connection) -> None:
+    """Register JSONB ↔ dict codec so payload columns aren't returned as strings."""
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +44,9 @@ log = logging.getLogger("api")
 async def lifespan(app: FastAPI):
     db_url = os.environ["DATABASE_URL"]
     log.info("opening Postgres pool")
-    app.state.pool = await asyncpg.create_pool(db_url, min_size=2, max_size=20)
+    app.state.pool = await asyncpg.create_pool(
+        db_url, min_size=2, max_size=20, init=_init_conn,
+    )
 
     hub = stream.StreamHub()
     await hub.start(app.state.pool)

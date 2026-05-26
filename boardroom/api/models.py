@@ -74,6 +74,7 @@ class AgentRunOut(BaseModel):
     output_token_count: Optional[int]
     output_summary: Optional[str]
     error: Optional[str]
+    langfuse_trace_id: Optional[str] = None
 
 
 class DissentItem(BaseModel):
@@ -174,3 +175,4 @@ class SnapshotOut(BaseModel):
     telemetry: list[TelemetryDay]
     task_counts: list[TaskCount]
     stats: StatsOut
+    langfuse_host: Optional[str] = None

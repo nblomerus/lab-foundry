@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Layers3 } from "lucide-react";
+import { ExternalLink, Layers3 } from "lucide-react";
 import { api } from "../lib/api";
+import { traceUrl } from "../lib/langfuse";
 import { WorkflowLoop } from "../components/WorkflowLoop";
 import { EventStream } from "../components/EventStream";
 import { Card, SectionTitle } from "../components/ui";
@@ -40,28 +41,46 @@ export default function OrgPage() {
                 <th className="px-3 py-2">Tier</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Tokens</th>
+                <th className="px-3 py-2">Trace</th>
               </tr>
             </thead>
             <tbody>
-              {snap.recent_runs.map((r) => (
-                <tr key={r.id} className="border-t border-slate-100">
-                  <td className="px-3 py-1.5 font-mono text-xs text-slate-500">
-                    {new Date(r.started_at).toLocaleTimeString(undefined, { hour12: false })}
-                  </td>
-                  <td className="px-3 py-1.5 font-mono text-xs">{r.invocation_type}</td>
-                  <td className="px-3 py-1.5 text-xs text-slate-500">{r.model_name}</td>
-                  <td className="px-3 py-1.5 font-mono text-xs">{r.model_tier}</td>
-                  <td className="px-3 py-1.5 font-mono text-xs">
-                    {r.status === "completed" ? "✓"
-                      : r.status === "running" ? "⏳"
-                      : r.status === "failed" ? "✗"
-                      : r.status}
-                  </td>
-                  <td className="px-3 py-1.5 font-mono text-xs text-slate-500">
-                    {r.input_token_count ?? "—"} / {r.output_token_count ?? "—"}
-                  </td>
-                </tr>
-              ))}
+              {snap.recent_runs.map((r) => {
+                const url = traceUrl(snap.langfuse_host, r.langfuse_trace_id);
+                return (
+                  <tr key={r.id} className="border-t border-slate-100">
+                    <td className="px-3 py-1.5 font-mono text-xs text-slate-500">
+                      {new Date(r.started_at).toLocaleTimeString(undefined, { hour12: false })}
+                    </td>
+                    <td className="px-3 py-1.5 font-mono text-xs">{r.invocation_type}</td>
+                    <td className="px-3 py-1.5 text-xs text-slate-500">{r.model_name}</td>
+                    <td className="px-3 py-1.5 font-mono text-xs">{r.model_tier}</td>
+                    <td className="px-3 py-1.5 font-mono text-xs">
+                      {r.status === "completed" ? "✓"
+                        : r.status === "running" ? "⏳"
+                        : r.status === "failed" ? "✗"
+                        : r.status}
+                    </td>
+                    <td className="px-3 py-1.5 font-mono text-xs text-slate-500">
+                      {r.input_token_count ?? "—"} / {r.output_token_count ?? "—"}
+                    </td>
+                    <td className="px-3 py-1.5">
+                      {url ? (
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline"
+                        >
+                          open <ExternalLink className="h-3 w-3" />
+                        </a>
+                      ) : (
+                        <span className="text-xs text-slate-300">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

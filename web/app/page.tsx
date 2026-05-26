@@ -82,7 +82,11 @@ export default function CommandCenter() {
         <DissentPanel items={snap.dissent} />
 
         <ThesesPanel theses={snap.active_theses} />
-        <TaskQueuePanel taskCounts={snap.task_counts} recentRuns={snap.recent_runs} />
+        <TaskQueuePanel
+          taskCounts={snap.task_counts}
+          recentRuns={snap.recent_runs}
+          langfuseHost={snap.langfuse_host}
+        />
         <FindingsPanel findings={snap.recent_findings} />
 
         <TelemetryPanel

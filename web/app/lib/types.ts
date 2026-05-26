@@ -68,6 +68,7 @@ export interface AgentRun {
   output_token_count: number | null;
   output_summary: string | null;
   error: string | null;
+  langfuse_trace_id: string | null;
 }
 
 export interface DissentItem {
@@ -143,6 +144,7 @@ export interface Snapshot {
   telemetry: TelemetryDay[];
   task_counts: TaskCount[];
   stats: Stats;
+  langfuse_host: string | null;
 }
 
 export interface BoardroomEvent {

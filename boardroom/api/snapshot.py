@@ -144,6 +144,7 @@ async def _runs(pool: asyncpg.Pool, limit: int) -> list[AgentRunOut]:
             output_token_count=r["output_token_count"],
             output_summary=r["output_summary"],
             error=r["error"],
+            langfuse_trace_id=r["langfuse_trace_id"],
         )
         for r in rows
     ]
@@ -334,6 +335,7 @@ async def _stats(pool: asyncpg.Pool) -> StatsOut:
 
 @router.get("/snapshot", response_model=SnapshotOut)
 async def snapshot(request: Request) -> SnapshotOut:
+    import os
     pool: asyncpg.Pool = request.app.state.pool
     (
         state, active, killed, findings, runs, dissent, phases, org, cost,
@@ -353,12 +355,15 @@ async def snapshot(request: Request) -> SnapshotOut:
         _task_counts(pool),
         _stats(pool),
     )
+    # Surface langfuse host so the dashboard can link directly to traces.
+    lf_host = os.environ.get("LANGFUSE_HOST") if os.environ.get("LANGFUSE_PUBLIC_KEY") else None
     return SnapshotOut(
         state=state, active_theses=active, killed_theses=killed,
         recent_findings=findings, recent_runs=runs, dissent=dissent,
         phase_transitions=phases, org_roles=org, cost=cost,
         lesson_counts=lessons, telemetry=telemetry,
         task_counts=task_counts, stats=stats,
+        langfuse_host=lf_host,
     )
 
 
@@ -374,7 +379,7 @@ async def events(request: Request, limit: int = 100) -> list[EventOut]:
         EventOut(
             id=r["id"], event_type=r["event_type"],
             target_type=r["target_type"], target_id=r["target_id"],
-            payload=dict(r["payload"]) if r["payload"] else {},
+            payload=r["payload"] if isinstance(r["payload"], dict) else {},
             status=r["status"], suppression_reason=r["suppression_reason"],
             emitted_at=r["emitted_at"], consumed_at=r["consumed_at"],
             consumed_by_handler=r["consumed_by_handler"],
