@@ -1,0 +1,22 @@
+# Runtime
+asyncpg
+httpx
+pydantic
+tiktoken
+mcp
+zep-cloud
+langfuse
+beautifulsoup4
+lxml
+python-dotenv
+
+# Command-center backend
+fastapi
+uvicorn[standard]
+websockets
+
+# Dev
+ruff
+pytest
+pytest-asyncio
+pre-commit

@@ -1,0 +1,98 @@
+name: boardroom
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-boardroom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-boardroom}
+      POSTGRES_DB:       ${POSTGRES_DB:-boardroom}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
+      SEARXNG_SECRET:   ${SEARXNG_SECRET:-please-change-me}
+    volumes:
+      - ./infra/searxng:/etc/searxng:rw
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+
+  # Langfuse for LLM tracing. Single-container mode for v1.
+  langfuse:
+    image: langfuse/langfuse:latest
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL:       postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_URL:       http://localhost:3000
+      NEXTAUTH_SECRET:    ${LANGFUSE_NEXTAUTH_SECRET:-please-change-me}
+      SALT:               ${LANGFUSE_SALT:-please-change-me}
+      TELEMETRY_ENABLED:  "false"
+      LANGFUSE_INIT_PROJECT_NAME: boardroom
+
+  langfuse-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB:       langfuse
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Optional: Zep self-hosted. Comment out and use Zep Cloud if preferred.
+  # zep:
+  #   image: ghcr.io/getzep/zep:latest
+  #   restart: unless-stopped
+  #   depends_on:
+  #     zep-db:
+  #       condition: service_healthy
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     ZEP_STORE_POSTGRES_DSN: postgres://zep:zep@zep-db:5432/zep?sslmode=disable
+  #     ZEP_OPENAI_API_KEY: ${OPENAI_API_KEY}
+  #
+  # zep-db:
+  #   image: pgvector/pgvector:pg16
+  #   environment:
+  #     POSTGRES_USER:     zep
+  #     POSTGRES_PASSWORD: zep
+  #     POSTGRES_DB:       zep
+  #   volumes:
+  #     - zep-db-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U zep"]
+
+volumes:
+  postgres-data:
+  langfuse-db-data:
+  # zep-db-data:

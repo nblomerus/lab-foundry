@@ -1,0 +1,41 @@
+### Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.python-version
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+### Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+### Local config
+.env
+!.env.example
+
+### Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+### Logs / data
+*.log
+/tmp/boardroom-*.log
+infra/searxng/
+data/
+
+### Docker / Postgres mount
+postgres-data/
+langfuse-db-data/

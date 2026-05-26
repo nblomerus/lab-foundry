@@ -1,0 +1,525 @@
+"""
+Context curator.
+
+Owns exactly what each agent invocation sees. Agents request work by
+`invocation_type`; the curator looks up the recipe, fetches recall from Zep,
+applies lessons, enforces the token budget, and returns a Prompt ready
+for the router to execute.
+
+All methods are async because state/memory/lessons clients are async.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Awaitable, Callable, Optional
+
+import tiktoken
+
+
+# -------------------------------------------------------------------------
+# Layered prompt
+# -------------------------------------------------------------------------
+
+@dataclass
+class PromptLayer:
+    name: str
+    content: str
+    priority: int  # 0 = never drop; higher = compactable / droppable first
+
+    def token_count(self, tokenizer) -> int:
+        return len(tokenizer.encode(self.content))
+
+
+@dataclass
+class BuiltPrompt:
+    layers: list[PromptLayer]
+    tool_names: list[str]
+    output_schema: str
+    lesson_ids: list[int]
+    total_tokens: int
+    invocation_type: str
+
+    def as_system_message(self) -> str:
+        return "\n\n".join(l.content for l in self.layers if l.content)
+
+
+# -------------------------------------------------------------------------
+# Recipe definition
+# -------------------------------------------------------------------------
+
+# task_data_builder signature: async (ctx, state, memory) -> PromptLayer
+TaskDataBuilder = Callable[[dict, object, object], Awaitable[PromptLayer]]
+
+
+@dataclass
+class Recipe:
+    invocation_type: str
+    description: str
+    agent: str
+    total_budget: int
+    use_cold_path: bool = False
+    recall_sessions: list[str] = field(default_factory=list)
+    recall_k: int = 5
+    output_schema: str = ""
+    task_data_builder: Optional[TaskDataBuilder] = None
+
+
+# -------------------------------------------------------------------------
+# System prompts — terse role anchors
+# -------------------------------------------------------------------------
+
+SYSTEM_PROMPTS: dict[str, str] = {
+    "ceo": (
+        "You are the CEO of an autonomous AI-native company. Your role is "
+        "strategic direction, not execution. You decide what to pursue, what "
+        "to kill, and when to change direction. You are demanding about "
+        "quality and ruthlessly selective. You write decisions; you never "
+        "write content."
+    ),
+    "researcher": (
+        "You are a research analyst. You read raw material and extract "
+        "findings that inform strategic decisions. You are precise, "
+        "skeptical, and selective. Most material is not interesting. "
+        "Empty findings lists are acceptable. Inflating relevance scores "
+        "is worse than under-scoring."
+    ),
+    "auditor": (
+        "You are an auditor. Your job is to detect slop: findings that "
+        "could have been written without the cited research, generic "
+        "claims, plausible-sounding pattern matches. You are not graded "
+        "on agreeing with the researcher."
+    ),
+    "adversary": (
+        "You are an adversary. For each thesis you examine, your job is "
+        "to find evidence it is wrong. You do not balance perspectives. "
+        "You hunt contradictions. Empty kill-recommendation is the right "
+        "answer when no killing evidence exists."
+    ),
+    "planner": (
+        "You are a planner. You translate active theses and objectives "
+        "into concrete research tasks. Each task is small, specific, and "
+        "executable by a Researcher in one pass. You do not strategize."
+    ),
+}
+
+
+# -------------------------------------------------------------------------
+# Recipe 1: ceo.thesis_kill
+# -------------------------------------------------------------------------
+
+async def _build_thesis_kill_task_data(ctx: dict, state, memory) -> PromptLayer:
+    thesis_id = ctx["thesis_id"]
+    verdict_id = ctx["adversary_verdict_id"]
+
+    thesis, verdict, siblings = await asyncio.gather(
+        state.get_thesis(thesis_id),
+        state.get_adversary_verdict(verdict_id),
+        state.get_active_theses(limit=20, exclude_ids=[thesis_id]),
+    )
+    cited_findings = await state.get_findings(ids=verdict.cited_finding_ids)
+
+    sibling_lines = "\n".join(
+        f"- T{t.id}: {t.claim} (conf {t.confidence:.2f}, status {t.status})"
+        for t in siblings
+    ) or "(none)"
+
+    cited_lines = "\n".join(
+        f"- F{f.id} [{f.source}, rel {f.relevance_score}]: {f.title}\n  {f.summary}"
+        for f in cited_findings
+    )
+
+    content = f"""## Target thesis under kill review
+
+**Claim:** {thesis.claim}
+**Status:** {thesis.status}  |  Confidence: {thesis.confidence:.2f}
+**Born:** {thesis.created_at:%Y-%m-%d}
+
+## Adversary verdict (the kill recommendation)
+
+**Verdict:** {verdict.verdict}  |  Confidence: {verdict.confidence:.2f}
+**Reasoning:**
+{verdict.reasoning}
+
+## Cited killing evidence ({len(cited_findings)} findings)
+{cited_lines}
+
+## Sibling theses (do not act on these in this run)
+{sibling_lines}
+
+---
+
+**Decide one of:**
+  - `kill`         — the verdict is right. Write a 1-2 sentence kill_reason for the permanent record.
+  - `demote`       — the evidence weakens but does not kill. Propose new_confidence.
+  - `reject`       — the adversary missed something. Explain what.
+
+Your decision will be logged immutably. The Adversary is good but not infallible.
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
+# -------------------------------------------------------------------------
+# Recipe 2: researcher.execute_task
+# -------------------------------------------------------------------------
+
+async def _build_researcher_task_data(ctx: dict, state, memory) -> PromptLayer:
+    task_id = ctx["task_id"]
+    raw_material = ctx.get("raw_material", "")  # caller pre-fetches via MCP
+
+    task, theses = await asyncio.gather(
+        state.get_task(task_id),
+        state.get_active_theses(limit=10),
+    )
+
+    thesis_lines = "\n".join(
+        f"- T{t.id}: {t.claim}" for t in theses
+    ) or "(no active theses — exploration just started)"
+
+    content = f"""## Research task
+
+**Task:** {task.description}
+**Type:** {task.task_type}
+**Target thesis:** T{task.thesis_id if task.thesis_id else '(none — exploratory)'}
+
+## Active theses (score findings for relevance to these)
+{thesis_lines}
+
+## Raw material to analyze
+{raw_material}
+
+---
+
+Emit 0 to N findings. For each finding:
+  - `source`: one of hacker_news | arxiv | reddit | web | other
+  - `url`, `title`, `summary` (≤ 200 words)
+  - `relevance_score` (1-10): most = 3-5, reserve 8+ for genuinely important findings
+  - `supports_thesis`: true | false | null  (null = neutral / informational only)
+  - `why_it_matters`: one sentence, concrete
+
+If the raw material contains nothing relevant, return an empty list.
+That is the correct answer when there is nothing.
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
+# -------------------------------------------------------------------------
+# Recipe 3: ceo.exploration_kickoff  (bootstrap — day 1 only)
+# -------------------------------------------------------------------------
+
+async def _build_exploration_kickoff_task_data(ctx: dict, state, memory) -> PromptLayer:
+    """
+    First-ever CEO invocation. The constitution layer already carries the seed
+    (problem / stance / success criterion); this layer is the "now what" brief.
+    """
+    content = """## Exploration kickoff — day 1
+
+You are bootstrapping the company from the seed above.
+
+You have 30 days. The phases are:
+  - Exploration (~days 1-10):  cast wide; map plausible money-making categories
+  - Convergence (~days 11-17): narrow to the top 3; hunt contradictions
+  - Commitment  (~days 18-20): pick the winning thesis; write the charter
+  - Execution   (~days 21-30): ship to a paying customer
+
+Right now your ONLY job is to propose 4-6 candidate **categories** of business
+worth exploring. A category is NOT a specific business idea — it is a class
+of business the company could pursue. Examples (illustrative only — do not
+use these):
+  - "Premium research/intelligence newsletter in an emerging-tech sub-niche"
+  - "Done-for-you service for an admin task most companies hate"
+  - "Hosted open-source tool for a specific developer workflow"
+  - "Productized consulting in a high-friction domain"
+  - "Marketplace/aggregator for a fragmented professional niche"
+
+For each category:
+  - `claim`: one sentence stating the category
+  - `rationale`: 2-3 sentences. Why is this worth exploring? Rough economic
+    logic? Where might differentiation come from?
+  - `risks`: 1-2 sentences. What would kill this category fast?
+  - `disambiguating_questions`: exactly 3 questions whose answers tell us
+    whether this category is real. These become the first research tasks.
+
+Hard requirements:
+  - **Distinct.** No two categories should compete for the same audience or
+    product shape.
+  - **Stance-compatible.** No arbitrage, slop, MLM patterns, or AI-content
+    businesses. Reread the stance.
+  - **Timeline-compatible.** A business needing 12 months to validate is not
+    viable here.
+  - **Autonomy-compatible.** A category that requires the watcher to make
+    decisions, write content, or evaluate quality is forbidden.
+
+Return 4-6 categories. Five is the right number unless you have a specific
+reason for more or fewer. Also return a 2-3 sentence `selection_reasoning`
+explaining what space these categories cover and what you deliberately
+excluded.
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
+# -------------------------------------------------------------------------
+# Recipe registry
+# -------------------------------------------------------------------------
+
+RECIPES: dict[str, Recipe] = {
+    "ceo.exploration_kickoff": Recipe(
+        invocation_type="ceo.exploration_kickoff",
+        description="First-ever CEO invocation. Generates 4-6 candidate business categories from the seed.",
+        agent="ceo",
+        total_budget=4_000,
+        use_cold_path=False,
+        recall_sessions=[],
+        recall_k=0,
+        output_schema="ExplorationKickoffOutput",
+        task_data_builder=_build_exploration_kickoff_task_data,
+    ),
+    "ceo.thesis_kill": Recipe(
+        invocation_type="ceo.thesis_kill",
+        description="CEO ratifies, demotes, or rejects an Adversary kill recommendation.",
+        agent="ceo",
+        total_budget=13_000,
+        use_cold_path=True,
+        recall_sessions=["theses-lifecycle", "dissent", "ceo-deliberations"],
+        recall_k=10,
+        output_schema="ThesisKillDecision",
+        task_data_builder=_build_thesis_kill_task_data,
+    ),
+    "researcher.execute_task": Recipe(
+        invocation_type="researcher.execute_task",
+        description="Researcher analyzes raw material and emits findings against active theses.",
+        agent="researcher",
+        total_budget=22_000,
+        use_cold_path=False,
+        recall_sessions=[],
+        recall_k=0,
+        output_schema="ResearcherFindings",
+        task_data_builder=_build_researcher_task_data,
+    ),
+}
+
+
+# -------------------------------------------------------------------------
+# Tool filtering per agent
+# -------------------------------------------------------------------------
+
+TOOLS_BY_AGENT: dict[str, list[str]] = {
+    "ceo":        ["boardroom-state", "boardroom-memory", "boardroom-events", "boardroom-artifacts"],
+    "planner":    ["boardroom-state", "boardroom-events"],
+    "researcher": ["boardroom-state", "boardroom-events", "boardroom-research"],
+    "auditor":    ["boardroom-state", "boardroom-memory", "boardroom-events"],
+    "adversary":  ["boardroom-state", "boardroom-memory", "boardroom-events", "boardroom-research"],
+}
+
+
+# -------------------------------------------------------------------------
+# The Curator
+# -------------------------------------------------------------------------
+
+class Curator:
+    """
+    Builds the full layered context for one invocation.
+
+    Layer order (priority 0 layers are never dropped on overflow):
+        0  system           — role anchor
+        0  constitution     — seed problem | charter
+        0  schema hint      — output schema instruction
+        1  phase            — where we are, time budget
+        1  task_data        — recipe-specific
+        2  lessons          — applicable skill memory
+        3  recall           — Zep hot/cold (compacted on overflow)
+    """
+
+    def __init__(self, state, memory, lessons, tokenizer=None):
+        self.state = state
+        self.memory = memory
+        self.lessons = lessons
+        self.tokenizer = tokenizer or tiktoken.get_encoding("cl100k_base")
+
+    async def build(self, invocation_type: str, context: dict) -> BuiltPrompt:
+        recipe = RECIPES.get(invocation_type)
+        if recipe is None:
+            raise ValueError(f"No recipe for invocation_type={invocation_type!r}")
+
+        # Build static + recall layers concurrently where possible
+        constitution_task = asyncio.create_task(self._constitution_layer())
+        phase_task        = asyncio.create_task(self._phase_layer())
+        lessons_task      = asyncio.create_task(self._lessons_layer(invocation_type, context))
+
+        recall_task = None
+        if recipe.recall_sessions:
+            recall_task = asyncio.create_task(self._recall_layer(recipe, context))
+
+        task_data_task = None
+        if recipe.task_data_builder:
+            task_data_task = asyncio.create_task(
+                recipe.task_data_builder(context, self.state, self.memory)
+            )
+
+        layers: list[PromptLayer] = [
+            PromptLayer(
+                name="system",
+                content=SYSTEM_PROMPTS[recipe.agent],
+                priority=0,
+            ),
+            await constitution_task,
+            await phase_task,
+        ]
+
+        lessons_layer, applied_ids = await lessons_task
+        if lessons_layer.content:
+            layers.append(lessons_layer)
+
+        if recall_task is not None:
+            layers.append(await recall_task)
+
+        if task_data_task is not None:
+            layers.append(await task_data_task)
+
+        layers.append(PromptLayer(
+            name="schema",
+            content=f"Return a JSON object matching the {recipe.output_schema} schema.",
+            priority=0,
+        ))
+
+        layers = self._enforce_budget(layers, recipe.total_budget)
+        total = sum(l.token_count(self.tokenizer) for l in layers)
+
+        return BuiltPrompt(
+            layers=layers,
+            tool_names=TOOLS_BY_AGENT.get(recipe.agent, []),
+            output_schema=recipe.output_schema,
+            lesson_ids=applied_ids,
+            total_tokens=total,
+            invocation_type=invocation_type,
+        )
+
+    # ---- Layer builders ---------------------------------------------
+
+    async def _constitution_layer(self) -> PromptLayer:
+        s = await self.state.get_company_state()
+        if s.current_phase == "execution" and s.charter:
+            body = (
+                f"## Charter (committed thesis)\n{s.charter}\n\n"
+                f"## Stance\n{s.stance or '(unset)'}\n\n"
+                f"## Success criterion\n{s.success_criterion or '(unset)'}"
+            )
+        else:
+            body = (
+                f"## Seed problem\n{s.problem_statement}\n\n"
+                f"## Stance\n{s.stance or '(unset)'}\n\n"
+                f"## Success criterion\n{s.success_criterion or '(unset)'}"
+            )
+        return PromptLayer(name="constitution", content=body, priority=0)
+
+    async def _phase_layer(self) -> PromptLayer:
+        s, active = await asyncio.gather(
+            self.state.get_company_state(),
+            self.state.count_active_theses(),
+        )
+        now = datetime.now(timezone.utc)
+        days_in_phase = (now - s.phase_started_at).days
+        days_remaining = (s.deadline - now).days
+        body = (
+            f"## Phase context\n"
+            f"Phase: **{s.current_phase}** (day {days_in_phase})\n"
+            f"Days remaining to deadline: {days_remaining}\n"
+            f"Active theses: {active}"
+        )
+        return PromptLayer(name="phase", content=body, priority=1)
+
+    async def _lessons_layer(
+        self, invocation_type: str, context: dict,
+    ) -> tuple[PromptLayer, list[int]]:
+        applicable = await self.lessons.fetch_applicable(
+            invocation_type=invocation_type, context=context, limit=5,
+        )
+        if not applicable:
+            return PromptLayer(name="lessons", content="", priority=2), []
+
+        lines, ids = [], []
+        for lesson in applicable:
+            marker = "(verified)" if lesson.status == "active" else "(unverified)"
+            lines.append(f"- {marker} {lesson.lesson_text}")
+            ids.append(lesson.id)
+
+        body = "## Learned lessons (apply when relevant)\n" + "\n".join(lines)
+        return PromptLayer(name="lessons", content=body, priority=2), ids
+
+    async def _recall_layer(self, recipe: Recipe, context: dict) -> PromptLayer:
+        query = await self._recall_query(recipe, context)
+        if recipe.use_cold_path:
+            sessions = await asyncio.gather(*[
+                self.memory.recall_episodic(session_id=sid, query=query, k=recipe.recall_k)
+                for sid in recipe.recall_sessions
+            ])
+        else:
+            sessions = await asyncio.gather(*[
+                self.memory.recent(session_id=sid, k=recipe.recall_k)
+                for sid in recipe.recall_sessions
+            ])
+        results = [m for batch in sessions for m in batch]
+
+        if not results:
+            body = "## Recall\n(no relevant prior episodes)"
+        else:
+            lines = [
+                f"[{m.created_at:%Y-%m-%d %H:%M}] {m.content}"
+                for m in results
+            ]
+            body = "## Recall (relevant prior episodes)\n" + "\n".join(lines)
+
+        return PromptLayer(name="recall", content=body, priority=3)
+
+    async def _recall_query(self, recipe: Recipe, context: dict) -> str:
+        if recipe.invocation_type == "ceo.thesis_kill":
+            thesis = await self.state.get_thesis(context["thesis_id"])
+            return f"thesis kill, demotion, or rejection related to: {thesis.claim}"
+        if recipe.invocation_type == "ceo.weekly_synthesis":
+            return "recent thesis activity, dissent, phase progress"
+        if recipe.invocation_type == "ceo.phase_transition_proposal":
+            return "phase transition reasoning and confidence patterns"
+        if recipe.invocation_type == "auditor.slop_score":
+            return "recent auditor verdicts and slop patterns"
+        return ""
+
+    # ---- Budget enforcement ----------------------------------------
+
+    def _enforce_budget(self, layers: list[PromptLayer], budget: int) -> list[PromptLayer]:
+        total = sum(l.token_count(self.tokenizer) for l in layers)
+        if total <= budget:
+            return layers
+
+        # 1) Compact recall first
+        for layer in layers:
+            if layer.name == "recall":
+                overflow = total - budget
+                target = max(0, layer.token_count(self.tokenizer) - overflow)
+                layer.content = self._compact_recall(layer.content, target_tokens=target)
+                break
+
+        total = sum(l.token_count(self.tokenizer) for l in layers)
+        if total <= budget:
+            return layers
+
+        # 2) Drop priority >= 2 layers (lessons, recall) if still over
+        for layer in layers:
+            if layer.priority >= 2 and layer.content:
+                layer.content = ""
+                total = sum(l.token_count(self.tokenizer) for l in layers)
+                if total <= budget:
+                    break
+
+        return layers
+
+    def _compact_recall(self, content: str, target_tokens: int) -> str:
+        """
+        Stub. Real implementation: F-tier model call asking 'summarize
+        preserving decisions, dissent, and dates; drop deliberation phrasing.'
+        For now: naive truncation.
+        """
+        tokens = self.tokenizer.encode(content)
+        if len(tokens) <= target_tokens:
+            return content
+        return self.tokenizer.decode(tokens[:target_tokens]) + "\n[…truncated]"
