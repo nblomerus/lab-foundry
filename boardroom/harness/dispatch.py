@@ -127,6 +127,9 @@ class Dispatcher:
             if event is None:
                 return
             event = dict(event)
+            # JSONB comes back as a string without a codec; normalize to dict
+            if isinstance(event.get("payload"), str):
+                event["payload"] = json.loads(event["payload"]) if event["payload"] else {}
 
         handler = self._handlers.get(event["event_type"])
         if handler is None:

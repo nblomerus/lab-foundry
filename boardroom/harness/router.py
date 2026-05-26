@@ -242,27 +242,28 @@ class Router:
 
         agent_name = invocation_type.split(".")[0]
 
-        # Langfuse trace (graceful no-op if not configured)
-        trace = None
+        # Langfuse v4 span (graceful no-op if not configured / SDK errors)
+        lf_span = None
         trace_id = None
         if self.langfuse:
             try:
-                trace = self.langfuse.trace(
+                lf_span = self.langfuse.start_observation(
                     name=invocation_type,
-                    user_id="boardroom",
-                    session_id=f"phase:{tier.value}",
+                    as_type="generation",
+                    model=model.ollama_name,
+                    model_parameters={"temperature": model.temperature},
                     input={
-                        "layers":         [l.name for l in prompt.layers],
-                        "input_tokens":   prompt.total_tokens,
-                        "model":          model.ollama_name,
-                        "tier":           tier.value,
-                        "downgraded":     downgraded,
+                        "layers":       [l.name for l in prompt.layers],
+                        "input_tokens": prompt.total_tokens,
+                        "tier":         tier.value,
+                        "downgraded":   downgraded,
                     },
                     metadata={"lesson_ids": prompt.lesson_ids},
                 )
-                trace_id = getattr(trace, "id", None)
+                trace_id = lf_span.trace_id
             except Exception as e:
-                log.warning("Langfuse trace start failed: %s", e)
+                log.warning("Langfuse start failed: %s", e)
+                lf_span = None
 
         async with self.pool.acquire() as conn:
             run_id = await conn.fetchval(
@@ -281,18 +282,6 @@ class Router:
             )
 
         try:
-            generation = None
-            if trace:
-                try:
-                    generation = trace.generation(
-                        name="ollama",
-                        model=model.ollama_name,
-                        model_parameters={"temperature": model.temperature},
-                        input=system_text[:4000],
-                    )
-                except Exception:
-                    generation = None
-
             async with self.gpu_lock.acquire(model.ollama_name):
                 output_text, out_tokens = await self._call_ollama(
                     model=model,
@@ -301,17 +290,13 @@ class Router:
                 )
             parsed = output_schema_class.model_validate_json(output_text)
 
-            if generation:
+            if lf_span:
                 try:
-                    generation.end(
+                    lf_span.update(
                         output=output_text[:4000],
-                        usage={"input": prompt.total_tokens, "output": out_tokens},
+                        usage_details={"input": prompt.total_tokens, "output": out_tokens},
                     )
-                except Exception:
-                    pass
-            if trace:
-                try:
-                    trace.update(output=self._summarize(parsed))
+                    lf_span.end()
                 except Exception:
                     pass
 
@@ -341,9 +326,10 @@ class Router:
             return parsed, run_id
 
         except Exception as e:
-            if trace:
+            if lf_span:
                 try:
-                    trace.update(output=f"ERROR: {e}", level="ERROR")
+                    lf_span.update(output=f"ERROR: {e}", level="ERROR")
+                    lf_span.end()
                 except Exception:
                     pass
             async with self.pool.acquire() as conn:
