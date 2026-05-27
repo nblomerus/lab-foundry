@@ -25,7 +25,7 @@ import httpx
 
 from boardroom.harness.curator import Curator
 from boardroom.harness.dispatch import Dispatcher
-from boardroom.harness.router import GPULock, Router
+from boardroom.harness.router import GPULock, Router, build_cloud_chain
 from boardroom.state.client import PostgresClient
 from boardroom.memory.client import ZepClient
 from boardroom.skills.client import LessonsClient
@@ -104,15 +104,18 @@ async def main() -> int:
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
     max_concurrent = int(os.environ.get("MAX_CONCURRENT_HANDLERS", "4"))
     gpu_call_timeout = float(os.environ.get("GPU_CALL_TIMEOUT_S", "300"))
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    cloud_model = os.environ.get("CLOUD_MODEL", "gemini-2.5-flash")
+    cloud_chain = build_cloud_chain(os.environ)
 
     log.info("starting harness")
     log.info("  db=%s", db_url)
     log.info("  ollama=%s", ollama_url)
     log.info("  max_concurrent_handlers=%d", max_concurrent)
     log.info("  gpu_call_timeout_s=%.0f", gpu_call_timeout)
-    log.info("  cloud_model=%s", cloud_model if gemini_key else "(disabled — no GEMINI_API_KEY, all-local)")
+    if cloud_chain:
+        log.info("  cloud chain: %s → local", " → ".join(
+            f"{cp.provider.value}({cp.model_name})" for cp in cloud_chain))
+    else:
+        log.info("  cloud chain: (none — all-local)")
 
     pool = await asyncpg.create_pool(db_url, min_size=4, max_size=20)
 
@@ -144,7 +147,7 @@ async def main() -> int:
     curator    = Curator(state=state, memory=memory, lessons=lessons)
     gpu_lock   = GPULock()
     router     = Router(pool=pool, gpu_lock=gpu_lock, ollama_url=ollama_url,
-                        call_timeout_s=gpu_call_timeout, gemini_api_key=gemini_key)
+                        call_timeout_s=gpu_call_timeout, cloud_chain=cloud_chain)
     dispatcher = Dispatcher(pool=pool, max_concurrent_handlers=max_concurrent)
 
     # Attach clients so handlers can reach them via the dispatcher param

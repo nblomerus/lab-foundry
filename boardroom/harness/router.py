@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -60,7 +61,10 @@ class Tier(enum.Enum):
 
 class Provider(enum.Enum):
     OLLAMA = "ollama"   # local, serialized behind the GPU lock
-    GEMINI = "gemini"   # cloud, OpenAI-compatible endpoint, no GPU lock
+    GEMINI = "gemini"   # Google AI Studio, OpenAI-compatible
+    GROQ   = "groq"     # Groq LPU (fast open models), OpenAI-compatible
+    NVIDIA = "nvidia"   # NVIDIA NIM catalog, OpenAI-compatible
+    GITHUB = "github"   # GitHub Models (GPT-4o, Llama, …), OpenAI-compatible
 
 
 @dataclass(frozen=True)
@@ -111,24 +115,73 @@ MODELS: dict[Tier, ModelSpec] = {
     ),
 }
 
-# Cloud model. One frontier-class model serves every tier; it's preferred
-# over local when a key is configured, with local as the automatic fallback
-# on rate-limit / error / unparseable output. Free tier → $0 cost. Tier-
-# specific temperature is reused from the local spec so behaviour matches.
-CLOUD_MODEL_NAME = os.environ.get("CLOUD_MODEL", "gemini-2.5-flash")
+# -------------------------------------------------------------------------
+# Cloud provider chain
+#
+# Each provider is a free, OpenAI-compatible endpoint serving a frontier-class
+# (or large open) model. They're tried in order; a rate-limit / 5xx / timeout
+# / unparseable output on one falls through to the next, with local Ollama as
+# the final backstop. Spreading load across several free tiers multiplies
+# effective free throughput and means a single provider's throttling is just
+# a fall-through, not a degrade-to-local.
+# -------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CloudProvider:
+    provider: Provider
+    base_url: str
+    api_key: str
+    model_name: str
+    # "json_schema" = strict structured output (Gemini, NVIDIA NIM).
+    # "json_object" = JSON syntax only; schema comes from the prompt + our
+    # Pydantic validation + fallback (Groq doesn't support json_schema).
+    structured_mode: str = "json_schema"
 
 
-def cloud_spec_for(tier: Tier) -> ModelSpec:
-    local = MODELS[tier]
-    return ModelSpec(
-        tier=tier,
-        model_name=CLOUD_MODEL_NAME,
-        context_limit=max(local.context_limit, 128_000),
-        temperature=local.temperature,
-        cost_per_1k_input=0.0,
-        cost_per_1k_output=0.0,
-        provider=Provider.GEMINI,
-    )
+def build_cloud_chain(env: dict) -> list[CloudProvider]:
+    """Assemble the ordered cloud chain from whichever keys are present.
+
+    Order = fastest-reliable first. Model per provider is overridable by env
+    (GEMINI_MODEL / GROQ_MODEL / NVIDIA_MODEL).
+    """
+    chain: list[CloudProvider] = []
+    if env.get("GEMINI_API_KEY"):
+        chain.append(CloudProvider(
+            Provider.GEMINI,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            env["GEMINI_API_KEY"],
+            env.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            "json_schema",
+        ))
+    # Note: the gsk_ key is Groq (groq.com), not xAI Grok.
+    if env.get("GROK_API_KEY") or env.get("GROQ_API_KEY"):
+        chain.append(CloudProvider(
+            Provider.GROQ,
+            "https://api.groq.com/openai/v1",
+            env.get("GROQ_API_KEY") or env["GROK_API_KEY"],
+            env.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "json_object",
+        ))
+    gh = env.get("GITHUB_MODELS_TOKEN") or env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
+    if gh:
+        chain.append(CloudProvider(
+            Provider.GITHUB,
+            env.get("GITHUB_MODELS_URL", "https://models.github.ai/inference"),
+            gh,
+            env.get("GITHUB_MODEL", "openai/gpt-4o-mini"),
+            "json_schema",
+        ))
+    # NVIDIA last among cloud — verified working with json_schema but slow
+    # (~17s), so it's the final cloud resort before local.
+    if env.get("NVA_API_KEY") or env.get("NVIDIA_API_KEY"):
+        chain.append(CloudProvider(
+            Provider.NVIDIA,
+            "https://integrate.api.nvidia.com/v1",
+            env.get("NVIDIA_API_KEY") or env["NVA_API_KEY"],
+            env.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct"),
+            "json_schema",
+        ))
+    return chain
 
 
 # -------------------------------------------------------------------------
@@ -220,18 +273,16 @@ class Router:
         ollama_url: str = "http://localhost:11434",
         langfuse_client=None,
         call_timeout_s: float = 300.0,
-        gemini_api_key: Optional[str] = None,
-        gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai",
+        cloud_chain: Optional[list[CloudProvider]] = None,
     ):
         self.pool = pool
         self.gpu_lock = gpu_lock
         self.ollama_url = ollama_url
         self.langfuse = langfuse_client if langfuse_client is not None else _maybe_langfuse()
-        # Cloud provider (Gemini). Enabled only when a key is present;
-        # otherwise every tier stays local exactly as before.
-        self.gemini_api_key = gemini_api_key
-        self.gemini_base_url = gemini_base_url.rstrip("/")
-        self.cloud_enabled = bool(gemini_api_key)
+        # Ordered cloud providers (empty → every tier stays local as before).
+        self.cloud_chain = cloud_chain or []
+        self._provider_cfg = {cp.provider: cp for cp in self.cloud_chain}
+        self.cloud_enabled = bool(self.cloud_chain)
         # Hard ceiling on a single model call. The GPU lock serializes calls,
         # so one hung Ollama request would otherwise hold the lock and wedge
         # the entire loop. wait_for cancels the call, releases the lock, and
@@ -382,11 +433,22 @@ class Router:
     # -- Provider dispatch + fallback ------------------------------------
 
     def _call_order(self, tier: Tier) -> list[ModelSpec]:
-        """Cloud first when enabled, local Ollama always as the tail fallback."""
+        """Cloud providers in chain order, then local Ollama as the backstop."""
         local = MODELS[tier]
-        if self.cloud_enabled:
-            return [cloud_spec_for(tier), local]
-        return [local]
+        specs = [
+            ModelSpec(
+                tier=tier,
+                model_name=cp.model_name,
+                context_limit=max(local.context_limit, 128_000),
+                temperature=local.temperature,
+                cost_per_1k_input=0.0,
+                cost_per_1k_output=0.0,
+                provider=cp.provider,
+            )
+            for cp in self.cloud_chain
+        ]
+        specs.append(local)
+        return specs
 
     async def _invoke_with_fallback(
         self,
@@ -428,7 +490,7 @@ class Router:
         assert last_err is not None
         raise last_err
 
-    # -- Cloud call (OpenAI-compatible: Gemini) --------------------------
+    # -- Cloud call (OpenAI-compatible: Gemini / Groq / NVIDIA / GitHub) --
 
     async def _call_openai_compatible(
         self,
@@ -436,6 +498,21 @@ class Router:
         system: str,
         schema: Type[BaseModel],
     ) -> tuple[str, int]:
+        cp = self._provider_cfg[model.provider]
+        if cp.structured_mode == "json_object":
+            # Schema lives in the prompt; we enforce "json" is mentioned so
+            # providers that require it (Groq) accept the request.
+            response_format = {"type": "json_object"}
+            system = (
+                system
+                + "\n\nReturn a single JSON object that conforms to this schema:\n"
+                + json.dumps(schema.model_json_schema())
+            )
+        else:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()},
+            }
         payload = {
             "model": model.model_name,
             "messages": [
@@ -443,17 +520,11 @@ class Router:
                 {"role": "user", "content": "Respond now with the JSON object."},
             ],
             "temperature": model.temperature,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": schema.__name__,
-                    "schema": schema.model_json_schema(),
-                },
-            },
+            "response_format": response_format,
         }
         resp = await self._http.post(
-            f"{self.gemini_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.gemini_api_key}"},
+            f"{cp.base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {cp.api_key}"},
             json=payload,
         )
         resp.raise_for_status()

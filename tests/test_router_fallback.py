@@ -11,7 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from boardroom.harness.router import (
-    GPULock, Provider, Router, Tier,
+    CloudProvider, GPULock, Provider, Router, Tier,
 )
 
 
@@ -20,7 +20,11 @@ class _Out(BaseModel):
 
 
 def _router(cloud: bool = True) -> Router:
-    return Router(pool=None, gpu_lock=GPULock(), gemini_api_key=("key" if cloud else None))
+    chain = (
+        [CloudProvider(Provider.GEMINI, "http://example", "key", "test-model", "json_schema")]
+        if cloud else []
+    )
+    return Router(pool=None, gpu_lock=GPULock(), cloud_chain=chain)
 
 
 @pytest.mark.asyncio
