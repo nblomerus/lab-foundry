@@ -25,7 +25,7 @@ import httpx
 
 from boardroom.harness.curator import Curator
 from boardroom.harness.dispatch import Dispatcher
-from boardroom.harness.router import GPULock, Router, build_cloud_chain
+from boardroom.harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
 from boardroom.state.client import PostgresClient
 from boardroom.memory.client import ZepClient
 from boardroom.skills.client import LessonsClient
@@ -105,14 +105,18 @@ async def main() -> int:
     max_concurrent = int(os.environ.get("MAX_CONCURRENT_HANDLERS", "4"))
     gpu_call_timeout = float(os.environ.get("GPU_CALL_TIMEOUT_S", "300"))
     cloud_chain = build_cloud_chain(os.environ)
+    premium_chain = build_premium_chain(os.environ)
 
     log.info("starting harness")
     log.info("  db=%s", db_url)
     log.info("  ollama=%s", ollama_url)
     log.info("  max_concurrent_handlers=%d", max_concurrent)
     log.info("  gpu_call_timeout_s=%.0f", gpu_call_timeout)
+    if premium_chain:
+        log.info("  premium (reasoning): %s → free chain", " → ".join(
+            f"{cp.provider.value}({cp.model_name})" for cp in premium_chain))
     if cloud_chain:
-        log.info("  cloud chain: %s → local", " → ".join(
+        log.info("  free chain: %s → local", " → ".join(
             f"{cp.provider.value}({cp.model_name})" for cp in cloud_chain))
     else:
         log.info("  cloud chain: (none — all-local)")
@@ -147,7 +151,8 @@ async def main() -> int:
     curator    = Curator(state=state, memory=memory, lessons=lessons)
     gpu_lock   = GPULock()
     router     = Router(pool=pool, gpu_lock=gpu_lock, ollama_url=ollama_url,
-                        call_timeout_s=gpu_call_timeout, cloud_chain=cloud_chain)
+                        call_timeout_s=gpu_call_timeout, cloud_chain=cloud_chain,
+                        premium_chain=premium_chain)
     dispatcher = Dispatcher(pool=pool, max_concurrent_handlers=max_concurrent)
 
     # Attach clients so handlers can reach them via the dispatcher param

@@ -104,6 +104,42 @@ async def test_no_key_means_local_only():
 
 
 @pytest.mark.asyncio
+async def test_premium_tier_leads_with_premium_chain():
+    free = [CloudProvider(Provider.GROQ, "http://g", "k", "llama", "json_object")]
+    premium = [CloudProvider(Provider.OPENAI, "http://o", "k", "gpt-5.5", "json_schema", False)]
+    r = Router(pool=None, gpu_lock=GPULock(), cloud_chain=free, premium_chain=premium)
+    # Reasoning (premium tier): OpenAI leads, then free, then local.
+    reasoning = [s.provider for s in r._call_order(Tier.REASONING)]
+    assert reasoning == [Provider.OPENAI, Provider.GROQ, Provider.OLLAMA]
+    # Non-premium tier: free chain only, no premium lead.
+    fast = [s.provider for s in r._call_order(Tier.FAST)]
+    assert fast == [Provider.GROQ, Provider.OLLAMA]
+
+
+@pytest.mark.asyncio
+async def test_openai_premium_omits_temperature_for_gpt5():
+    # send_temperature=False → the cloud call must not include temperature.
+    premium = [CloudProvider(Provider.OPENAI, "http://o", "k", "gpt-5.5", "json_schema", False)]
+    r = Router(pool=None, gpu_lock=GPULock(), cloud_chain=[], premium_chain=premium)
+    captured = {}
+
+    async def fake_post(url, headers=None, json=None):
+        captured["payload"] = json
+        class _R:
+            status_code = 200
+            def raise_for_status(self): ...
+            def json(self_inner):
+                return {"choices": [{"message": {"content": '{"x": 1}'}}], "usage": {"completion_tokens": 1}}
+        return _R()
+
+    r._http.post = fake_post  # type: ignore[method-assign]
+    spec = r._call_order(Tier.REASONING)[0]
+    assert spec.provider == Provider.OPENAI
+    await r._call_openai_compatible(spec, "sys", _Out)
+    assert "temperature" not in captured["payload"], "gpt-5.x must not receive temperature"
+
+
+@pytest.mark.asyncio
 async def test_all_candidates_fail_raises_last_error():
     r = _router(cloud=True)
 

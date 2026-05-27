@@ -65,6 +65,7 @@ class Provider(enum.Enum):
     GROQ   = "groq"     # Groq LPU (fast open models), OpenAI-compatible
     NVIDIA = "nvidia"   # NVIDIA NIM catalog, OpenAI-compatible
     GITHUB = "github"   # GitHub Models (GPT-4o, Llama, …), OpenAI-compatible
+    OPENAI = "openai"   # OpenAI direct (personal key, paid) — premium tier only
 
 
 @dataclass(frozen=True)
@@ -132,10 +133,13 @@ class CloudProvider:
     base_url: str
     api_key: str
     model_name: str
-    # "json_schema" = strict structured output (Gemini, NVIDIA NIM).
+    # "json_schema" = strict structured output (Gemini, NVIDIA NIM, OpenAI).
     # "json_object" = JSON syntax only; schema comes from the prompt + our
     # Pydantic validation + fallback (Groq doesn't support json_schema).
     structured_mode: str = "json_schema"
+    # GPT-5.x / o-series reasoning models reject a custom temperature; omit it
+    # for those so the request isn't rejected.
+    send_temperature: bool = True
 
 
 def build_cloud_chain(env: dict) -> list[CloudProvider]:
@@ -179,6 +183,45 @@ def build_cloud_chain(env: dict) -> list[CloudProvider]:
             "https://integrate.api.nvidia.com/v1",
             env.get("NVIDIA_API_KEY") or env["NVA_API_KEY"],
             env.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct"),
+            "json_schema",
+        ))
+    return chain
+
+
+# Tiers important enough to lead with premium models (paid OpenAI / full
+# GPT-4o) before the free chain. These are the company's highest-stakes,
+# lowest-volume decisions, so the cost is trivial and the quality matters.
+PREMIUM_TIERS = {Tier.REASONING}
+
+
+def build_premium_chain(env: dict) -> list[CloudProvider]:
+    """Quality-first leads for PREMIUM_TIERS, tried before the free chain.
+
+    OpenAI direct (personal key) is preferred; GitHub's full gpt-4o is the
+    next-best that works on the free tier, so the chain still delivers a
+    frontier-class model even before OpenAI billing is set up.
+    """
+    chain: list[CloudProvider] = []
+    if env.get("OPENAI_API_KEY"):
+        model = env.get("OPENAI_MODEL", "gpt-5.5")
+        # GPT-5.x / o-series reject custom temperature; only classic chat
+        # models (gpt-4o, gpt-4.1, …) accept it.
+        send_temp = not (model.startswith(("gpt-5", "o1", "o3", "o4")))
+        chain.append(CloudProvider(
+            Provider.OPENAI,
+            "https://api.openai.com/v1",
+            env["OPENAI_API_KEY"],
+            model,
+            "json_schema",
+            send_temp,
+        ))
+    gh = env.get("GITHUB_MODELS_TOKEN") or env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
+    if gh:
+        chain.append(CloudProvider(
+            Provider.GITHUB,
+            env.get("GITHUB_MODELS_URL", "https://models.github.ai/inference"),
+            gh,
+            env.get("GITHUB_PREMIUM_MODEL", "openai/gpt-4o"),  # full gpt-4o, not mini
             "json_schema",
         ))
     return chain
@@ -274,15 +317,20 @@ class Router:
         langfuse_client=None,
         call_timeout_s: float = 300.0,
         cloud_chain: Optional[list[CloudProvider]] = None,
+        premium_chain: Optional[list[CloudProvider]] = None,
     ):
         self.pool = pool
         self.gpu_lock = gpu_lock
         self.ollama_url = ollama_url
         self.langfuse = langfuse_client if langfuse_client is not None else _maybe_langfuse()
-        # Ordered cloud providers (empty → every tier stays local as before).
+        # Free cloud providers (all tiers); premium leads (PREMIUM_TIERS only).
         self.cloud_chain = cloud_chain or []
-        self._provider_cfg = {cp.provider: cp for cp in self.cloud_chain}
-        self.cloud_enabled = bool(self.cloud_chain)
+        self.premium_chain = premium_chain or []
+        # Connection lookup by provider. Same-provider entries (e.g. GitHub
+        # mini vs full) share base_url/key, so a single cfg per provider is
+        # correct — the model name lives on the per-call ModelSpec.
+        self._provider_cfg = {cp.provider: cp for cp in (self.cloud_chain + self.premium_chain)}
+        self.cloud_enabled = bool(self.cloud_chain or self.premium_chain)
         # Hard ceiling on a single model call. The GPU lock serializes calls,
         # so one hung Ollama request would otherwise hold the lock and wedge
         # the entire loop. wait_for cancels the call, releases the lock, and
@@ -433,8 +481,14 @@ class Router:
     # -- Provider dispatch + fallback ------------------------------------
 
     def _call_order(self, tier: Tier) -> list[ModelSpec]:
-        """Cloud providers in chain order, then local Ollama as the backstop."""
+        """Premium leads (for PREMIUM_TIERS) → free cloud chain → local.
+
+        A provider can legitimately appear twice (GitHub full gpt-4o in the
+        premium lead, gpt-4o-mini in the free chain) — different models, same
+        connection — so we don't dedupe by provider.
+        """
         local = MODELS[tier]
+        chain = (self.premium_chain if tier in PREMIUM_TIERS else []) + self.cloud_chain
         specs = [
             ModelSpec(
                 tier=tier,
@@ -445,7 +499,7 @@ class Router:
                 cost_per_1k_output=0.0,
                 provider=cp.provider,
             )
-            for cp in self.cloud_chain
+            for cp in chain
         ]
         specs.append(local)
         return specs
@@ -519,9 +573,10 @@ class Router:
                 {"role": "system", "content": system},
                 {"role": "user", "content": "Respond now with the JSON object."},
             ],
-            "temperature": model.temperature,
             "response_format": response_format,
         }
+        if cp.send_temperature:
+            payload["temperature"] = model.temperature
         resp = await self._http.post(
             f"{cp.base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {cp.api_key}"},
