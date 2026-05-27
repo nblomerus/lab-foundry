@@ -79,6 +79,7 @@ const fakeSnapshot: Snapshot = {
     findings_today: 0, high_signal_today: 0, slop_today: 0,
     failed_runs_today: 0, schema_failures_today: 0,
     source_hn_in_flight: 0, source_reddit_in_flight: 0, source_web_in_flight: 0,
+    last_activity_at: null,
   },
   edge_activity: [],
   langfuse_host: null,

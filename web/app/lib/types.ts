@@ -132,6 +132,7 @@ export interface Stats {
   source_hn_in_flight: number;
   source_reddit_in_flight: number;
   source_web_in_flight: number;
+  last_activity_at: string | null;
 }
 
 export interface EdgeActivity {

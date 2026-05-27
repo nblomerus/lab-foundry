@@ -78,7 +78,11 @@ export default function CommandCenter() {
       <StatsGrid stats={snap.stats} activeTheses={snap.state.active_thesis_count} />
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <WorkflowLoop roles={snap.org_roles} latestEventType={latestEventType} />
+        <WorkflowLoop
+          roles={snap.org_roles}
+          latestEventType={latestEventType}
+          lastActivityAt={snap.stats.last_activity_at}
+        />
         <DissentPanel items={snap.dissent} />
 
         <ThesesPanel theses={snap.active_theses} />

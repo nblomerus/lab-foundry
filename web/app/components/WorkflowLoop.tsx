@@ -2,10 +2,10 @@
 
 import { motion } from "framer-motion";
 import {
+  AlertTriangle,
   ArrowRight,
   BrainCircuit,
   ChevronRight,
-  CircleDot,
   GitBranch,
   Layers3,
   Search,
@@ -14,7 +14,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { OrgRole } from "../lib/types";
-import { Badge, Card, SectionTitle, Progress } from "./ui";
+import { Badge, Card, SectionTitle, Progress, cx } from "./ui";
 
 interface AgentSpec {
   key: string;             // matches OrgRole.role
@@ -137,15 +137,43 @@ function AgentNode({ spec, role, index }: { spec: AgentSpec; role?: OrgRole; ind
   );
 }
 
+type Liveness = {
+  state: "live" | "quiet" | "stalled" | "never";
+  ago: string;
+};
+
+function humanizeAgo(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function computeLiveness(lastActivityAt: string | null | undefined): Liveness {
+  if (!lastActivityAt) return { state: "never", ago: "never" };
+  const elapsed = Date.now() - new Date(lastActivityAt).getTime();
+  const ago = humanizeAgo(elapsed);
+  // < 3 min: live. 3–20 min: quiet. > 20 min: stalled.
+  if (elapsed < 3 * 60_000) return { state: "live", ago };
+  if (elapsed < 20 * 60_000) return { state: "quiet", ago };
+  return { state: "stalled", ago };
+}
+
 export function WorkflowLoop({
   roles,
   latestEventType,
+  lastActivityAt,
 }: {
   roles: OrgRole[];
   latestEventType?: string;
+  lastActivityAt?: string | null;
 }) {
   const byRole = new Map(roles.map((r) => [r.role, r]));
   const get = (k: string) => byRole.get(k);
+  const live = computeLiveness(lastActivityAt);
 
   return (
     <Card className="lg:col-span-8">
@@ -153,7 +181,22 @@ export function WorkflowLoop({
         icon={Layers3}
         title="Autonomous company loop"
         subtitle="Strategic → Tactical → Execution, with critics gating every output."
-        action={<Badge tone="dark">No human in loop</Badge>}
+        action={
+          <div className="flex items-center gap-2">
+            <Badge tone={
+              live.state === "live" ? "green"
+              : live.state === "quiet" ? "amber"
+              : live.state === "stalled" || live.state === "never" ? "red"
+              : "default"
+            }>
+              {live.state === "live" ? "live"
+              : live.state === "quiet" ? `quiet · ${live.ago}`
+              : live.state === "never" ? "never run"
+              : `stalled · ${live.ago}`}
+            </Badge>
+            <Badge tone="dark">No human in loop</Badge>
+          </div>
+        }
       />
 
       <div className="grid gap-4 md:grid-cols-3">
@@ -175,17 +218,50 @@ export function WorkflowLoop({
         ))}
       </div>
 
-      <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-950 p-4 text-white">
+      <div
+        className={cx(
+          "mt-5 rounded-3xl border p-4 text-white",
+          live.state === "stalled" || live.state === "never"
+            ? "border-amber-400/60 bg-slate-950 ring-1 ring-amber-400/40"
+            : "border-slate-200 bg-slate-950",
+        )}
+      >
         <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold">
-              <CircleDot className="h-4 w-4" />
-              {latestEventType
-                ? <>Latest event: <span className="font-mono">{latestEventType}</span></>
-                : <>Loop alive — events stream to the right.</>}
+              {live.state === "stalled" || live.state === "never" ? (
+                <>
+                  <AlertTriangle className="h-4 w-4 text-amber-400" />
+                  <span className="text-amber-300">
+                    {live.state === "never"
+                      ? "No activity yet — the loop has never run."
+                      : `Stalled — last activity ${live.ago}.`}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className={cx(
+                      "absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
+                      live.state === "live" ? "bg-emerald-400" : "bg-amber-400",
+                    )} />
+                    <span className={cx(
+                      "relative inline-flex h-2.5 w-2.5 rounded-full",
+                      live.state === "live" ? "bg-emerald-500" : "bg-amber-500",
+                    )} />
+                  </span>
+                  {latestEventType
+                    ? <>Latest event: <span className="font-mono">{latestEventType}</span></>
+                    : live.state === "live"
+                      ? <>Live — last activity {live.ago}.</>
+                      : <>Quiet — last activity {live.ago}.</>}
+                </>
+              )}
             </div>
             <p className="mt-1 max-w-2xl text-sm text-slate-300">
-              Findings get audited, kills get reviewed, phases transition on data. The Adjudicator decides; the CEO ratifies; you watch.
+              {live.state === "stalled"
+                ? "The autonomous loop isn't producing events. The harness may be down or wedged — restart it (make harness) to re-ignite."
+                : "Findings get audited, kills get reviewed, phases transition on data. The Adjudicator decides; the CEO ratifies; you watch."}
             </p>
           </div>
           <a
