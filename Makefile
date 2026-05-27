@@ -47,7 +47,7 @@ PYTHON_VERSION  = 3.11
 PYENV_NAME      = boardroom
 
 API_PORT       ?= 8503
-WEB_PORT       ?= 3000
+WEB_PORT       ?= 8088
 
 # System Node is too old; use the nvm-installed Node 20 for the web app.
 NODE_BIN       ?= /home/nicholas/.nvm/versions/node/v20.20.2/bin
@@ -138,6 +138,8 @@ harness:
 
 api:
 	$(VENV_PYTHON) -m uvicorn boardroom.api.main:app --host 0.0.0.0 --port $(API_PORT) --reload
+
+.PHONY: web web-install dev api harness bootstrap
 
 web-install:
 	cd web && $(WEB_ENV) npm install

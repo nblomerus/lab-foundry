@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BrainCircuit, Eye, Layers3, Target, TerminalSquare, Play } from "lucide-react";
+import { BrainCircuit, Eye, GitBranch, Layers3, Target, TerminalSquare, Play } from "lucide-react";
 import { cx } from "./ui";
 
 const NAV = [
   { href: "/",       icon: Target,         label: "Command" },
+  { href: "/flow",   icon: GitBranch,      label: "Flow" },
   { href: "/theses", icon: Layers3,        label: "Theses" },
   { href: "/events", icon: TerminalSquare, label: "Events" },
   { href: "/org",    icon: Eye,            label: "Org" },
