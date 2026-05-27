@@ -58,23 +58,28 @@ class Tier(enum.Enum):
     CODE      = "code"
 
 
+class Provider(enum.Enum):
+    OLLAMA = "ollama"   # local, serialized behind the GPU lock
+    GEMINI = "gemini"   # cloud, OpenAI-compatible endpoint, no GPU lock
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     tier: Tier
-    ollama_name: str
+    model_name: str
     context_limit: int
     temperature: float
-    cost_per_1k_input: float    # for future hybrid cloud
+    cost_per_1k_input: float
     cost_per_1k_output: float
+    provider: Provider = Provider.OLLAMA
 
 
+# Local models (the fallback layer). Used when the cloud provider is
+# disabled (no key) or fails / is rate-limited.
 MODELS: dict[Tier, ModelSpec] = {
-    # Pragmatic v1 mapping to models already pulled on this system.
-    # Better choices when you have time to pull: deepseek-r1 for reasoning,
-    # qwen3-coder:30b for code, glm-4.7-flash for workhorse.
     Tier.REASONING: ModelSpec(
         tier=Tier.REASONING,
-        ollama_name="deepseek-r1:32b-qwen-distill-q4_K_M",
+        model_name="deepseek-r1:32b-qwen-distill-q4_K_M",
         context_limit=16_000,
         temperature=0.3,
         cost_per_1k_input=0.0,
@@ -82,7 +87,7 @@ MODELS: dict[Tier, ModelSpec] = {
     ),
     Tier.WORKHORSE: ModelSpec(
         tier=Tier.WORKHORSE,
-        ollama_name="qwen3:14b",
+        model_name="qwen3:14b",
         context_limit=32_000,
         temperature=0.4,
         cost_per_1k_input=0.0,
@@ -90,7 +95,7 @@ MODELS: dict[Tier, ModelSpec] = {
     ),
     Tier.FAST: ModelSpec(
         tier=Tier.FAST,
-        ollama_name="mistral:7b-instruct-q4_K_M",
+        model_name="mistral:7b-instruct-q4_K_M",
         context_limit=8_000,
         temperature=0.2,
         cost_per_1k_input=0.0,
@@ -98,13 +103,32 @@ MODELS: dict[Tier, ModelSpec] = {
     ),
     Tier.CODE: ModelSpec(
         tier=Tier.CODE,
-        ollama_name="qwen2.5:14b-instruct-q4_K_M",
+        model_name="qwen2.5:14b-instruct-q4_K_M",
         context_limit=32_000,
         temperature=0.2,
         cost_per_1k_input=0.0,
         cost_per_1k_output=0.0,
     ),
 }
+
+# Cloud model. One frontier-class model serves every tier; it's preferred
+# over local when a key is configured, with local as the automatic fallback
+# on rate-limit / error / unparseable output. Free tier → $0 cost. Tier-
+# specific temperature is reused from the local spec so behaviour matches.
+CLOUD_MODEL_NAME = os.environ.get("CLOUD_MODEL", "gemini-2.5-flash")
+
+
+def cloud_spec_for(tier: Tier) -> ModelSpec:
+    local = MODELS[tier]
+    return ModelSpec(
+        tier=tier,
+        model_name=CLOUD_MODEL_NAME,
+        context_limit=max(local.context_limit, 128_000),
+        temperature=local.temperature,
+        cost_per_1k_input=0.0,
+        cost_per_1k_output=0.0,
+        provider=Provider.GEMINI,
+    )
 
 
 # -------------------------------------------------------------------------
@@ -196,11 +220,18 @@ class Router:
         ollama_url: str = "http://localhost:11434",
         langfuse_client=None,
         call_timeout_s: float = 300.0,
+        gemini_api_key: Optional[str] = None,
+        gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai",
     ):
         self.pool = pool
         self.gpu_lock = gpu_lock
         self.ollama_url = ollama_url
         self.langfuse = langfuse_client if langfuse_client is not None else _maybe_langfuse()
+        # Cloud provider (Gemini). Enabled only when a key is present;
+        # otherwise every tier stays local exactly as before.
+        self.gemini_api_key = gemini_api_key
+        self.gemini_base_url = gemini_base_url.rstrip("/")
+        self.cloud_enabled = bool(gemini_api_key)
         # Hard ceiling on a single model call. The GPU lock serializes calls,
         # so one hung Ollama request would otherwise hold the lock and wedge
         # the entire loop. wait_for cancels the call, releases the lock, and
@@ -238,7 +269,9 @@ class Router:
                 tier = fallback
                 downgraded = True
 
-        model = MODELS[tier]
+        # Ordered candidates: cloud first (if enabled), local as fallback.
+        specs = self._call_order(tier)
+        primary = specs[0]
         system_text = prompt.as_system_message()
         if downgraded and tier == Tier.WORKHORSE:
             system_text += (
@@ -258,8 +291,8 @@ class Router:
                 lf_span = self.langfuse.start_observation(
                     name=invocation_type,
                     as_type="generation",
-                    model=model.ollama_name,
-                    model_parameters={"temperature": model.temperature},
+                    model=primary.model_name,
+                    model_parameters={"temperature": primary.temperature},
                     input={
                         "layers":       [l.name for l in prompt.layers],
                         "input_tokens": prompt.total_tokens,
@@ -285,21 +318,14 @@ class Router:
                 RETURNING id
                 """,
                 agent_name, agent_name, invocation_type,
-                tier.value, model.ollama_name, triggered_by_event_id,
+                tier.value, primary.model_name, triggered_by_event_id,
                 prompt.total_tokens, trace_id,
             )
 
         try:
-            async with self.gpu_lock.acquire(model.ollama_name):
-                output_text, out_tokens = await asyncio.wait_for(
-                    self._call_ollama(
-                        model=model,
-                        system=system_text,
-                        schema=output_schema_class,
-                    ),
-                    timeout=self.call_timeout_s,
-                )
-            parsed = output_schema_class.model_validate_json(output_text)
+            parsed, output_text, out_tokens, used = await self._invoke_with_fallback(
+                specs, system_text, output_schema_class,
+            )
 
             if lf_span:
                 try:
@@ -318,10 +344,12 @@ class Router:
                         UPDATE agent_runs
                         SET completed_at = NOW(),
                             status = 'completed',
-                            output_token_count = $1,
-                            output_summary = $2
-                        WHERE id = $3
+                            model_name = $1,
+                            output_token_count = $2,
+                            output_summary = $3
+                        WHERE id = $4
                         """,
+                        used.model_name,   # the model that actually produced output
                         out_tokens,
                         self._summarize(parsed),
                         run_id,
@@ -351,6 +379,89 @@ class Router:
                 )
             raise
 
+    # -- Provider dispatch + fallback ------------------------------------
+
+    def _call_order(self, tier: Tier) -> list[ModelSpec]:
+        """Cloud first when enabled, local Ollama always as the tail fallback."""
+        local = MODELS[tier]
+        if self.cloud_enabled:
+            return [cloud_spec_for(tier), local]
+        return [local]
+
+    async def _invoke_with_fallback(
+        self,
+        specs: list[ModelSpec],
+        system: str,
+        schema_cls: Type[BaseModel],
+    ) -> tuple[BaseModel, str, int, ModelSpec]:
+        """
+        Try each candidate in order until one returns schema-valid JSON.
+        A rate-limit, timeout, transport error, OR unparseable output all
+        trigger the next candidate (so a flaky cloud model degrades to local
+        rather than failing the run). Raises the last error if all fail.
+        """
+        last_err: Optional[Exception] = None
+        for i, spec in enumerate(specs):
+            try:
+                if spec.provider == Provider.OLLAMA:
+                    # Local calls serialize on the single GPU.
+                    async with self.gpu_lock.acquire(spec.model_name):
+                        text, toks = await asyncio.wait_for(
+                            self._call_ollama(spec, system, schema_cls),
+                            timeout=self.call_timeout_s,
+                        )
+                else:
+                    # Cloud calls are remote — no GPU lock; they can overlap.
+                    text, toks = await asyncio.wait_for(
+                        self._call_openai_compatible(spec, system, schema_cls),
+                        timeout=self.call_timeout_s,
+                    )
+                parsed = schema_cls.model_validate_json(text)
+                return parsed, text, toks, spec
+            except Exception as e:  # noqa: BLE001 — any failure → next candidate
+                last_err = e
+                if i + 1 < len(specs):
+                    log.warning(
+                        "model %s (%s) failed (%s); falling back to %s",
+                        spec.model_name, spec.provider.value, e, specs[i + 1].model_name,
+                    )
+        assert last_err is not None
+        raise last_err
+
+    # -- Cloud call (OpenAI-compatible: Gemini) --------------------------
+
+    async def _call_openai_compatible(
+        self,
+        model: ModelSpec,
+        system: str,
+        schema: Type[BaseModel],
+    ) -> tuple[str, int]:
+        payload = {
+            "model": model.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": "Respond now with the JSON object."},
+            ],
+            "temperature": model.temperature,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.__name__,
+                    "schema": schema.model_json_schema(),
+                },
+            },
+        }
+        resp = await self._http.post(
+            f"{self.gemini_base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.gemini_api_key}"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        out_tokens = (data.get("usage") or {}).get("completion_tokens", 0)
+        return content, out_tokens
+
     # -- Ollama call ------------------------------------------------------
 
     async def _call_ollama(
@@ -360,7 +471,7 @@ class Router:
         schema: Type[BaseModel],
     ) -> tuple[str, int]:
         payload = {
-            "model": model.ollama_name,
+            "model": model.model_name,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": "Respond now with the JSON object."},
