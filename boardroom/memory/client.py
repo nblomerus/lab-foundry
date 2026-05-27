@@ -23,6 +23,19 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 
+def _coerce_dt(value) -> datetime:
+    """Zep v3 returns created_at as an ISO string; downstream code (the
+    curator's recall formatting) expects a real datetime. Normalize both."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
 @dataclass
 class RecalledMessage:
     """Decoupled from Zep types so the rest of the harness can swap providers."""
@@ -141,7 +154,7 @@ class ZepClient:
         return [
             RecalledMessage(
                 content=m.content or "",
-                created_at=getattr(m, "created_at", None) or datetime.now(timezone.utc),
+                created_at=_coerce_dt(getattr(m, "created_at", None)),
                 role_type=getattr(m, "name", None) or getattr(m, "role", None) or "agent",
                 uuid=getattr(m, "uuid_", None) or "",
             )
@@ -173,7 +186,7 @@ class ZepClient:
         for ep in (getattr(result, "episodes", None) or []):
             out.append(RecalledMessage(
                 content=getattr(ep, "content", None) or "",
-                created_at=getattr(ep, "created_at", None) or datetime.now(timezone.utc),
+                created_at=_coerce_dt(getattr(ep, "created_at", None)),
                 role_type=getattr(ep, "role_type", None) or getattr(ep, "role", None) or "agent",
                 uuid=getattr(ep, "uuid_", None) or "",
                 relevance=getattr(ep, "score", None),
