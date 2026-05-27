@@ -126,8 +126,19 @@ export interface Stats {
   running_tasks: number;
   findings_today: number;
   high_signal_today: number;
+  slop_today: number;
   failed_runs_today: number;
   schema_failures_today: number;
+  source_hn_in_flight: number;
+  source_reddit_in_flight: number;
+  source_web_in_flight: number;
+}
+
+export interface EdgeActivity {
+  event_type: string;
+  count_last_minute: number;
+  count_today: number;
+  last_fired_at: string | null;
 }
 
 export interface Snapshot {
@@ -144,6 +155,7 @@ export interface Snapshot {
   telemetry: TelemetryDay[];
   task_counts: TaskCount[];
   stats: Stats;
+  edge_activity: EdgeActivity[];
   langfuse_host: string | null;
 }
 

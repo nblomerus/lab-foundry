@@ -157,8 +157,21 @@ class StatsOut(BaseModel):
     running_tasks: int
     findings_today: int
     high_signal_today: int
+    slop_today: int
     failed_runs_today: int
     schema_failures_today: int
+    # Per-source activity: how many running research tasks currently list each source
+    source_hn_in_flight: int
+    source_reddit_in_flight: int
+    source_web_in_flight: int
+
+
+class EdgeActivity(BaseModel):
+    """Per-event-type activity stats for the live flow page."""
+    event_type: str
+    count_last_minute: int
+    count_today: int
+    last_fired_at: Optional[datetime]
 
 
 class SnapshotOut(BaseModel):
@@ -175,4 +188,5 @@ class SnapshotOut(BaseModel):
     telemetry: list[TelemetryDay]
     task_counts: list[TaskCount]
     stats: StatsOut
+    edge_activity: list[EdgeActivity] = []
     langfuse_host: Optional[str] = None

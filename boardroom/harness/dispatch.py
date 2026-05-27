@@ -301,6 +301,19 @@ class Dispatcher:
               AND started_at < NOW() - INTERVAL '30 minutes'
             """
         )
+        # Same idea for agent_runs: rows left in 'running' past the wall-clock
+        # cap belong to processes that died. Mark them failed so the dashboard
+        # doesn't lie about "in flight" counts.
+        await conn.execute(
+            """
+            UPDATE agent_runs
+            SET status = 'failed',
+                completed_at = NOW(),
+                error = COALESCE(error, '') || ' [orphan reaped by watchdog]'
+            WHERE status = 'running'
+              AND started_at < NOW() - INTERVAL '30 minutes'
+            """
+        )
 
     async def _sweep_pending_events(self, conn) -> None:
         rows = await conn.fetch(

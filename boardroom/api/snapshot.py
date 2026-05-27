@@ -12,7 +12,7 @@ from fastapi import APIRouter, Request
 
 from boardroom.api.models import (
     AgentRunOut, CompanyStateOut, CostTrackingOut, DissentItem,
-    EventOut, FindingOut, LessonOut, OrgRoleOut,
+    EdgeActivity, EventOut, FindingOut, LessonOut, OrgRoleOut,
     PhaseTransitionOut, SnapshotOut, StatsOut, TaskCount,
     TelemetryDay, ThesisOut,
 )
@@ -220,11 +220,12 @@ async def _org(pool: asyncpg.Pool) -> list[OrgRoleOut]:
             """
             SELECT
               department AS role,
-              COUNT(*) FILTER (WHERE status = 'running')  AS running_count,
-              MAX(started_at)                              AS last_run_at,
-              COUNT(*) FILTER (WHERE started_at::date = CURRENT_DATE) AS runs_today,
+              COUNT(*) FILTER (WHERE status = 'running')                       AS running_count,
+              MAX(started_at)                                                  AS last_run_at,
+              COUNT(*) FILTER (WHERE started_at > NOW() - INTERVAL '24 hours') AS runs_today,
               AVG(EXTRACT(EPOCH FROM (completed_at - started_at)))
-                  FILTER (WHERE completed_at IS NOT NULL)  AS avg_duration_s
+                  FILTER (WHERE completed_at IS NOT NULL
+                          AND started_at > NOW() - INTERVAL '24 hours')        AS avg_duration_s
             FROM agent_runs
             GROUP BY department
             """
@@ -310,23 +311,78 @@ async def _task_counts(pool: asyncpg.Pool) -> list[TaskCount]:
 
 
 async def _stats(pool: asyncpg.Pool) -> StatsOut:
+    # "today" = last 24h, not the calendar day. Calendar day flips at midnight
+    # UTC and instantly hides everything from the last few hours, which is not
+    # what a dashboard user wants.
     async with pool.acquire() as c:
         row = await c.fetchrow(
             """
             SELECT
               (SELECT COUNT(*) FROM tasks WHERE status = 'pending')                       AS pending_tasks,
               (SELECT COUNT(*) FROM tasks WHERE status = 'running')                       AS running_tasks,
-              (SELECT COUNT(*) FROM findings WHERE created_at::date = CURRENT_DATE
-                 AND COALESCE(audit_verdict,'') != 'stale')                               AS findings_today,
-              (SELECT COUNT(*) FROM findings WHERE created_at::date = CURRENT_DATE
-                 AND audit_verdict = 'pass' AND relevance_score >= 8)                     AS high_signal_today,
-              (SELECT COUNT(*) FROM agent_runs WHERE status = 'failed'
-                 AND started_at::date = CURRENT_DATE)                                     AS failed_runs_today,
-              (SELECT COUNT(*) FROM events WHERE status = 'failed'
-                 AND emitted_at::date = CURRENT_DATE)                                     AS schema_failures_today
+              (SELECT COUNT(*) FROM findings
+                 WHERE created_at > NOW() - INTERVAL '24 hours'
+                   AND COALESCE(audit_verdict,'') != 'stale')                             AS findings_today,
+              (SELECT COUNT(*) FROM findings
+                 WHERE created_at > NOW() - INTERVAL '24 hours'
+                   AND audit_verdict = 'pass' AND relevance_score >= 8)                   AS high_signal_today,
+              (SELECT COUNT(*) FROM findings
+                 WHERE created_at > NOW() - INTERVAL '24 hours'
+                   AND audit_verdict = 'slop')                                            AS slop_today,
+              (SELECT COUNT(*) FROM agent_runs
+                 WHERE status = 'failed'
+                   AND started_at > NOW() - INTERVAL '24 hours')                          AS failed_runs_today,
+              (SELECT COUNT(*) FROM events
+                 WHERE status = 'failed'
+                   AND emitted_at > NOW() - INTERVAL '24 hours')                          AS schema_failures_today,
+              (SELECT COUNT(*) FROM tasks
+                 WHERE status = 'running' AND department = 'research'
+                   AND payload->'sources' ? 'hacker_news')                                AS source_hn_in_flight,
+              (SELECT COUNT(*) FROM tasks
+                 WHERE status = 'running' AND department = 'research'
+                   AND payload->'sources' ? 'reddit')                                     AS source_reddit_in_flight,
+              (SELECT COUNT(*) FROM tasks
+                 WHERE status = 'running' AND department = 'research'
+                   AND payload->'sources' ? 'web')                                        AS source_web_in_flight
             """
         )
     return StatsOut(**dict(row))
+
+
+async def _edge_activity(pool: asyncpg.Pool) -> list[EdgeActivity]:
+    """Aggregate events of interest for the live-flow page."""
+    interesting = [
+        "task.created", "task.completed",
+        "finding.high_signal", "thesis.invalidated", "thesis.created",
+        "thesis.confidence_changed",
+        "phase.transition_proposed", "phase.budget_exceeded",
+        "queue.empty", "audit.slop_detected",
+    ]
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            """
+            SELECT
+              event_type,
+              COUNT(*) FILTER (WHERE emitted_at > NOW() - INTERVAL '1 minute')  AS count_last_minute,
+              COUNT(*) FILTER (WHERE emitted_at > NOW() - INTERVAL '24 hours') AS count_today,
+              MAX(emitted_at)                                                  AS last_fired_at
+            FROM events
+            WHERE event_type = ANY($1::text[])
+            GROUP BY event_type
+            """,
+            interesting,
+        )
+    by_type = {r["event_type"]: r for r in rows}
+    out: list[EdgeActivity] = []
+    for et in interesting:
+        r = by_type.get(et)
+        out.append(EdgeActivity(
+            event_type=et,
+            count_last_minute=int(r["count_last_minute"]) if r else 0,
+            count_today=int(r["count_today"]) if r else 0,
+            last_fired_at=r["last_fired_at"] if r else None,
+        ))
+    return out
 
 
 # =========================================================================
@@ -339,7 +395,7 @@ async def snapshot(request: Request) -> SnapshotOut:
     pool: asyncpg.Pool = request.app.state.pool
     (
         state, active, killed, findings, runs, dissent, phases, org, cost,
-        lessons, telemetry, task_counts, stats,
+        lessons, telemetry, task_counts, stats, edge_activity,
     ) = await asyncio.gather(
         _state(pool),
         _theses_with_counts(pool, "active", 20),
@@ -354,6 +410,7 @@ async def snapshot(request: Request) -> SnapshotOut:
         _telemetry(pool),
         _task_counts(pool),
         _stats(pool),
+        _edge_activity(pool),
     )
     # Surface langfuse host so the dashboard can link directly to traces.
     lf_host = os.environ.get("LANGFUSE_HOST") if os.environ.get("LANGFUSE_PUBLIC_KEY") else None
@@ -363,6 +420,7 @@ async def snapshot(request: Request) -> SnapshotOut:
         phase_transitions=phases, org_roles=org, cost=cost,
         lesson_counts=lessons, telemetry=telemetry,
         task_counts=task_counts, stats=stats,
+        edge_activity=edge_activity,
         langfuse_host=lf_host,
     )
 
