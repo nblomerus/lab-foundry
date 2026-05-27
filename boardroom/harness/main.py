@@ -60,10 +60,12 @@ ZEP_SESSIONS = [
 async def main() -> int:
     db_url = os.environ["DATABASE_URL"]
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+    max_concurrent = int(os.environ.get("MAX_CONCURRENT_HANDLERS", "4"))
 
     log.info("starting harness")
     log.info("  db=%s", db_url)
     log.info("  ollama=%s", ollama_url)
+    log.info("  max_concurrent_handlers=%d", max_concurrent)
 
     pool = await asyncpg.create_pool(db_url, min_size=4, max_size=20)
 
@@ -87,7 +89,7 @@ async def main() -> int:
     curator    = Curator(state=state, memory=memory, lessons=lessons)
     gpu_lock   = GPULock()
     router     = Router(pool=pool, gpu_lock=gpu_lock, ollama_url=ollama_url)
-    dispatcher = Dispatcher(pool=pool)
+    dispatcher = Dispatcher(pool=pool, max_concurrent_handlers=max_concurrent)
 
     # Attach clients so handlers can reach them via the dispatcher param
     dispatcher.state   = state

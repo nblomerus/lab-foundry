@@ -74,12 +74,24 @@ PHASE_BUDGET_DAYS = {
 # -------------------------------------------------------------------------
 
 class Dispatcher:
-    def __init__(self, pool: asyncpg.Pool):
+    def __init__(self, pool: asyncpg.Pool, max_concurrent_handlers: int = 4):
         self.pool = pool
         self._handlers: dict[str, Handler] = {}
         self._running = False
         self._watchdog_task: Optional[asyncio.Task] = None
         self._listener_conn: Optional[asyncpg.Connection] = None
+        # Bound how many handlers run at once. Without this, a queue refill
+        # (planner emitting a batch of task.created events) spawns one task
+        # per event with no ceiling — a dozen concurrent local-LLM runs that
+        # all show 'running' and, if the harness is killed mid-flight, all
+        # orphan into 'failed' rows. The cap keeps the in-flight count honest
+        # and shrinks the orphan blast radius. Actual GPU calls are serialized
+        # further downstream by the router's GPULock.
+        self.max_concurrent_handlers = max_concurrent_handlers
+        self._handler_sem = asyncio.Semaphore(max_concurrent_handlers)
+        # Serializes the liveness pump so the startup pass and the watchdog's
+        # first pass don't both read deficit=N and each emit N triggers.
+        self._revive_lock = asyncio.Lock()
 
     def register(self, event_type: str, handler: Handler) -> None:
         if event_type in self._handlers:
@@ -95,6 +107,9 @@ class Dispatcher:
         try:
             await self._listener_conn.add_listener("events", self._on_notify)
             log.info("dispatcher listening on 'events' channel")
+            await self._reap_startup_orphans()
+            async with self.pool.acquire() as conn:
+                await self._revive_stranded_tasks(conn)
             await self._drain_pending()
             while self._running:
                 await asyncio.sleep(60)
@@ -150,13 +165,17 @@ class Dispatcher:
                     await self._mark_suppressed(event_id, "slop_pause")
                     return
 
-        # Run handler outside the claim transaction — it may take minutes
-        try:
-            result = await handler(event, self)
-            await self._mark_consumed(event_id, handler.__name__, result)
-        except Exception as e:
-            log.exception("handler %s failed for event %s", handler.__name__, event_id)
-            await self._mark_failed(event_id, str(e))
+        # Run handler outside the claim transaction — it may take minutes.
+        # Gate the execution behind the concurrency semaphore so a burst of
+        # events doesn't launch unbounded handlers at once. Gate checks above
+        # run first (and cheaply), so suppressed events never occupy a slot.
+        async with self._handler_sem:
+            try:
+                result = await handler(event, self)
+                await self._mark_consumed(event_id, handler.__name__, result)
+            except Exception as e:
+                log.exception("handler %s failed for event %s", handler.__name__, event_id)
+                await self._mark_failed(event_id, str(e))
 
     # -- Event state transitions ----------------------------------------
 
@@ -265,6 +284,39 @@ class Dispatcher:
 
     # -- Startup drain --------------------------------------------------
 
+    async def _reap_startup_orphans(self) -> None:
+        """
+        A freshly started harness has no runs in flight, so any agent_runs
+        still 'running' belong to a previous instance that died. Mark them
+        failed right away instead of waiting on the 30-minute watchdog sweep —
+        which never fires if the harness stayed down (the orphans then linger
+        as phantom 'running' rows, inflating in-flight counts and poisoning
+        duration averages until someone reaps them by hand).
+
+        Tasks left 'running' are reset to 'pending' so their work resumes.
+        """
+        async with self.pool.acquire() as conn:
+            runs = await conn.execute(
+                """
+                UPDATE agent_runs
+                SET status = 'failed',
+                    completed_at = NOW(),
+                    error = COALESCE(error, '') || ' [orphan reaped at startup]'
+                WHERE status = 'running'
+                """
+            )
+            tasks = await conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'pending',
+                    started_at = NULL,
+                    claimed_by = NULL
+                WHERE status = 'running'
+                """
+            )
+        if runs != "UPDATE 0" or tasks != "UPDATE 0":
+            log.info("startup orphan reap: agent_runs=%s, tasks=%s", runs, tasks)
+
     async def _drain_pending(self) -> None:
         """At startup, kick off processing for any events still pending."""
         async with self.pool.acquire() as conn:
@@ -275,14 +327,66 @@ class Dispatcher:
         for r in rows:
             asyncio.create_task(self._process_event(r["id"]))
 
+    # -- Liveness pump --------------------------------------------------
+
+    async def _revive_stranded_tasks(self, conn) -> None:
+        """
+        Keep the work loop self-sustaining.
+
+        A task only gets worked when its INSERT fires the trg_emit_task_created
+        trigger. Tasks that re-enter 'pending' via an UPDATE — reset by the
+        stale-task sweep, the startup reap, or a crash — never re-fire that
+        trigger, and their original task.created event is already consumed, so
+        re-emitting it with the same dedup_key is a no-op. They strand: pending
+        forever with nothing to claim them, and the company silently flatlines.
+
+        Fix: if there are more pending tasks than pending task.created events,
+        emit enough fresh triggers (unique dedup_key) to cover the deficit.
+        handle_task_created claims the next available task regardless of the
+        event's target, so generic triggers are sufficient and self-balancing.
+
+        Guarded by _revive_lock: the startup pass and the watchdog's immediate
+        first pass would otherwise both read the same deficit and each emit it.
+        Serializing means the second caller re-counts, sees the first's
+        triggers already pending, and emits nothing.
+        """
+        async with self._revive_lock:
+            pending_tasks = await conn.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'pending'"
+            )
+            if not pending_tasks:
+                return
+            pending_triggers = await conn.fetchval(
+                "SELECT COUNT(*) FROM events "
+                "WHERE event_type = 'task.created' AND status = 'pending'"
+            )
+            deficit = int(pending_tasks) - int(pending_triggers)
+            if deficit <= 0:
+                return
+            ts = int(datetime.now(timezone.utc).timestamp())
+            for i in range(deficit):
+                await conn.execute(
+                    """
+                    INSERT INTO events (event_type, target_type, payload, dedup_key)
+                    VALUES ('task.created', 'task', '{}'::jsonb, $1)
+                    ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                    """,
+                    f"revive-{ts}-{i}",
+                )
+            log.info(
+                "liveness pump: re-emitted %d task.created for %d stranded pending task(s)",
+                deficit, pending_tasks,
+            )
+
     # -- Watchdog -------------------------------------------------------
 
     async def _watchdog_loop(self) -> None:
-        """Every 5 minutes: sweep stale tasks, missed events, phase budgets."""
+        """Every 5 minutes: sweep stale tasks, revive stranded work, missed events, budgets."""
         while self._running:
             try:
                 async with self.pool.acquire() as conn:
                     await self._sweep_stale_tasks(conn)
+                    await self._revive_stranded_tasks(conn)
                     await self._sweep_pending_events(conn)
                     await self._check_phase_budget(conn)
                     await self._refresh_slop_view(conn)

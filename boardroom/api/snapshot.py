@@ -331,7 +331,10 @@ async def _stats(pool: asyncpg.Pool) -> StatsOut:
                    AND audit_verdict = 'slop')                                            AS slop_today,
               (SELECT COUNT(*) FROM agent_runs
                  WHERE status = 'failed'
-                   AND started_at > NOW() - INTERVAL '24 hours')                          AS failed_runs_today,
+                   AND started_at > NOW() - INTERVAL '24 hours'
+                   -- Orphans (process killed mid-run) aren't genuine failures;
+                   -- the reaper tags them so they don't cry wolf on the dash.
+                   AND COALESCE(error, '') NOT LIKE '%orphan reaped%')                    AS failed_runs_today,
               (SELECT COUNT(*) FROM events
                  WHERE status = 'failed'
                    AND emitted_at > NOW() - INTERVAL '24 hours')                          AS schema_failures_today,
@@ -343,7 +346,14 @@ async def _stats(pool: asyncpg.Pool) -> StatsOut:
                    AND payload->'sources' ? 'reddit')                                     AS source_reddit_in_flight,
               (SELECT COUNT(*) FROM tasks
                  WHERE status = 'running' AND department = 'research'
-                   AND payload->'sources' ? 'web')                                        AS source_web_in_flight
+                   AND payload->'sources' ? 'web')                                        AS source_web_in_flight,
+              -- Newest heartbeat across the system. Drives the dashboard's
+              -- live/quiet/stalled indicator. GREATEST ignores NULLs.
+              GREATEST(
+                (SELECT MAX(started_at)  FROM agent_runs),
+                (SELECT MAX(emitted_at)  FROM events),
+                (SELECT MAX(created_at)  FROM findings)
+              )                                                                           AS last_activity_at
             """
         )
     return StatsOut(**dict(row))

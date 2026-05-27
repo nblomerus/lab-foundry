@@ -164,6 +164,9 @@ class StatsOut(BaseModel):
     source_hn_in_flight: int
     source_reddit_in_flight: int
     source_web_in_flight: int
+    # Newest activity timestamp across runs/events/findings; None if the
+    # company has never done anything. Drives the liveness indicator.
+    last_activity_at: Optional[datetime] = None
 
 
 class EdgeActivity(BaseModel):
