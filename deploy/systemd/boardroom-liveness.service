@@ -1,0 +1,10 @@
+[Unit]
+Description=Boardroom loop liveness watchdog (external stall detector)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nicholas/workspace/boardroom
+EnvironmentFile=/home/nicholas/workspace/boardroom/.env
+# Restarts boardroom-harness if the loop has gone quiet past the threshold.
+# Set ALERT_WEBHOOK_URL in .env to also get pushed (e.g. an ntfy.sh topic).
+ExecStart=/home/nicholas/.pyenv/versions/boardroom/bin/python -m boardroom.ops.liveness_check

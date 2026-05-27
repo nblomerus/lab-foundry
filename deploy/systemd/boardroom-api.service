@@ -1,0 +1,16 @@
+[Unit]
+Description=Boardroom command-center API (FastAPI on :8503)
+After=network.target
+# Keep retrying forever — when Postgres comes back, so do we.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nicholas/workspace/boardroom
+EnvironmentFile=/home/nicholas/workspace/boardroom/.env
+ExecStart=/home/nicholas/.pyenv/versions/boardroom/bin/python -m uvicorn boardroom.api.main:app --host 0.0.0.0 --port 8503
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

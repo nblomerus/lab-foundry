@@ -21,6 +21,7 @@ import sys
 from contextlib import suppress
 
 import asyncpg
+import httpx
 
 from boardroom.harness.curator import Curator
 from boardroom.harness.dispatch import Dispatcher
@@ -57,15 +58,58 @@ ZEP_SESSIONS = [
 ]
 
 
+async def _preflight(pool, ollama_url: str, memory: ZepClient) -> bool:
+    """
+    Verify external dependencies before entering the dispatch loop.
+
+    Returns False (fatal) only if a hard dependency — Postgres or Ollama — is
+    unreachable; the loop can do no useful work without them. Zep is checked
+    too, but a Zep problem is logged loudly and tolerated: episodic memory is
+    a nice-to-have, and we'd rather run degraded than not at all.
+    """
+    ok = True
+
+    # Postgres — fatal.
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        log.info("preflight: postgres OK")
+    except Exception as e:
+        log.error("preflight: postgres unreachable: %s", e)
+        ok = False
+
+    # Ollama — fatal. No model server, no work.
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{ollama_url}/api/version")
+            r.raise_for_status()
+        log.info("preflight: ollama OK (%s)", ollama_url)
+    except Exception as e:
+        log.error("preflight: ollama unreachable at %s: %s", ollama_url, e)
+        ok = False
+
+    # Zep — non-fatal, but a broken API shape (e.g. the memory->thread rename)
+    # is exactly the silent failure we want to catch at boot.
+    try:
+        await memory.ping()
+        log.info("preflight: zep OK")
+    except Exception as e:
+        log.error("preflight: ZEP DEGRADED — memory writes/recall will fail: %s", e)
+
+    return ok
+
+
 async def main() -> int:
     db_url = os.environ["DATABASE_URL"]
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
     max_concurrent = int(os.environ.get("MAX_CONCURRENT_HANDLERS", "4"))
+    gpu_call_timeout = float(os.environ.get("GPU_CALL_TIMEOUT_S", "300"))
 
     log.info("starting harness")
     log.info("  db=%s", db_url)
     log.info("  ollama=%s", ollama_url)
     log.info("  max_concurrent_handlers=%d", max_concurrent)
+    log.info("  gpu_call_timeout_s=%.0f", gpu_call_timeout)
 
     pool = await asyncpg.create_pool(db_url, min_size=4, max_size=20)
 
@@ -82,13 +126,22 @@ async def main() -> int:
     memory  = ZepClient.from_env()
     lessons = LessonsClient(pool=pool)
 
+    # Preflight: fail loud now if a hard dependency is broken, rather than
+    # degrading silently mid-run (the Zep memory->thread break failed 82
+    # events before anyone noticed). DB + Ollama are fatal; Zep is non-fatal
+    # (memory is a nice-to-have) but a broken API shape is logged loudly.
+    if not await _preflight(pool, ollama_url, memory):
+        await pool.close()
+        return 1
+
     await memory.ensure_user()
     for session in ZEP_SESSIONS:
         await memory.ensure_session(session)
 
     curator    = Curator(state=state, memory=memory, lessons=lessons)
     gpu_lock   = GPULock()
-    router     = Router(pool=pool, gpu_lock=gpu_lock, ollama_url=ollama_url)
+    router     = Router(pool=pool, gpu_lock=gpu_lock, ollama_url=ollama_url,
+                        call_timeout_s=gpu_call_timeout)
     dispatcher = Dispatcher(pool=pool, max_concurrent_handlers=max_concurrent)
 
     # Attach clients so handlers can reach them via the dispatcher param

@@ -195,12 +195,20 @@ class Router:
         gpu_lock: GPULock,
         ollama_url: str = "http://localhost:11434",
         langfuse_client=None,
+        call_timeout_s: float = 300.0,
     ):
         self.pool = pool
         self.gpu_lock = gpu_lock
         self.ollama_url = ollama_url
         self.langfuse = langfuse_client if langfuse_client is not None else _maybe_langfuse()
-        self._http = httpx.AsyncClient(timeout=600.0)
+        # Hard ceiling on a single model call. The GPU lock serializes calls,
+        # so one hung Ollama request would otherwise hold the lock and wedge
+        # the entire loop. wait_for cancels the call, releases the lock, and
+        # the run is marked failed — the loop keeps moving. Slightly above the
+        # httpx total timeout so the transport usually errors first with a
+        # clearer message; this is the backstop for a hang httpx doesn't catch.
+        self.call_timeout_s = call_timeout_s
+        self._http = httpx.AsyncClient(timeout=240.0)
 
     async def close(self):
         await self._http.aclose()
@@ -283,10 +291,13 @@ class Router:
 
         try:
             async with self.gpu_lock.acquire(model.ollama_name):
-                output_text, out_tokens = await self._call_ollama(
-                    model=model,
-                    system=system_text,
-                    schema=output_schema_class,
+                output_text, out_tokens = await asyncio.wait_for(
+                    self._call_ollama(
+                        model=model,
+                        system=system_text,
+                        schema=output_schema_class,
+                    ),
+                    timeout=self.call_timeout_s,
                 )
             parsed = output_schema_class.model_validate_json(output_text)
 

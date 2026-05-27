@@ -54,6 +54,26 @@ class ZepClient:
 
     # ---- Sessions -----------------------------------------------------
 
+    async def ping(self) -> None:
+        """
+        Health check for preflight. Raises if the client is the wrong shape
+        (e.g. an API rename like memory->thread) or the service is unreachable.
+
+        A 'not found' from get is a *healthy* response — it means the request
+        round-tripped and auth is valid; we only surface connection/auth/shape
+        failures.
+        """
+        for ns in ("thread", "graph", "user"):
+            if not hasattr(self._client, ns):
+                raise RuntimeError(f"Zep client missing '{ns}' namespace (API drift?)")
+        try:
+            await self._client.thread.get(thread_id="__boardroom_healthcheck__", lastn=1)
+        except Exception as e:
+            msg = str(e).lower()
+            if "not found" in msg or "404" in msg or "does not exist" in msg:
+                return  # reachable + authed; the test thread just doesn't exist
+            raise
+
     async def ensure_user(self) -> None:
         """Create the singleton user if it doesn't exist. Idempotent."""
         try:

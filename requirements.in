@@ -4,7 +4,9 @@ httpx
 pydantic
 tiktoken
 mcp
-zep-cloud
+# Pinned: the memory->thread namespace rename across majors silently broke
+# every memory write. Bump deliberately, not by surprise.
+zep-cloud==3.22.0
 langfuse
 beautifulsoup4
 lxml
