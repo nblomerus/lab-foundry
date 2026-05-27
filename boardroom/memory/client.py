@@ -62,16 +62,20 @@ class ZepClient:
             pass  # already exists
 
     async def ensure_session(self, session_id: str) -> None:
-        """Create a session if it doesn't exist. Idempotent. Cached locally."""
+        """Create a thread if it doesn't exist. Idempotent. Cached locally.
+
+        Zep Cloud v3 renamed the `memory`/session namespace to `thread`; a
+        thread is the v3 equivalent of the old session.
+        """
         if session_id in self._ensured_sessions:
             return
         try:
-            await self._client.memory.add_session(
-                session_id=session_id,
+            await self._client.thread.create(
+                thread_id=session_id,
                 user_id=self.USER_ID,
             )
         except Exception:
-            pass
+            pass  # already exists
         self._ensured_sessions.add(session_id)
 
     # ---- Writes -------------------------------------------------------
@@ -84,38 +88,42 @@ class ZepClient:
         metadata: Optional[dict] = None,
     ) -> str:
         """
-        Append a message to a session. Triggers async Graphiti extraction.
+        Append a message to a thread. Triggers async graph extraction.
         Returns the Zep message uuid (or '' if unavailable).
+
+        v3 messages carry a constrained `role` enum plus a free-form `name`;
+        boardroom's logical role ("ceo", "adversary", …) goes in `name`, and
+        everything the company writes is assistant-authored.
         """
         from zep_cloud.types import Message
 
         await self.ensure_session(session_id)
-        result = await self._client.memory.add(
-            session_id=session_id,
+        result = await self._client.thread.add_messages(
+            thread_id=session_id,
             messages=[Message(
-                role=role_type,
-                role_type=role_type,
+                role="assistant",
+                name=role_type,
                 content=content,
                 metadata=metadata or {},
             )],
         )
-        msgs = getattr(result, "messages", None) or []
-        return msgs[0].uuid if msgs else ""
+        uuids = getattr(result, "message_uuids", None) or []
+        return uuids[0] if uuids else ""
 
     # ---- Reads --------------------------------------------------------
 
     async def recent(self, session_id: str, k: int = 5) -> list[RecalledMessage]:
-        """Hot path: last k messages from a session, chronological order."""
+        """Hot path: last k messages from a thread, chronological order."""
         try:
-            result = await self._client.memory.get(session_id=session_id, lastn=k)
+            result = await self._client.thread.get(thread_id=session_id, lastn=k)
         except Exception:
             return []
         return [
             RecalledMessage(
                 content=m.content or "",
                 created_at=getattr(m, "created_at", None) or datetime.now(timezone.utc),
-                role_type=m.role_type or "agent",
-                uuid=m.uuid or "",
+                role_type=getattr(m, "name", None) or getattr(m, "role", None) or "agent",
+                uuid=getattr(m, "uuid_", None) or "",
             )
             for m in (getattr(result, "messages", None) or [])
         ]
@@ -126,26 +134,29 @@ class ZepClient:
         query: str,
         k: int = 5,
     ) -> list[RecalledMessage]:
-        """Cold path: semantic search over one session."""
+        """Cold path: semantic recall over the company's ingested episodes.
+
+        v3 has no per-thread message search; semantic recall runs against the
+        knowledge graph. We query episodes (the graph's record of ingested
+        messages) for the boardroom user.
+        """
         try:
-            result = await self._client.memory.search_sessions(
-                session_ids=[session_id],
-                text=query,
+            result = await self._client.graph.search(
+                user_id=self.USER_ID,
+                query=query,
                 limit=k,
+                scope="episodes",
             )
         except Exception:
             return []
         out = []
-        for r in (getattr(result, "results", None) or []):
-            m = getattr(r, "message", None)
-            if m is None:
-                continue
+        for ep in (getattr(result, "episodes", None) or []):
             out.append(RecalledMessage(
-                content=m.content or "",
-                created_at=getattr(m, "created_at", None) or datetime.now(timezone.utc),
-                role_type=m.role_type or "agent",
-                uuid=m.uuid or "",
-                relevance=getattr(r, "score", None),
+                content=getattr(ep, "content", None) or "",
+                created_at=getattr(ep, "created_at", None) or datetime.now(timezone.utc),
+                role_type=getattr(ep, "role_type", None) or getattr(ep, "role", None) or "agent",
+                uuid=getattr(ep, "uuid_", None) or "",
+                relevance=getattr(ep, "score", None),
             ))
         return out
 
