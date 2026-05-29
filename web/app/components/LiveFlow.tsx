@@ -295,13 +295,15 @@ function NodePort({ side, offset, hot }: { side: Side; offset: number; hot: bool
 }
 
 function FlowNode({
-  node, status, selected, hot, ringConnected, ports, onSelect,
+  node, status, selected, hot, ringConnected, highlighted = false, dimmed = false, ports, onSelect,
 }: {
   node: NodeDef;
   status: NodeStatus;
   selected: boolean;
   hot: boolean;
   ringConnected: boolean;
+  highlighted?: boolean;
+  dimmed?: boolean;
   ports: { side: Side; offset: number; hot: boolean }[];
   onSelect: () => void;
 }) {
@@ -315,14 +317,15 @@ function FlowNode({
       onClick={onSelect}
       data-node-id={node.id}
       initial={{ opacity: 0, y: 6, scale: 0.96 }}
-      animate={{ opacity: 1, y: 0, scale: active ? 1.03 : 1 }}
-      whileHover={{ scale: 1.05 }}
+      animate={{ opacity: dimmed ? 0.45 : 1, y: 0, scale: active || highlighted ? 1.03 : 1 }}
+      whileHover={{ scale: 1.05, opacity: 1 }}
       transition={{ type: "spring", stiffness: 260, damping: 22 }}
       className={cx(
         "absolute z-20 flex flex-col justify-center rounded-2xl border bg-white p-2.5 text-left shadow-sm transition",
         t.border, t.bg,
         active ? "shadow-lg ring-4 ring-emerald-500/15" : "",
-        ringConnected && !active ? "ring-2 ring-slate-400/40" : "",
+        highlighted && !active ? "ring-2 ring-emerald-400/50 shadow-md" : "",
+        ringConnected && !active && !highlighted ? "ring-2 ring-slate-400/40" : "",
       )}
       style={{
         // Position by top-left corner so the node's CENTER lands at
@@ -800,7 +803,13 @@ function isSourcePulse(edge: EdgeDef, snap: Snapshot): boolean {
   return false;
 }
 
-export function LiveFlow({ snapshot, power }: { snapshot: Snapshot; power?: PowerSummary | null }) {
+export function LiveFlow({ snapshot, power, focusNodeIds }: {
+  snapshot: Snapshot;
+  power?: PowerSummary | null;
+  /** Node ids to emphasise (the clicked division). Others are dimmed. */
+  focusNodeIds?: string[];
+}) {
+  const focusSet = useMemo(() => new Set(focusNodeIds ?? []), [focusNodeIds]);
   const statuses = useMemo(
     () => Object.fromEntries(NODES.map((n) => [n.id, deriveNodeStatus(n, snapshot, power)])),
     [snapshot, power],
@@ -855,8 +864,9 @@ export function LiveFlow({ snapshot, power }: { snapshot: Snapshot; power?: Powe
   }, [snapshot.stats, snapshot.cost, activityByEvent]);
 
   const [selection, setSelection] = useState<Selection | null>(() => {
-    const n = nodeById("researcher")!;
-    return { kind: "node", node: n, status: statuses["researcher"] };
+    const startId = focusNodeIds?.[0] ?? "researcher";
+    const n = nodeById(startId) ?? nodeById("researcher")!;
+    return { kind: "node", node: n, status: statuses[n.id] };
   });
 
   useEffect(() => {
@@ -992,6 +1002,8 @@ export function LiveFlow({ snapshot, power }: { snapshot: Snapshot; power?: Powe
                   selected={isSelected}
                   hot={isHot}
                   ringConnected={ringConnectedNodes.has(node.id)}
+                  highlighted={focusSet.has(node.id)}
+                  dimmed={focusSet.size > 0 && !focusSet.has(node.id)}
                   ports={ports}
                   onSelect={() => setSelection({ kind: "node", node, status: statuses[node.id] })}
                 />

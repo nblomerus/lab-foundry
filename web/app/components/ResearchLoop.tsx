@@ -9,7 +9,7 @@ import {
 import { api, type GraphClaim } from "../lib/api";
 import { useEventStream } from "../lib/ws";
 import type { Claim, Finding, DissentItem, LabFoundryEvent, Snapshot } from "../lib/types";
-import type { PowerSummary } from "./LiveFlow";
+import { LiveFlow, type PowerSummary } from "./LiveFlow";
 import { Badge, Card, cx } from "./ui";
 
 function fmtTime(iso: string): string {
@@ -60,6 +60,17 @@ const STAGES: Stage[] = [
   { id: "synthesise", label: "Synthesise", division: "Leadership",           icon: BrainCircuit,roles: ["pi"],                         events: ["thesis.created", "thesis.invalidated"],                                    angle: 216 },
   { id: "converge",   label: "Converge",   division: "Leadership",           icon: Layers3,     roles: ["phase_adjudicator"],          events: ["thesis.confidence_changed", "phase.transition_proposed"],                  angle: 288 },
 ];
+
+// Which agent-graph nodes (flow-topology ids) each division spans. Drives the
+// focused node-graph drill-down.
+const STAGE_FOCUS: Record<string, string[]> = {
+  question:   ["planner", "tasks"],
+  gather:     ["ingest", "rag", "kg", "web", "researcher", "tasks", "findings"],
+  judge:      ["findings", "evaluation", "critic", "claims"],
+  synthesise: ["findings", "pi", "claims"],
+  converge:   ["claims", "adjudicator", "phase", "pi"],
+};
+const HUB_FOCUS = ["ingest", "rag", "kg", "researcher"];
 
 interface KgStats {
   claims: number; findings: number; verdicts: number;
@@ -231,6 +242,48 @@ export function ResearchLoop({ snapshot, power }: { snapshot: Snapshot; power?: 
           </AnimatePresence>
         </aside>
       </div>
+
+      {/* Drill-down: clicking a division reveals the full agent-node graph,
+          focused on that division's nodes — the source→agent interactions. */}
+      <AnimatePresence initial={false}>
+        {(sel?.kind === "stage" || sel?.kind === "hub") && (
+          <motion.div
+            key={selectionKey(sel)}
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+            className="overflow-hidden"
+          >
+            <Card>
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-semibold tracking-tight text-slate-950">
+                    Agent interactions ·{" "}
+                    {sel.kind === "hub" ? "Knowledge" : sel.stage.label}
+                  </h3>
+                  <p className="mt-0.5 text-sm text-slate-500">
+                    The full pipeline — sources → agents → downstream. Highlighted nodes belong to this division.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSel(null)}
+                  className="rounded-2xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+              </div>
+              <LiveFlow
+                key={`flow-${selectionKey(sel)}`}
+                snapshot={snapshot}
+                power={power}
+                focusNodeIds={sel.kind === "hub" ? HUB_FOCUS : STAGE_FOCUS[sel.stage.id] ?? []}
+              />
+            </Card>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
