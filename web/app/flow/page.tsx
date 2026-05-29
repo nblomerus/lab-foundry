@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { LiveFlow, type PowerSummary } from "../components/LiveFlow";
+import { ResearchLoop } from "../components/ResearchLoop";
+import type { PowerSummary } from "../components/LiveFlow";
+import { EventStream } from "../components/EventStream";
 import type { Snapshot } from "../lib/types";
 
 export default function FlowPage() {
@@ -58,5 +60,10 @@ export default function FlowPage() {
     return <div className="text-sm text-slate-500">Loading snapshot…</div>;
   }
 
-  return <LiveFlow snapshot={snap} power={power} />;
+  return (
+    <div className="space-y-4">
+      <ResearchLoop snapshot={snap} power={power} />
+      <EventStream keep={60} />
+    </div>
+  );
 }
