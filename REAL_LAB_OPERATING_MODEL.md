@@ -394,10 +394,16 @@ would emit invalid phases.
 ---
 
 ## 7. Build phasing (ordered by "smallest change that makes the lab learn")
-0. **Close the learning circuit FIRST** (highest ROI, no new harness): migrations
-   011+014; `reflect.judge_applications` (A) + watchdog reconcile/decay (B);
-   scope-hygiene + predicate vocab + Zep session-name fixes. Turns a frozen lesson
-   store into a learning one.
+0. ✅ **DONE — Close the learning circuit** (highest ROI, no new harness):
+   migrations 011+014 (applied); `reflect.judge_applications` (hinge A, routed
+   FAST, shipped behind `LESSON_JUDGE=on`) + watchdog reconcile/decay (hinge B,
+   live); scope-hygiene (drop lessons scoped to unregistered invocations),
+   predicate-vocab hygiene (debug-log unknown `applies_when` keys), dedupe
+   (`find_near_duplicate` → `credit_recurrence` instead of row spam), and the
+   `theses-lifecycle`→`claims-lifecycle` Zep fix. End-to-end verified against the
+   live DB: 5 supportive applications promote a probationary lesson to `active`.
+   *Remaining to flip on:* enable `LESSON_JUDGE=on` after a shadow window so the
+   LLM judge's verdicts are calibrated before they drive promotion/retirement.
 1. **Shared scaffolding:** migration 009 (`claim_kind`+backfill+reader filters+
    `claim_goals`); reusable goal/expectations/reflect prompt layer.
 2. **Shared termination:** `harness/termination.py` + migration 013 +

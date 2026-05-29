@@ -9,10 +9,18 @@ More sophisticated matching (regex, ranges) added when concrete need appears.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import asyncpg
+
+log = logging.getLogger(__name__)
+
+# The stable vocabulary a lesson's applies_when predicate may key on. Every
+# loop step injects these into its context; a predicate referencing anything
+# else can never match (a silently-dead lesson), so we log it.
+STANDARD_CONTEXT_KEYS = {"phase", "agent", "task_type", "claim_status", "invocation_type", "source"}
 
 
 @dataclass
@@ -78,6 +86,12 @@ class LessonsClient:
     def _predicate_matches(self, applies_when: dict, context: dict) -> bool:
         if not applies_when:
             return True
+        # Predicate-vocab hygiene: a key outside the standard vocab can never be
+        # satisfied by any loop's context, so the lesson is silently dead. Surface
+        # it (Debug) rather than letting it rot unmatched.
+        unknown = set(applies_when) - STANDARD_CONTEXT_KEYS
+        if unknown:
+            log.debug("lesson predicate references unknown context keys %s (will never match)", sorted(unknown))
         for key, expected in applies_when.items():
             if key not in context:
                 return False
@@ -199,4 +213,25 @@ class LessonsClient:
                 LIMIT 1
                 """,
                 invocation_type, lesson_text, threshold,
+            )
+
+    async def credit_recurrence(self, lesson_id: int, derived_from_run_id: int) -> None:
+        """
+        A near-duplicate lesson was re-discovered. Instead of inserting a row,
+        credit the original with a synthetic *supportive* application — so
+        re-discovery becomes promotion pressure, not table spam. Idempotent per
+        (lesson, run): re-running the same reflection won't double-credit.
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO lesson_applications
+                    (lesson_id, agent_run_id, outcome, outcome_judged_at, outcome_judged_by_run_id)
+                SELECT $1, $2, 'supportive', NOW(), $2
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM lesson_applications
+                    WHERE lesson_id = $1 AND agent_run_id = $2
+                )
+                """,
+                lesson_id, derived_from_run_id,
             )

@@ -26,6 +26,41 @@ from boardroom.harness.curator import RECIPES, PromptLayer, Recipe
 log = logging.getLogger(__name__)
 
 
+async def _persist_or_credit_lesson(dispatcher, cand, derived_from_run_id: int) -> Optional[int]:
+    """
+    Persist a proposed lesson with scope-hygiene + dedupe (Phase 0):
+
+      * scope-hygiene — a lesson scoped to an invocation type no recipe registers
+        can never be injected (e.g. a renamed/dead name like `critic.kill_verdict`);
+        drop it rather than store dead advice.
+      * dedupe — if a near-duplicate already exists for this invocation, credit
+        the original with a recurrence (promotion pressure) instead of inserting.
+
+    Returns the lesson id touched (new or existing), or None if dropped.
+    """
+    if cand.applies_to_invocation not in RECIPES:
+        log.info("reflection: dropping lesson scoped to unregistered invocation %r",
+                 cand.applies_to_invocation)
+        return None
+
+    dup = await dispatcher.lessons.find_near_duplicate(
+        cand.applies_to_invocation, cand.lesson_text,
+    )
+    if dup is not None:
+        await dispatcher.lessons.credit_recurrence(dup, derived_from_run_id)
+        log.info("reflection: lesson near-dup of #%d — credited recurrence, not inserted", dup)
+        return dup
+
+    return await dispatcher.lessons.insert_lesson_candidate(
+        invocation_type=cand.applies_to_invocation,
+        applies_when=cand.applies_when,
+        lesson_text=cand.lesson_text,
+        rationale=cand.rationale,
+        derived_from_run_id=derived_from_run_id,
+        derived_via="reflection",
+    )
+
+
 # -------------------------------------------------------------------------
 # Output schema
 # -------------------------------------------------------------------------
@@ -233,17 +268,12 @@ async def _handle_legacy_reflection(event: dict, dispatcher) -> Optional[dict]:
             "run_id": run_id,
         }
 
-    lesson_id = await dispatcher.lessons.insert_lesson_candidate(
-        invocation_type=reflection.candidate.applies_to_invocation,
-        applies_when=reflection.candidate.applies_when,
-        lesson_text=reflection.candidate.lesson_text,
-        rationale=reflection.candidate.rationale,
-        derived_from_run_id=target_run_id,
-        derived_via="reflection",
+    lesson_id = await _persist_or_credit_lesson(
+        dispatcher, reflection.candidate, target_run_id,
     )
 
     return {
-        "lesson_created": True,
+        "lesson_created": lesson_id is not None,
         "lesson_id":      lesson_id,
         "lesson_text":    reflection.candidate.lesson_text,
         "run_id":         run_id,
@@ -340,15 +370,9 @@ async def _handle_batch_reflection(event: dict, dispatcher) -> Optional[dict]:
 
     created_ids: list[int] = []
     for cand in output.lessons:
-        lid = await dispatcher.lessons.insert_lesson_candidate(
-            invocation_type=cand.applies_to_invocation,
-            applies_when=cand.applies_when,
-            lesson_text=cand.lesson_text,
-            rationale=cand.rationale,
-            derived_from_run_id=run_id,
-            derived_via="reflection",
-        )
-        created_ids.append(lid)
+        lid = await _persist_or_credit_lesson(dispatcher, cand, run_id)
+        if lid is not None:
+            created_ids.append(lid)
 
     return {
         "batch_size":    len(runs),

@@ -276,6 +276,9 @@ ROUTE: dict[str, Tier] = {
     "phase_adjudicator.check":       Tier.FAST,
     "curator.compact_recall":        Tier.FAST,
     "reflect.lesson_propose":        Tier.FAST,
+    # Hinge A of the learning loop (LESSON_JUDGE=on): score whether applied
+    # lessons helped a run. FAST — a bounded, low-token judgment.
+    "reflect.judge_applications":    Tier.FAST,
     # Batch reflection (REFLECTION_LOOP=v2): scans a window of dissents and
     # surfaces recurring patterns. WORKHORSE because spotting cross-run
     # patterns is more demanding than a single-run lesson judgment.
