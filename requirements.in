@@ -10,6 +10,7 @@ zep-cloud==3.22.0
 langfuse
 beautifulsoup4
 lxml
+trafilatura
 python-dotenv
 
 # Command-center backend

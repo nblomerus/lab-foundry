@@ -57,7 +57,7 @@ async def handle_phase_budget_exceeded(event: dict, dispatcher) -> Optional[dict
                     f"Phase budget exceeded ({elapsed_days} days). "
                     f"Forcing transition proposal. CEO may still reject."
                 ),
-                "cited_thesis_ids": [],
+                "cited_claim_ids": [],
                 "forced":           True,
             }),
             current_phase,

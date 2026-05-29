@@ -71,36 +71,33 @@ class Recipe:
 # -------------------------------------------------------------------------
 
 SYSTEM_PROMPTS: dict[str, str] = {
-    "ceo": (
-        "You are the CEO of an autonomous AI-native company. Your role is "
-        "strategic direction, not execution. You decide what to pursue, what "
-        "to kill, and when to change direction. You are demanding about "
-        "quality and ruthlessly selective. You write decisions; you never "
-        "write content."
+    "pi": (
+        "You are the Principal Investigator of an autonomous AI-native research lab. "
+        "Your role is research direction, not execution. You select which hypotheses to pursue, "
+        "which claims to kill, and when to change direction. You are demanding about rigour and "
+        "ruthlessly selective about what constitutes evidence. You write research decisions; "
+        "you never write content."
     ),
-    "researcher": (
+    "knowledge_scout": (
         "You are a research analyst. You read raw material and extract "
-        "findings that inform strategic decisions. You are precise, "
+        "findings that inform research decisions. You are precise, "
         "skeptical, and selective. Most material is not interesting. "
         "Empty findings lists are acceptable. Inflating relevance scores "
         "is worse than under-scoring."
     ),
-    "auditor": (
-        "You are an auditor. Your job is to detect slop: findings that "
-        "could have been written without the cited research, generic "
-        "claims, plausible-sounding pattern matches. You are not graded "
-        "on agreeing with the researcher."
+    "evaluation": (
+        "You are the Evaluation Division. Your job is to detect slop, fabricated evidence, "
+        "metric misrepresentation, data leakage, and statistical overreach. Every finding must "
+        "earn its confidence score. A single fabricated claim contaminates an entire finding."
     ),
-    "adversary": (
-        "You are an adversary. For each thesis you examine, your job is "
-        "to find evidence it is wrong. You do not balance perspectives. "
-        "You hunt contradictions. Empty kill-recommendation is the right "
-        "answer when no killing evidence exists."
+    "critic": (
+        "You hunt contradictions, novelty gaps, baseline fairness failures, data leakage, "
+        "cherry-picking, and over-claiming. Your job is to kill weak claims before they waste "
+        "compute. A claim that survives your attack is the only one worth advancing."
     ),
     "planner": (
-        "You are a planner. You translate active theses and objectives "
-        "into concrete research tasks. Each task is small, specific, and "
-        "executable by a Researcher in one pass. You do not strategize."
+        "You translate claims into concrete research tasks. Each task must be falsifiable, "
+        "scoped to one claim, and produceable by a knowledge scout in a single session."
     ),
 }
 
@@ -198,8 +195,14 @@ Emit 0 to N findings. For each finding:
   - `supports_thesis`: true | false | null  (null = neutral / informational only)
   - `why_it_matters`: one sentence, concrete
 
-If the raw material contains nothing relevant, return an empty list.
-That is the correct answer when there is nothing.
+ONLY emit a finding if it carries SPECIFIC, checkable signal: a number or statistic,
+a price, a named company/competitor, a dated event, or a real user complaint or
+demand quote. SKIP — do NOT emit — generic overviews, "guide"/"best practices"/
+"everything you need to know" explainers, vendor marketing, and anything that merely
+describes what something is. A generic explainer is NOT a finding; it is slop.
+
+If the raw material contains nothing specific, return an empty list.
+That is the correct answer when there is nothing — an empty list beats a vague one.
 """
     return PromptLayer(name="task_data", content=content, priority=1)
 
@@ -281,7 +284,7 @@ RECIPES: dict[str, Recipe] = {
         agent="ceo",
         total_budget=13_000,
         use_cold_path=True,
-        recall_sessions=["theses-lifecycle", "dissent", "ceo-deliberations"],
+        recall_sessions=["claims-lifecycle", "dissent", "pi-deliberations"],
         recall_k=10,
         output_schema="ThesisKillDecision",
         task_data_builder=_build_thesis_kill_task_data,

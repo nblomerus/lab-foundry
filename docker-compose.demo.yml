@@ -1,0 +1,48 @@
+# Side instance for end-to-end demo runs of the agentic researcher loop.
+# Same images as the main compose, isolated ports/volumes so the live
+# boardroom on 5432/8080 is untouched.
+#
+# Bring up:    docker compose -f docker-compose.demo.yml up -d
+# Tear down:   docker compose -f docker-compose.demo.yml down -v
+# Logs:        docker compose -f docker-compose.demo.yml logs -f postgres
+
+name: boardroom-demo
+
+services:
+  postgres-demo:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     boardroom
+      POSTGRES_PASSWORD: boardroom
+      POSTGRES_DB:       boardroom
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-demo-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boardroom -d boardroom"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  searxng-demo:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8081/
+      SEARXNG_SECRET:   ${SEARXNG_SECRET:-demo-please-change-me}
+    volumes:
+      - ./infra/searxng:/etc/searxng:rw
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+
+volumes:
+  postgres-demo-data:

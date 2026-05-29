@@ -43,7 +43,7 @@ export function DissentPanel({ items }: { items: DissentItem[] }) {
                 <div className="flex items-center gap-2 text-xs">
                   <Badge tone={tone}>{detail}</Badge>
                   <span className="text-slate-400">{d.kind}</span>
-                  <span className="text-slate-500">on T{d.thesis_id}</span>
+                  <span className="text-slate-500">on T{d.claim_id}</span>
                   {d.confidence != null && (
                     <span className="ml-auto font-mono text-slate-400">
                       {d.confidence.toFixed(2)}

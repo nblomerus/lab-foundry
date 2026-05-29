@@ -2,15 +2,18 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BrainCircuit, Eye, GitBranch, Layers3, Target, TerminalSquare, Play } from "lucide-react";
+import { BrainCircuit, Eye, GitBranch, Layers3, Target, TerminalSquare, Play, FlaskConical, Bug, Network } from "lucide-react";
 import { cx } from "./ui";
 
 const NAV = [
   { href: "/",       icon: Target,         label: "Command" },
   { href: "/flow",   icon: GitBranch,      label: "Flow" },
-  { href: "/theses", icon: Layers3,        label: "Theses" },
+  { href: "/claims", icon: Layers3,        label: "Theses" },
   { href: "/events", icon: TerminalSquare, label: "Events" },
   { href: "/org",    icon: Eye,            label: "Org" },
+  { href: "/trace",  icon: Network,        label: "Trace" },
+  { href: "/bench",  icon: FlaskConical,   label: "Bench" },
+  { href: "/debug",  icon: Bug,            label: "Debug" },
 ];
 
 export function SiteNav() {

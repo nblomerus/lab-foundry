@@ -96,7 +96,7 @@ export const NODES: NodeDef[] = [
   { id: "planner",     label: "Planner",      type: "Agent",  icon: GitBranch,      x: 49, y: 92 },
 
   { id: "adversary",   label: "Adversary",    type: "Critic", icon: Telescope,      x: 70, y: 16 },
-  { id: "theses",      label: "Theses",       type: "Store",  icon: Target,         x: 70, y: 52 },
+  { id: "claims",      label: "Theses",       type: "Store",  icon: Target,         x: 70, y: 52 },
 
   { id: "ceo",         label: "CEO",          type: "Agent",  icon: BrainCircuit,   x: 90, y: 16 },
   { id: "adjudicator", label: "Adjudicator",  type: "Agent",  icon: Activity,       x: 90, y: 52 },
@@ -118,14 +118,14 @@ export const EDGES: EdgeDef[] = [
   { id: "find-adv",  from: "findings",    fromSide: "top",    to: "adversary",  toSide: "left",                    label: "high signal",     event_type: "finding.high_signal" },
 
   // Adversary → Theses
-  { id: "adv-thes",  from: "adversary",   fromSide: "bottom", to: "theses",     toSide: "top",                     label: "kill / weaken",   event_type: "thesis.invalidated" },
+  { id: "adv-thes",  from: "adversary",   fromSide: "bottom", to: "claims",     toSide: "top",                     label: "kill / weaken",   event_type: "thesis.invalidated" },
 
   // CEO ↔ Theses (parallel via ±0.35 offsets)
-  { id: "thes-ceo",  from: "theses",      fromSide: "top",    fromOffset: -0.35, to: "ceo",        toSide: "bottom", toOffset: -0.35, label: "invalidated",     event_type: "thesis.invalidated" },
-  { id: "ceo-thes",  from: "ceo",         fromSide: "bottom", fromOffset: +0.35, to: "theses",     toSide: "top",    toOffset: +0.35, label: "spawn / charter", event_type: "thesis.created" },
+  { id: "thes-ceo",  from: "claims",      fromSide: "top",    fromOffset: -0.35, to: "ceo",        toSide: "bottom", toOffset: -0.35, label: "invalidated",     event_type: "thesis.invalidated" },
+  { id: "ceo-thes",  from: "ceo",         fromSide: "bottom", fromOffset: +0.35, to: "claims",     toSide: "top",    toOffset: +0.35, label: "spawn / charter", event_type: "thesis.created" },
 
   // Right column flow
-  { id: "thes-adj",  from: "theses",      fromSide: "right",  to: "adjudicator", toSide: "left",                    label: "conf changed",    event_type: "thesis.confidence_changed" },
+  { id: "thes-adj",  from: "claims",      fromSide: "right",  to: "adjudicator", toSide: "left",                    label: "conf changed",    event_type: "thesis.confidence_changed" },
   { id: "adj-phase", from: "adjudicator", fromSide: "bottom", to: "phase",       toSide: "top",                     label: "proposal",        event_type: "phase.transition_proposed" },
 
   // phase → ceo: long-range. Both nodes sit in the governance column with

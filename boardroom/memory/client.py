@@ -17,10 +17,14 @@ recall_graph queries that graph.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+log = logging.getLogger(__name__)
 
 
 def _coerce_dt(value) -> datetime:
@@ -54,6 +58,14 @@ class ZepClient:
     def __init__(self, client):
         self._client = client
         self._ensured_sessions: set[str] = set()
+        # Per-session lock so concurrent handlers all trying to ensure the
+        # same thread (e.g. "dissent" at harness startup) collapse to a
+        # single create() call. Without this, N handlers all read
+        # session_id not in _ensured_sessions, all fire thread.create()
+        # in parallel, and Zep's 5 req/min thread cap rejects most of them
+        # — consuming the budget before any real writes happen.
+        self._ensuring_locks: dict[str, asyncio.Lock] = {}
+        self._ensuring_meta_lock = asyncio.Lock()
 
     @classmethod
     def from_env(cls) -> "ZepClient":
@@ -99,17 +111,45 @@ class ZepClient:
 
         Zep Cloud v3 renamed the `memory`/session namespace to `thread`; a
         thread is the v3 equivalent of the old session.
+
+        Single-flight per session: a per-session asyncio.Lock collapses
+        concurrent callers (all the handlers narrating to "dissent" right
+        after startup) to exactly one create() round-trip. The first caller
+        does the work; subsequent callers wait on the lock, then see the
+        cache hit and return without a network call.
         """
         if session_id in self._ensured_sessions:
             return
-        try:
-            await self._client.thread.create(
-                thread_id=session_id,
-                user_id=self.USER_ID,
-            )
-        except Exception:
-            pass  # already exists
-        self._ensured_sessions.add(session_id)
+        # Get-or-create the per-session lock under a tiny meta lock so two
+        # concurrent first-callers don't each create their own Lock object
+        # for the same session and race past it.
+        async with self._ensuring_meta_lock:
+            lock = self._ensuring_locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._ensuring_locks[session_id] = lock
+        async with lock:
+            # Re-check after acquiring: another waiter may have finished while
+            # we were queued, in which case the create is already done.
+            if session_id in self._ensured_sessions:
+                return
+            try:
+                await self._client.thread.create(
+                    thread_id=session_id,
+                    user_id=self.USER_ID,
+                )
+            except Exception as e:  # noqa: BLE001 — already-exists is the happy case
+                # Don't try to distinguish 400-already-exists from 429-rate-limit:
+                # Zep echoes rate-limit headers on every response so substring
+                # checks on str(e) misfire on the harmless 400s. Cache the
+                # outcome regardless — these sessions are long-lived (created
+                # weeks ago, persistent in Zep), so a single failed create
+                # within this process means "either it already exists, or
+                # write_message will log and skip when it tries to use it".
+                # write_message is best-effort so neither breaks the harness.
+                log.debug("zep ensure_session(%s) error (treated as exists): %s",
+                          session_id, e)
+            self._ensured_sessions.add(session_id)
 
     # ---- Writes -------------------------------------------------------
 
@@ -122,24 +162,40 @@ class ZepClient:
     ) -> str:
         """
         Append a message to a thread. Triggers async graph extraction.
-        Returns the Zep message uuid (or '' if unavailable).
+        Returns the Zep message uuid (or '' if unavailable / failure).
 
         v3 messages carry a constrained `role` enum plus a free-form `name`;
         boardroom's logical role ("ceo", "adversary", …) goes in `name`, and
         everything the company writes is assistant-authored.
+
+        Best-effort: a Zep 429 / network blip / API drift must not blow up the
+        calling handler. Narrative writes are observational (dissent log,
+        decision trail) — if they fail we log and return "". Reads already
+        behave this way (`recent`, `recall_episodic`); writes were the only
+        side that raised, which surfaced as session-wide handler failures
+        during Zep rate-limit windows (the boardroom-harness startup burst
+        used to drown the 5 req/min thread cap and take audit_slop_detected
+        with it). Callers treat the empty uuid as "not persisted" already.
         """
         from zep_cloud.types import Message
 
-        await self.ensure_session(session_id)
-        result = await self._client.thread.add_messages(
-            thread_id=session_id,
-            messages=[Message(
-                role="assistant",
-                name=role_type,
-                content=content,
-                metadata=metadata or {},
-            )],
-        )
+        try:
+            await self.ensure_session(session_id)
+            result = await self._client.thread.add_messages(
+                thread_id=session_id,
+                messages=[Message(
+                    role="assistant",
+                    name=role_type,
+                    content=content,
+                    metadata=metadata or {},
+                )],
+            )
+        except Exception as e:  # noqa: BLE001 — narrative write is best-effort
+            log.warning(
+                "zep write_message(%s, role=%s) failed: %s",
+                session_id, role_type, e,
+            )
+            return ""
         uuids = getattr(result, "message_uuids", None) or []
         return uuids[0] if uuids else ""
 

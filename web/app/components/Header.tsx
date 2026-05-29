@@ -7,7 +7,7 @@ import { Badge, cx } from "./ui";
 
 const PHASE_TAGLINE: Record<string, string> = {
   exploration: "Mapping the territory. Casting wide.",
-  convergence: "Narrowing to top theses. Hunting contradictions.",
+  convergence: "Narrowing to top claims. Hunting contradictions.",
   commitment:  "Committing to a thesis. Charter being written.",
   execution:   "Charter set. Shipping to a paying customer.",
 };
@@ -33,8 +33,8 @@ export function Header({ state }: { state: CompanyState }) {
           </p>
         </div>
         <div className="grid min-w-[280px] gap-3 rounded-3xl bg-slate-950 p-4 text-white sm:grid-cols-2 lg:grid-cols-1">
-          <Row label="Active theses" value={String(state.active_thesis_count)} />
-          <Row label="Killed" value={String(state.killed_thesis_count)} />
+          <Row label="Active claims" value={String(state.active_claim_count)} />
+          <Row label="Killed" value={String(state.invalidated_claim_count)} />
           <Row label="Day in phase" value={`${state.days_in_phase}`} />
           <Row label="Days to deadline" value={`${state.days_remaining}`} />
         </div>

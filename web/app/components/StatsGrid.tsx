@@ -12,7 +12,7 @@ export function StatsGrid({
       <StatTile
         icon={Target}
         value={activeTheses}
-        label="active theses"
+        label="active claims"
         helper={activeTheses === 0 ? "none active" : "exploring"}
         helperTone={activeTheses === 0 ? "amber" : "green"}
       />

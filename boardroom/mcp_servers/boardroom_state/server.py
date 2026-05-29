@@ -104,7 +104,7 @@ async def get_company_state() -> CompanyState:
 
 
 @mcp.tool()
-async def get_active_theses(
+async def get_active_claims(
     limit: int = 10,
     sort_by: Literal["confidence", "recent"] = "confidence",
 ) -> list[Thesis]:
@@ -125,7 +125,7 @@ async def get_active_theses(
 
 
 @mcp.tool()
-async def get_thesis(thesis_id: int) -> Thesis:
+async def get_claim(thesis_id: int) -> Thesis:
     """Get a single thesis by id (any status, including killed/merged)."""
     pool = await _pool_handle()
     async with pool.acquire() as conn:
@@ -136,7 +136,7 @@ async def get_thesis(thesis_id: int) -> Thesis:
 
 
 @mcp.tool()
-async def count_active_theses() -> int:
+async def count_active_claims() -> int:
     """Count currently-active theses. Useful for the phase machine."""
     pool = await _pool_handle()
     async with pool.acquire() as conn:
@@ -150,7 +150,7 @@ async def count_active_theses() -> int:
 # -------------------------------------------------------------------------
 
 @mcp.tool()
-async def create_thesis(
+async def create_claim(
     claim: str,
     initial_confidence: float = 0.50,
     parent_id: Optional[int] = None,
@@ -189,7 +189,7 @@ async def create_thesis(
 
 
 @mcp.tool()
-async def update_thesis_confidence(
+async def update_claim_confidence(
     thesis_id: int,
     new_confidence: float,
     reason: str,
@@ -246,7 +246,7 @@ async def update_thesis_confidence(
 
 
 @mcp.tool()
-async def kill_thesis(
+async def invalidate_claim(
     thesis_id: int,
     reason: str,
     verdict_id: int,

@@ -1,6 +1,7 @@
 """
-REST snapshot endpoints. The frontend fetches these on page load and on
+LabFoundry REST snapshot endpoints. The frontend fetches these on page load and on
 reconnect; WebSocket pushes deltas in between.
+Exposes the lab's research state: claims, evidence, tasks, phase, and agent activity.
 """
 from __future__ import annotations
 
@@ -24,16 +25,20 @@ router = APIRouter()
 # Map invocation_type prefix → org role
 ROLE_OF = {
     "ceo":                "ceo",
+    "pi":                 "pi",
     "planner":            "planner",
     "researcher":         "researcher",
+    "knowledge_scout":    "knowledge_scout",
     "auditor":            "auditor",
+    "evaluation":         "evaluation",
+    "critic":             "critic",
     "adversary":          "adversary",
     "phase_adjudicator":  "phase_adjudicator",
     "reflect":            "reflection",
     "curator":            "curator",
 }
 
-ALL_ROLES = ["ceo", "planner", "researcher", "auditor", "adversary",
+ALL_ROLES = ["pi", "planner", "knowledge_scout", "evaluation", "critic", "ceo", "researcher", "auditor",
              "phase_adjudicator", "reflection", "curator"]
 
 
@@ -43,10 +48,10 @@ async def _state(pool: asyncpg.Pool) -> CompanyStateOut:
         if s is None:
             raise RuntimeError("company_state not seeded")
         active = await c.fetchval(
-            "SELECT COUNT(*) FROM theses WHERE status = 'active'"
+            "SELECT COUNT(*) FROM claims WHERE status = 'active'"
         )
         killed = await c.fetchval(
-            "SELECT COUNT(*) FROM theses WHERE status != 'active'"
+            "SELECT COUNT(*) FROM claims WHERE status != 'active'"
         )
 
     now = datetime.now(timezone.utc)
@@ -77,13 +82,13 @@ async def _theses_with_counts(pool: asyncpg.Pool, status_filter: str, limit: int
         rows = await c.fetch(
             f"""
             SELECT t.*,
-              (SELECT COUNT(*) FROM findings f WHERE f.thesis_id = t.id
+              (SELECT COUNT(*) FROM findings f WHERE f.claim_id = t.id
                 AND COALESCE(f.audit_verdict,'') != 'stale') AS finding_count,
-              (SELECT COUNT(*) FROM findings f WHERE f.thesis_id = t.id
+              (SELECT COUNT(*) FROM findings f WHERE f.claim_id = t.id
                 AND f.supports_thesis = true AND f.audit_verdict = 'pass') AS supporting_count,
-              (SELECT COUNT(*) FROM findings f WHERE f.thesis_id = t.id
+              (SELECT COUNT(*) FROM findings f WHERE f.claim_id = t.id
                 AND f.supports_thesis = false AND f.audit_verdict = 'pass') AS contradicting_count
-            FROM theses t
+            FROM claims t
             WHERE status {op} 'active'
             ORDER BY confidence DESC NULLS LAST, updated_at DESC
             LIMIT $1
@@ -115,7 +120,7 @@ async def _findings(pool: asyncpg.Pool, limit: int) -> list[FindingOut]:
         )
     return [
         FindingOut(
-            id=r["id"], task_id=r["task_id"], thesis_id=r["thesis_id"],
+            id=r["id"], task_id=r["task_id"], claim_id=r["claim_id"],
             source=r["source"], url=r["url"], title=r["title"],
             summary=r["summary"], relevance_score=float(r["relevance_score"]),
             why_it_matters=r["why_it_matters"],
@@ -154,12 +159,12 @@ async def _dissent(pool: asyncpg.Pool, limit: int) -> list[DissentItem]:
     async with pool.acquire() as c:
         rows = await c.fetch(
             """
-            SELECT 'adversary' AS kind, av.id, av.thesis_id,
+            SELECT 'adversary' AS kind, av.id, av.claim_id,
                    av.verdict AS detail, av.confidence,
                    av.reasoning, av.created_at
-            FROM adversary_verdicts av
+            FROM critic_verdicts av
             UNION ALL
-            SELECT 'audit-slop' AS kind, f.id, f.thesis_id,
+            SELECT 'audit-slop' AS kind, f.id, f.claim_id,
                    f.audit_verdict AS detail,
                    f.audit_score AS confidence,
                    f.summary AS reasoning, f.created_at
@@ -170,7 +175,7 @@ async def _dissent(pool: asyncpg.Pool, limit: int) -> list[DissentItem]:
         )
     return [
         DissentItem(
-            kind=r["kind"], id=r["id"], thesis_id=r["thesis_id"],
+            kind=r["kind"], id=r["id"], claim_id=r["claim_id"],
             detail=r["detail"] or "?",
             confidence=float(r["confidence"]) if r["confidence"] is not None else None,
             reasoning=r["reasoning"],
@@ -425,7 +430,7 @@ async def snapshot(request: Request) -> SnapshotOut:
     # Surface langfuse host so the dashboard can link directly to traces.
     lf_host = os.environ.get("LANGFUSE_HOST") if os.environ.get("LANGFUSE_PUBLIC_KEY") else None
     return SnapshotOut(
-        state=state, active_theses=active, killed_theses=killed,
+        state=state, active_claims=active, invalidated_claims=killed,
         recent_findings=findings, recent_runs=runs, dissent=dissent,
         phase_transitions=phases, org_roles=org, cost=cost,
         lesson_counts=lessons, telemetry=telemetry,
@@ -456,19 +461,19 @@ async def events(request: Request, limit: int = 100) -> list[EventOut]:
     ]
 
 
-@router.get("/theses/{thesis_id}/findings", response_model=list[FindingOut])
-async def thesis_findings(thesis_id: int, request: Request) -> list[FindingOut]:
+@router.get("/theses/{claim_id}/findings", response_model=list[FindingOut])
+async def thesis_findings(claim_id: int, request: Request) -> list[FindingOut]:
     pool: asyncpg.Pool = request.app.state.pool
     async with pool.acquire() as c:
         rows = await c.fetch(
-            "SELECT * FROM findings WHERE thesis_id = $1 "
+            "SELECT * FROM findings WHERE claim_id = $1 "
             "AND COALESCE(audit_verdict,'') != 'stale' "
             "ORDER BY created_at DESC",
-            thesis_id,
+            claim_id,
         )
     return [
         FindingOut(
-            id=r["id"], task_id=r["task_id"], thesis_id=r["thesis_id"],
+            id=r["id"], task_id=r["task_id"], claim_id=r["claim_id"],
             source=r["source"], url=r["url"], title=r["title"],
             summary=r["summary"], relevance_score=float(r["relevance_score"]),
             why_it_matters=r["why_it_matters"],

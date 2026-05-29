@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import json
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -26,6 +27,7 @@ import os
 from pydantic import BaseModel
 
 from boardroom.harness.curator import BuiltPrompt
+from boardroom.harness.session import Session
 
 
 log = logging.getLogger(__name__)
@@ -66,6 +68,7 @@ class Provider(enum.Enum):
     NVIDIA = "nvidia"   # NVIDIA NIM catalog, OpenAI-compatible
     GITHUB = "github"   # GitHub Models (GPT-4o, Llama, …), OpenAI-compatible
     OPENAI = "openai"   # OpenAI direct (personal key, paid) — premium tier only
+    DEEPSEEK = "deepseek"  # DeepSeek API (paid reasoning model) — premium tier lead
 
 
 @dataclass(frozen=True)
@@ -108,7 +111,14 @@ MODELS: dict[Tier, ModelSpec] = {
     ),
     Tier.CODE: ModelSpec(
         tier=Tier.CODE,
-        model_name="qwen2.5:14b-instruct-q4_K_M",
+        # qwen2.5-coder:7b chosen 2026-05-28 after benching researcher.extract_evidence
+        # against qwen2.5:14b on a real fetched page:
+        #   - 5-8x faster warm (3-5s vs 26-27s)
+        #   - more calibrated: emits 3 high-confidence supports items vs 7-8 mid-confidence
+        #     neutral items (the 14b is sycophantic-and-verbose on per-page extraction)
+        #   - half the VRAM (4.4GB vs 8.4GB) — fits on the 2070 SUPER so calls can run
+        #     in parallel across both GPUs (paired with the per-model lock change)
+        model_name="qwen2.5-coder:7b",
         context_limit=32_000,
         temperature=0.2,
         cost_per_1k_input=0.0,
@@ -188,10 +198,12 @@ def build_cloud_chain(env: dict) -> list[CloudProvider]:
     return chain
 
 
-# Tiers important enough to lead with premium models (paid OpenAI / full
-# GPT-4o) before the free chain. These are the company's highest-stakes,
-# lowest-volume decisions, so the cost is trivial and the quality matters.
-PREMIUM_TIERS = {Tier.REASONING}
+# Tiers that lead with the premium chain (DeepSeek → OpenAI → GitHub) before the
+# free chain. REASONING = the company's highest-stakes calls. WORKHORSE = the
+# strategy/planning brain (planner.generate_tasks, CEO synthesis/rescore/spawn,
+# contradiction-hunt) — high-leverage and quality-sensitive, and cheap enough on
+# DeepSeek (~$0.0006/call) to be worth it. FAST/CODE stay free-local (volume).
+PREMIUM_TIERS = {Tier.REASONING, Tier.WORKHORSE}
 
 
 def build_premium_chain(env: dict) -> list[CloudProvider]:
@@ -202,6 +214,18 @@ def build_premium_chain(env: dict) -> list[CloudProvider]:
     frontier-class model even before OpenAI billing is set up.
     """
     chain: list[CloudProvider] = []
+    if env.get("DEEPSEEK_API_KEY"):
+        # DeepSeek reasoning model (chain-of-thought, final answer in `content`).
+        # Cheap, reliable, cloud — leads the premium chain so the highest-stakes
+        # REASONING-tier decisions get a frontier reasoning model. json_object
+        # mode: schema goes in the prompt + our Pydantic validation/fallback.
+        chain.append(CloudProvider(
+            Provider.DEEPSEEK,
+            "https://api.deepseek.com",
+            env["DEEPSEEK_API_KEY"],
+            env.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            "json_object",
+        ))
     if env.get("OPENAI_API_KEY"):
         model = env.get("OPENAI_MODEL", "gpt-5.5")
         # GPT-5.x / o-series reject custom temperature; only classic chat
@@ -232,7 +256,7 @@ def build_premium_chain(env: dict) -> list[CloudProvider]:
 # -------------------------------------------------------------------------
 
 ROUTE: dict[str, Tier] = {
-    # Reasoning — high-stakes; capped at 4/day
+    # Reasoning — high-stakes; capped at 50/day (cheap + reliable via DeepSeek)
     "ceo.thesis_kill":               Tier.REASONING,
     "ceo.phase_transition_proposal": Tier.REASONING,
     "ceo.charter_write":             Tier.REASONING,
@@ -247,43 +271,140 @@ ROUTE: dict[str, Tier] = {
     "adversary.contradiction_hunt":  Tier.WORKHORSE,
 
     # Fast — verifiers and high-volume classifiers
-    "auditor.slop_score":            Tier.FAST,
+    "auditor.slop_score":            Tier.WORKHORSE,  # upgraded: slop gate needs a reliable, accurate model (DeepSeek), not 429→mistral:7b
     "auditor.relevance_verify":      Tier.FAST,
     "phase_adjudicator.check":       Tier.FAST,
     "curator.compact_recall":        Tier.FAST,
     "reflect.lesson_propose":        Tier.FAST,
+    # Batch reflection (REFLECTION_LOOP=v2): scans a window of dissents and
+    # surfaces recurring patterns. WORKHORSE because spotting cross-run
+    # patterns is more demanding than a single-run lesson judgment.
+    "reflect.batch_propose_lessons": Tier.WORKHORSE,
 
     # Code — tool-using extractors
-    "researcher.execute_task":       Tier.CODE,
+    "researcher.execute_task":       Tier.CODE,   # legacy single-shot (kept for fallback)
     "researcher.summarize_source":   Tier.CODE,
+
+    # Agentic researcher loop (replaces the legacy single-shot when
+    # RESEARCHER_LOOP != 'legacy'). plan / synthesize / gap_check / interpret
+    # need reasoning + multi-source synthesis (WORKHORSE, DeepSeek-led);
+    # extract_evidence is per-page, high-volume, JSON-strict (CODE, local).
+    "researcher.plan_inquiry":         Tier.WORKHORSE,
+    "researcher.extract_evidence":     Tier.CODE,
+    "researcher.synthesize":           Tier.WORKHORSE,
+    "researcher.gap_check":            Tier.WORKHORSE,
+    "researcher.interpret_experiment": Tier.WORKHORSE,
+    "researcher.parse_pricing":        Tier.CODE,
+
+    # Auditor v2 loop (AUDITOR_LOOP=v2). cross_check is per-finding and
+    # fans out wide, so it lands on the same WORKHORSE tier as slop_score
+    # to inherit the DeepSeek-led premium chain (calibration + groundedness
+    # judgments need the reliable model). batch_score is pure aggregation
+    # over compact structured input — FAST is enough.
+    "auditor.cross_check_finding":     Tier.WORKHORSE,
+    "auditor.batch_score":             Tier.FAST,
+
+    # Adversary v2 loop (ADVERSARY_LOOP=v2). judge_verdict inherits the
+    # legacy REASONING tier — the final kill/weaken decision is the
+    # highest-stakes call in the loop. plan_attack is strategy + needs
+    # reliable JSON, WORKHORSE. extract_counter is per-page like the
+    # researcher's extract_evidence — CODE (local-first qwen for
+    # calibration). stress_test_interp is a small synthesis step,
+    # WORKHORSE.
+    "adversary.plan_attack":           Tier.WORKHORSE,
+    "adversary.extract_counter":       Tier.CODE,
+    "adversary.stress_test_interp":    Tier.WORKHORSE,
+    "adversary.judge_verdict":         Tier.REASONING,
+
+    # Planner v2 loop (PLANNER_LOOP=v2). All three steps share the existing
+    # planner.generate_tasks tier (WORKHORSE) — task generation is the
+    # company's most blast-radius-heavy decision and benefits from the
+    # premium chain throughout (planning, proposing, AND self-critique).
+    "planner.assess_state":            Tier.WORKHORSE,
+    "planner.propose_tasks":           Tier.WORKHORSE,
+    "planner.critique":                Tier.WORKHORSE,
 }
 
 
 DAILY_CAPS: dict[Tier, int] = {
-    Tier.REASONING: 4,
-    Tier.WORKHORSE: 200,
+    Tier.REASONING: 50,
+    # Bumped 800 → 4000 (2026-05-28). Two compounding pressures: (1) every
+    # researcher loop hits WORKHORSE 4-5× (plan_inquiry, interpret_experiment,
+    # synthesize, gap_check), (2) the v2 reworks add more WORKHORSE calls per
+    # invocation (adversary plan_attack + judge_verdict, auditor cross_check
+    # per-finding, planner assess+propose+critique). At 800 we capped daily
+    # and degraded everything to local qwen3:14b — 30-60s per call — which
+    # starved the dispatcher's 4 concurrent slots. DeepSeek is ~$0.0006/call,
+    # so 4000 caps spend at $2.40/day worst case.
+    Tier.WORKHORSE: 4000,
     Tier.FAST:      2000,
     Tier.CODE:      500,
 }
 
 
 # -------------------------------------------------------------------------
-# GPU lock — only one Ollama model hot at a time
+# GPU lock — per-model serialization
+# -------------------------------------------------------------------------
+#
+# History: a single global asyncio.Lock used to serialize EVERY local Ollama
+# call. That made one researcher loop iteration fully sequential, which was
+# the real bottleneck on swarm throughput.
+#
+# Reality: Ollama already manages its own concurrency for the same model
+# (multiple concurrent /api/chat calls against the same `model` are queued
+# inside Ollama and served one at a time per loaded copy, with internal batching
+# where possible). The thing the lock was actually protecting against was
+# VRAM thrashing — rapid swaps between different models that don't fit
+# simultaneously.
+#
+# New scheme: one lock per model name. Same model → run concurrently (Ollama
+# handles it). Different models → run concurrently too, because both GPUs
+# (5070 Ti 16GB + 2070 SUPER 8GB) can host different small models at once.
+# Ollama decides which GPU loads which based on its scheduler.
+#
+# For per-call protection against runaway VRAM use, we keep a `max_in_flight`
+# global semaphore as a hard cap — far higher than 1, but not infinite.
 # -------------------------------------------------------------------------
 
 class GPULock:
-    def __init__(self):
-        self._lock = asyncio.Lock()
-        self._current_model: Optional[str] = None
+    """
+    Per-model lock with a global in-flight cap. The `_per_model_locks` map is
+    populated lazily — the first call to a given model name gets a fresh lock
+    and subsequent calls to the SAME model serialize behind it (since one
+    Ollama copy serves them sequentially anyway). Calls to DIFFERENT models
+    run concurrently, bounded only by the global semaphore.
+    """
+
+    def __init__(self, max_in_flight: int = 4):
+        # Reasonable default for a 16GB+8GB host: ~4 small (7-8B Q4) models can
+        # be in-flight together. Override via constructor in main.py if needed.
+        self._global = asyncio.Semaphore(max_in_flight)
+        self._per_model_locks: dict[str, asyncio.Lock] = {}
+        self._per_model_lock_lock = asyncio.Lock()
+        self._in_flight: dict[str, int] = {}  # for observability / debug
+
+    async def _model_lock(self, model_name: str) -> asyncio.Lock:
+        # Lazy init under a tiny meta-lock so two concurrent callers don't
+        # both create separate Lock objects for the same model.
+        async with self._per_model_lock_lock:
+            lock = self._per_model_locks.get(model_name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._per_model_locks[model_name] = lock
+        return lock
 
     @asynccontextmanager
     async def acquire(self, model_name: str):
-        async with self._lock:
-            self._current_model = model_name
-            try:
-                yield
-            finally:
-                self._current_model = None
+        await self._global.acquire()
+        lock = await self._model_lock(model_name)
+        await lock.acquire()
+        self._in_flight[model_name] = self._in_flight.get(model_name, 0) + 1
+        try:
+            yield
+        finally:
+            self._in_flight[model_name] -= 1
+            lock.release()
+            self._global.release()
 
 
 # -------------------------------------------------------------------------
@@ -348,10 +469,20 @@ class Router:
         prompt: BuiltPrompt,
         output_schema_class: Type[BaseModel],
         triggered_by_event_id: Optional[int] = None,
+        *,
+        session: Optional[Session] = None,
+        step_name: Optional[str] = None,
+        parent_step_id: Optional[int] = None,
     ) -> tuple[BaseModel, int]:
         """
         Run an invocation. Returns (parsed_output, agent_run_id).
         Raises CostCapExceeded when the tier is capped and no downgrade applies.
+
+        When `session` is provided, the run is linked into the session's step
+        chain: session_id / step_name / parent_step_id / step_order are
+        persisted onto the agent_runs row, and step.started / step.completed
+        / step.failed events are emitted tagged with the session_id so the
+        trace UI can stream a live DAG.
         """
         invocation_type = prompt.invocation_type
         tier = ROUTE.get(invocation_type)
@@ -359,17 +490,33 @@ class Router:
             raise ValueError(f"No route for invocation_type={invocation_type!r}")
 
         downgraded = False
+        local_only = False
         async with self.pool.acquire() as conn:
             used_today = await self._calls_today(conn, tier)
             if used_today >= DAILY_CAPS[tier]:
                 fallback = self._downgrade(tier)
-                if fallback is None:
-                    raise CostCapExceeded(invocation_type)
-                tier = fallback
-                downgraded = True
+                if fallback is not None:
+                    tier = fallback
+                    downgraded = True
+                else:
+                    # Capped with no tier downgrade. The cap protects *spend*,
+                    # and local Ollama is free — so degrade to local-only
+                    # instead of halting. Keeps the loop alive (slowly, for
+                    # free) rather than flatlining once the cloud budget is
+                    # spent; cloud is retried again after the daily reset.
+                    local_only = True
+                # Surface the cap hit. Insert once per (tier, day): the events
+                # table's UNIQUE (event_type, target_type, target_id, dedup_key)
+                # turns subsequent same-day inserts into no-ops. Also flip the
+                # cost_tracking.cap_reached flag so /debug's cost panel renders
+                # a constrained-budget indicator.
+                await self._emit_cap_hit(conn, tier, used_today)
 
         # Ordered candidates: cloud first (if enabled), local as fallback.
+        # When capped, drop the (paid/rate-limited) cloud chain and run local.
         specs = self._call_order(tier)
+        if local_only:
+            specs = [s for s in specs if s.provider == Provider.OLLAMA]
         primary = specs[0]
         system_text = prompt.as_system_message()
         if downgraded and tier == Tier.WORKHORSE:
@@ -405,26 +552,62 @@ class Router:
                 log.warning("Langfuse start failed: %s", e)
                 lf_span = None
 
+        # Session linkage: pre-compute step_order and resolve parent_step_id
+        # default before the INSERT so the row carries the chain on creation.
+        sess_id: Optional[int] = None
+        sess_step_order: Optional[int] = None
+        sess_parent: Optional[int] = None
+        if session is not None and session.id:
+            sess_id = session.id
+            sess_step_order = session.next_step_order()
+            sess_parent = parent_step_id if parent_step_id is not None else session.last_step_id
+
         async with self.pool.acquire() as conn:
             run_id = await conn.fetchval(
                 """
                 INSERT INTO agent_runs (
                     department, agent_name, invocation_type,
                     model_tier, model_name, triggered_by_event_id,
-                    input_token_count, status, langfuse_trace_id
+                    input_token_count, input_summary,
+                    status, langfuse_trace_id,
+                    session_id, step_name, parent_step_id, step_order
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', $9,
+                        $10, $11, $12, $13)
                 RETURNING id
                 """,
                 agent_name, agent_name, invocation_type,
                 tier.value, primary.model_name, triggered_by_event_id,
-                prompt.total_tokens, trace_id,
+                prompt.total_tokens,
+                # Persist the full assembled prompt body so the Debug
+                # research-tree view can show exactly what the model saw.
+                system_text,
+                trace_id,
+                sess_id, step_name, sess_parent, sess_step_order,
+            )
+
+        if session is not None and session.id:
+            # Linear-chain default: next step's parent is this one. Callers
+            # passing an explicit parent_step_id (fan-out) won't rely on this.
+            session.last_step_id = run_id
+            await session.emit_event(
+                event_type="step.started",
+                payload={
+                    "step_name": step_name,
+                    "invocation_type": invocation_type,
+                    "tier": tier.value,
+                    "model": primary.model_name,
+                    "step_order": sess_step_order,
+                    "parent_step_id": sess_parent,
+                },
+                emitted_by_run_id=run_id,
             )
 
         try:
-            parsed, output_text, out_tokens, used = await self._invoke_with_fallback(
-                specs, system_text, output_schema_class,
-            )
+            parsed, output_text, out_tokens, used, fallback_attempts = \
+                await self._invoke_with_fallback(
+                    specs, system_text, output_schema_class,
+                )
 
             if lf_span:
                 try:
@@ -445,21 +628,45 @@ class Router:
                             status = 'completed',
                             model_name = $1,
                             output_token_count = $2,
-                            output_summary = $3
-                        WHERE id = $4
+                            output_summary = $3,
+                            fallback_attempts = $4::jsonb
+                        WHERE id = $5
                         """,
                         used.model_name,   # the model that actually produced output
                         out_tokens,
-                        self._summarize(parsed),
+                        # Persist the model's raw JSON output (parsed back to
+                        # canonical form) so the tree view can show what came
+                        # back. No truncation — agent_runs.output_summary is TEXT.
+                        parsed.model_dump_json(indent=2),
+                        json.dumps(fallback_attempts),
                         run_id,
                     )
-                    await self._record_cost(conn, tier, prompt.total_tokens, out_tokens)
+                    # Only cloud calls count against the daily cap — local is
+                    # free, so free local work never exhausts the budget (and
+                    # can't get itself blocked). Replay sessions skip cost
+                    # tracking entirely so re-running a past step from /trace
+                    # doesn't double-charge the cap.
+                    is_replay = session is not None and session.mode == "replay"
+                    if used.provider != Provider.OLLAMA and not is_replay:
+                        await self._record_cost(conn, tier, prompt.total_tokens, out_tokens)
                     for lid in prompt.lesson_ids:
                         await conn.execute(
                             "INSERT INTO lesson_applications (lesson_id, agent_run_id) "
                             "VALUES ($1, $2)",
                             lid, run_id,
                         )
+
+            if session is not None and session.id:
+                await session.emit_event(
+                    event_type="step.completed",
+                    payload={
+                        "step_name": step_name,
+                        "model": used.model_name,
+                        "output_tokens": out_tokens,
+                        "fallback_count": len(fallback_attempts),
+                    },
+                    emitted_by_run_id=run_id,
+                )
 
             return parsed, run_id
 
@@ -476,6 +683,12 @@ class Router:
                     "error = $1 WHERE id = $2",
                     str(e), run_id,
                 )
+            if session is not None and session.id:
+                await session.emit_event(
+                    event_type="step.failed",
+                    payload={"step_name": step_name, "error": str(e)[:200]},
+                    emitted_by_run_id=run_id,
+                )
             raise
 
     # -- Provider dispatch + fallback ------------------------------------
@@ -483,13 +696,20 @@ class Router:
     def _call_order(self, tier: Tier) -> list[ModelSpec]:
         """Premium leads (for PREMIUM_TIERS) → free cloud chain → local.
 
+        Exception: `Tier.CODE` is **local-first** because we deliberately
+        chose qwen2.5-coder:7b for its calibration + JSON discipline on
+        per-page extraction (validated by the bench). Falling back to a
+        verbose 70B cloud model defeats the purpose of the swap — it makes
+        evidence quality random based on whether the cloud chain is 429'd.
+        Cloud chain still trails as a fallback for the rare cases qwen errors.
+
         A provider can legitimately appear twice (GitHub full gpt-4o in the
         premium lead, gpt-4o-mini in the free chain) — different models, same
         connection — so we don't dedupe by provider.
         """
         local = MODELS[tier]
-        chain = (self.premium_chain if tier in PREMIUM_TIERS else []) + self.cloud_chain
-        specs = [
+        cloud_chain = self.cloud_chain
+        cloud_specs = [
             ModelSpec(
                 tier=tier,
                 model_name=cp.model_name,
@@ -499,25 +719,50 @@ class Router:
                 cost_per_1k_output=0.0,
                 provider=cp.provider,
             )
-            for cp in chain
+            for cp in cloud_chain
         ]
-        specs.append(local)
-        return specs
+
+        if tier == Tier.CODE:
+            # Local first; cloud trails as fallback only.
+            return [local] + cloud_specs
+
+        # Default: premium leads (if applicable) → free cloud chain → local.
+        premium_specs = [
+            ModelSpec(
+                tier=tier,
+                model_name=cp.model_name,
+                context_limit=max(local.context_limit, 128_000),
+                temperature=local.temperature,
+                cost_per_1k_input=0.0,
+                cost_per_1k_output=0.0,
+                provider=cp.provider,
+            )
+            for cp in (self.premium_chain if tier in PREMIUM_TIERS else [])
+        ]
+        return premium_specs + cloud_specs + [local]
 
     async def _invoke_with_fallback(
         self,
         specs: list[ModelSpec],
         system: str,
         schema_cls: Type[BaseModel],
-    ) -> tuple[BaseModel, str, int, ModelSpec]:
+    ) -> tuple[BaseModel, str, int, ModelSpec, list[dict]]:
         """
         Try each candidate in order until one returns schema-valid JSON.
         A rate-limit, timeout, transport error, OR unparseable output all
         trigger the next candidate (so a flaky cloud model degrades to local
         rather than failing the run). Raises the last error if all fail.
+
+        Returns (parsed, raw_text, output_tokens, winning_spec, attempts) where
+        `attempts` is the list of per-provider failures that fired before the
+        winner — one dict each with {provider, model, error, latency_ms}.
+        Persisted on agent_runs.fallback_attempts so /trace can show the full
+        chain that fired, not just the winner.
         """
         last_err: Optional[Exception] = None
+        attempts: list[dict] = []
         for i, spec in enumerate(specs):
+            t0 = time.monotonic()
             try:
                 if spec.provider == Provider.OLLAMA:
                     # Local calls serialize on the single GPU.
@@ -533,9 +778,15 @@ class Router:
                         timeout=self.call_timeout_s,
                     )
                 parsed = schema_cls.model_validate_json(text)
-                return parsed, text, toks, spec
+                return parsed, text, toks, spec, attempts
             except Exception as e:  # noqa: BLE001 — any failure → next candidate
                 last_err = e
+                attempts.append({
+                    "provider": spec.provider.value,
+                    "model": spec.model_name,
+                    "error": str(e)[:300],
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                })
                 if i + 1 < len(specs):
                     log.warning(
                         "model %s (%s) failed (%s); falling back to %s",
@@ -543,6 +794,44 @@ class Router:
                     )
         assert last_err is not None
         raise last_err
+
+    async def run_single(
+        self,
+        prompt: "BuiltPrompt",
+        schema_cls: Type[BaseModel],
+        provider: Provider,
+        model_name: str,
+        *,
+        temperature: float = 0.3,
+        timeout_s: Optional[float] = None,
+    ) -> tuple[str, int]:
+        """Run exactly one model for `prompt` — no cap check, no fallback, no
+        DB/cost accounting. Used by the comparison bench so the caller controls
+        exactly which model answers. Returns (raw_text, output_tokens).
+
+        `provider` must be one the Router was constructed with (present in the
+        cloud/premium chains) so its base_url/key are known; OLLAMA is always
+        available locally.
+        """
+        spec = ModelSpec(
+            tier=Tier.WORKHORSE,  # only affects accounting, which we skip here
+            model_name=model_name,
+            context_limit=128_000,
+            temperature=temperature,
+            cost_per_1k_input=0.0,
+            cost_per_1k_output=0.0,
+            provider=provider,
+        )
+        system = prompt.as_system_message()
+        to = timeout_s or self.call_timeout_s
+        if provider == Provider.OLLAMA:
+            async with self.gpu_lock.acquire(model_name):
+                return await asyncio.wait_for(
+                    self._call_ollama(spec, system, schema_cls), timeout=to,
+                )
+        return await asyncio.wait_for(
+            self._call_openai_compatible(spec, system, schema_cls), timeout=to,
+        )
 
     # -- Cloud call (OpenAI-compatible: Gemini / Groq / NVIDIA / GitHub) --
 
@@ -621,6 +910,48 @@ class Router:
             f"SELECT {col} FROM cost_tracking WHERE day = CURRENT_DATE"
         )
         return result or 0
+
+    async def _emit_cap_hit(self, conn, tier: Tier, used_today: int) -> None:
+        """Emit a `cost.cap_reached` event the first time a tier hits its cap
+        each day, and flip cost_tracking.cap_reached for the day.
+
+        Dedup is enforced by the events table's UNIQUE constraint on
+        (event_type, target_type, target_id, dedup_key) — subsequent calls
+        the same day are no-ops, so this is safe to call on every invoke
+        while the tier is capped.
+
+        The event surfaces in the /events page and streams via WebSocket
+        so a cap hit is visible immediately, not buried in logs.
+        """
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO events (
+                    event_type, target_type, target_id, payload, dedup_key
+                )
+                VALUES ('cost.cap_reached', 'tier', 0, $1::jsonb, $2)
+                ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                """,
+                json.dumps({
+                    "tier": tier.value,
+                    "calls_today": used_today,
+                    "cap": DAILY_CAPS[tier],
+                    "day": today,
+                }),
+                f"cap-{tier.value}-{today}",
+            )
+            # Flag is global (per-day, not per-tier); set true on first cap of any tier.
+            await conn.execute(
+                """
+                INSERT INTO cost_tracking (day, cap_reached)
+                VALUES (CURRENT_DATE, TRUE)
+                ON CONFLICT (day) DO UPDATE SET cap_reached = TRUE
+                """,
+            )
+        except Exception as e:  # noqa: BLE001 — telemetry must never block the call
+            log.warning("failed to emit cost.cap_reached for %s: %s", tier.value, e)
 
     async def _record_cost(self, conn, tier: Tier, in_toks: int, out_toks: int):
         col = f"{tier.value}_calls"

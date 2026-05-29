@@ -6,7 +6,7 @@ proposals. The CEO ratifies, rejects, or defers. R-tier (highest stakes).
 
 Special case: when ratifying a move to commitment OR execution, the SAME
 invocation writes the full charter and transitions straight to execution
-(commitment is a moment, not a phase to dwell in). The losing theses are
+(commitment is a moment, not a phase to dwell in). The losing claims are
 marked 'merged' with parent_id pointing to the winning one.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 # -------------------------------------------------------------------------
 
 class CharterContent(BaseModel):
-    thesis:         str = Field(..., min_length=40, description="One paragraph: the chosen thesis.")
+    claim:         str = Field(..., min_length=40, description="One paragraph: the chosen claim.")
     niche:          str = Field(..., min_length=20, description="The specific market niche / segment.")
     audience:       str = Field(..., min_length=20, description="Who the customers are; where to reach them.")
     product:        str = Field(..., min_length=20, description="What we make / sell. Concrete.")
@@ -37,9 +37,9 @@ class CharterContent(BaseModel):
 class PhaseTransitionDecision(BaseModel):
     action:           Literal["ratify", "reject", "defer"]
     reasoning:        str = Field(..., min_length=20)
-    chosen_thesis_id: Optional[int] = Field(
+    chosen_claim_id: Optional[int] = Field(
         default=None,
-        description="If transitioning to commitment/execution: the winning thesis.",
+        description="If transitioning to commitment/execution: the winning claim.",
     )
     charter:          Optional[CharterContent] = Field(
         default=None,
@@ -57,10 +57,10 @@ async def _build_phase_transition_task_data(ctx: dict, state, memory) -> PromptL
     adjudicator_reasoning = ctx["adjudicator_reasoning"]
     forced         = ctx.get("forced", False)
 
-    theses = await state.get_active_theses(limit=20)
-    theses_lines = "\n".join(
+    claims = await state.get_active_claims(limit=20)
+    claims_lines = "\n".join(
         f"- T{t.id}: conf {t.confidence:.2f}  ·  '{t.claim}'"
-        for t in theses
+        for t in claims
     ) or "(none active)"
 
     forced_note = (
@@ -74,8 +74,8 @@ async def _build_phase_transition_task_data(ctx: dict, state, memory) -> PromptL
 You are transitioning toward execution. This is the company's defining commit.
 
 If ratifying:
-  1. Pick ONE winning thesis (chosen_thesis_id). Losers become 'merged'.
-  2. Write the full charter (thesis / niche / audience / product / gtm /
+  1. Pick ONE winning claim (chosen_claim_id). Losers become 'merged'.
+  2. Write the full charter (claim / niche / audience / product / gtm /
      success_metric). Be specific. "Build a SaaS" is useless; "Self-hosted
      Postgres-tuning advisor for solo founders, $39/mo, distributed via
      developer Twitter" is workable.
@@ -83,14 +83,14 @@ If ratifying:
 The charter becomes immutable for the rest of the run.
 
 Actions:
-  - ratify:  name chosen_thesis_id, fill in the charter
+  - ratify:  name chosen_claim_id, fill in the charter
   - reject:  stay in current phase; explain what's missing
   - defer:   ask for more evidence; sets a 12h adjudicator cooldown
 """
     else:
         instructions = """
 You are transitioning to convergence. This is a softer step — narrow the
-field and hunt contradictions on the top theses, but no commitment yet.
+field and hunt contradictions on the top claims, but no commitment yet.
 
 Actions:
   - ratify:  enter convergence
@@ -104,8 +104,8 @@ Actions:
 **Adjudicator reasoning:**
 {adjudicator_reasoning}{forced_note}
 
-## Active theses
-{theses_lines}
+## Active claims
+{claims_lines}
 
 ---
 {instructions}
@@ -120,7 +120,7 @@ if "ceo.phase_transition_proposal" not in RECIPES:
         agent="ceo",
         total_budget=15_000,
         use_cold_path=True,
-        recall_sessions=["theses-lifecycle", "ceo-deliberations", "phase-transitions"],
+        recall_sessions=["claims-lifecycle", "ceo-deliberations", "phase-transitions"],
         recall_k=10,
         output_schema="PhaseTransitionDecision",
         task_data_builder=_build_phase_transition_task_data,
@@ -134,7 +134,7 @@ if "ceo.phase_transition_proposal" not in RECIPES:
 async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[dict]:
     """
     Triggered by phase.transition_proposed. CEO ratifies, rejects, or defers.
-    On ratify → commitment/execution: writes charter, marks losing theses
+    On ratify → commitment/execution: writes charter, marks losing claims
     'merged', transitions company_state straight to execution.
     """
     payload = event["payload"] or {}
@@ -158,10 +158,16 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
         },
     )
 
+    # Thread through the dispatcher's session for /trace observability.
+    # Phase transition stays single-step — there's no behaviour-meaningful
+    # split — but routing it through the session means the call shows up
+    # in the trace DAG just like multi-step handlers.
     decision, run_id = await dispatcher.router.invoke(
         prompt=prompt,
         output_schema_class=PhaseTransitionDecision,
         triggered_by_event_id=event["id"],
+        session=dispatcher.session,
+        step_name="phase_transition_decision",
     )
 
     result: dict = {
@@ -211,7 +217,7 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
             if write_charter and decision.charter is not None:
                 charter_md = (
                     f"# Charter\n\n"
-                    f"## Thesis\n{decision.charter.thesis}\n\n"
+                    f"## Thesis\n{decision.charter.claim}\n\n"
                     f"## Niche\n{decision.charter.niche}\n\n"
                     f"## Audience\n{decision.charter.audience}\n\n"
                     f"## Product\n{decision.charter.product}\n\n"
@@ -223,36 +229,36 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
                     UPDATE company_state
                     SET current_phase = $1::phase,
                         phase_started_at = NOW(),
-                        thesis   = $2,
+                        claim   = $2,
                         niche    = $3,
                         audience = $4,
                         charter  = $5
                     WHERE id = 1
                     """,
                     effective_target,
-                    decision.charter.thesis,
+                    decision.charter.claim,
                     decision.charter.niche,
                     decision.charter.audience,
                     charter_md,
                 )
-                if decision.chosen_thesis_id is not None:
+                if decision.chosen_claim_id is not None:
                     await conn.execute(
                         """
-                        UPDATE theses
+                        UPDATE claims
                         SET status = 'merged',
                             parent_id = $1,
                             updated_at = NOW()
                         WHERE status = 'active' AND id != $1
                         """,
-                        decision.chosen_thesis_id,
+                        decision.chosen_claim_id,
                     )
                     await conn.execute(
                         """
-                        UPDATE theses
+                        UPDATE claims
                         SET status = 'promoted', updated_at = NOW()
                         WHERE id = $1
                         """,
-                        decision.chosen_thesis_id,
+                        decision.chosen_claim_id,
                     )
             else:
                 await conn.execute(
@@ -269,18 +275,18 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
                 """
                 INSERT INTO phase_transitions (
                     from_phase, to_phase, reason,
-                    cited_thesis_ids, proposed_by_run_id, forced
+                    cited_claim_ids, proposed_by_run_id, forced
                 )
                 VALUES ($1::phase, $2::phase, $3, $4, $5, $6)
                 """,
                 from_phase, effective_target, decision.reasoning,
-                payload.get("cited_thesis_ids", []),
+                payload.get("cited_claim_ids", []),
                 run_id, payload.get("forced", False),
             )
 
     result["effective_target_phase"] = effective_target
-    if decision.chosen_thesis_id is not None:
-        result["chosen_thesis_id"] = decision.chosen_thesis_id
+    if decision.chosen_claim_id is not None:
+        result["chosen_claim_id"] = decision.chosen_claim_id
     if write_charter:
         result["charter_written"] = True
 

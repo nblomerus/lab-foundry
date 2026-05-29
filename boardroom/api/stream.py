@@ -65,6 +65,12 @@ class StreamHub:
         # Enrich the event with the row that changed so clients can update in place.
         enrichment = await self._enrich(row)
 
+        payload = row["payload"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload) if payload else {}
+            except Exception:
+                payload = {}
         msg = {
             "type": "event",
             "event": {
@@ -72,7 +78,8 @@ class StreamHub:
                 "event_type": row["event_type"],
                 "target_type": row["target_type"],
                 "target_id": row["target_id"],
-                "payload": dict(row["payload"]) if row["payload"] else {},
+                "session_id": row["session_id"],
+                "payload": dict(payload) if payload else {},
                 "status": row["status"],
                 "emitted_at": row["emitted_at"].isoformat(),
             },
@@ -81,18 +88,27 @@ class StreamHub:
         await self._fanout(msg)
 
     async def _enrich(self, event_row: asyncpg.Record) -> dict[str, Any]:
-        """For events that change a known entity, attach its updated state."""
+        """For events that change a known entity, attach its updated state.
+
+        Skips enrichment entirely for step.* / session.* events: their payload
+        already carries everything the trace UI needs (step_name, model,
+        status, error, session_id) and the per-step volume would otherwise
+        run two pool queries per event × N clients, exhausting asyncpg.
+        """
         if self._pool is None:
             return {}
         target_type = event_row["target_type"]
         target_id = event_row["target_id"]
         event_type = event_row["event_type"]
 
+        if event_type.startswith(("step.", "session.")):
+            return {"session_id": event_row.get("session_id")}
+
         try:
             async with self._pool.acquire() as conn:
                 if target_type == "thesis" and target_id:
                     t = await conn.fetchrow(
-                        "SELECT * FROM theses WHERE id = $1", target_id,
+                        "SELECT * FROM claims WHERE id = $1", target_id,
                     )
                     if t:
                         return {"thesis": _serialize(t)}

@@ -15,6 +15,7 @@ handler implementations live in src/handlers/.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 from datetime import datetime, timezone
@@ -22,9 +23,20 @@ from typing import Awaitable, Callable, Optional
 
 import asyncpg
 
+from boardroom.harness.session import Session
+
 log = logging.getLogger(__name__)
 
 Handler = Callable[[dict, "Dispatcher"], Awaitable[Optional[dict]]]
+
+
+# Per-task session handle. Each handler invocation runs as its own asyncio
+# task spawned in _on_notify → _process_event; asyncio.create_task copies the
+# contextvars context at creation time, so setting this var inside one
+# handler's process never leaks into a concurrent handler. Access from
+# handler code is via `dispatcher.session`.
+_current_session: contextvars.ContextVar[Optional[Session]] = \
+    contextvars.ContextVar("boardroom_current_session", default=None)
 
 
 # -------------------------------------------------------------------------
@@ -37,11 +49,11 @@ Handler = Callable[[dict, "Dispatcher"], Awaitable[Optional[dict]]]
 COOLDOWNS: dict[tuple[str, str], dict] = {
     # (event_type, target_type) -> the invocation_type whose cooldown gates this
     # event. The cooldown rows live in the cooldowns table keyed by invocation_type.
-    ("finding.high_signal",       "thesis"): {
-        "invocation_type": "adversary.kill_verdict",
+    ("finding.high_signal",       "claim"): {
+        "invocation_type": "critic.attack",
         "cooldown_s": 14_400,
     },
-    ("thesis.confidence_changed", "thesis"): {
+    ("claim.confidence_changed",  "claim"): {
         "invocation_type": "phase_adjudicator.check",
         "cooldown_s": 1_800,
     },
@@ -53,7 +65,7 @@ COOLDOWNS: dict[tuple[str, str], dict] = {
 
 # Events that ALWAYS bypass cooldowns and most gates
 URGENT_EVENTS = frozenset({
-    "thesis.invalidated",
+    "claim.invalidated",
     "audit.slop_detected",
     "phase.budget_exceeded",
     "phase.transition_proposed",
@@ -62,10 +74,12 @@ URGENT_EVENTS = frozenset({
 
 # Phase budget in days (1.5× → forcing function)
 PHASE_BUDGET_DAYS = {
-    "exploration": 10,
-    "convergence": 7,
-    "commitment":  3,
-    "execution":   10,
+    "frame":       10,
+    "hypothesize": 7,
+    "experiment":  14,
+    "validate":    7,
+    "write":       7,
+    "submit":      3,
 }
 
 
@@ -97,6 +111,17 @@ class Dispatcher:
         if event_type in self._handlers:
             log.warning("overwriting handler for %s", event_type)
         self._handlers[event_type] = handler
+
+    @property
+    def session(self) -> Optional[Session]:
+        """The Session for the currently-executing handler (None outside one).
+
+        Per-task contextvar — concurrent handlers each see their own session
+        without explicit threading. Handlers pass it through to
+        `router.invoke(session=dispatcher.session, step_name=...)` so each
+        multi-step invocation lights up as a DAG in /trace.
+        """
+        return _current_session.get()
 
     async def run(self) -> None:
         """Main loop. Blocks until stop() is called."""
@@ -170,12 +195,31 @@ class Dispatcher:
         # events doesn't launch unbounded handlers at once. Gate checks above
         # run first (and cheaply), so suppressed events never occupy a slot.
         async with self._handler_sem:
+            session = Session(
+                handler_name=handler.__name__,
+                triggered_by_event_id=event_id,
+            )
+            try:
+                await session.start(self.pool)
+            except Exception:
+                # Session bookkeeping failure must not block the handler —
+                # session.id stays 0 and router.invoke skips step linkage,
+                # behaving exactly like the pre-session path.
+                log.exception("session.start failed for event %s; running without trace", event_id)
+            token = _current_session.set(session)
             try:
                 result = await handler(event, self)
                 await self._mark_consumed(event_id, handler.__name__, result)
+                await session.finish("completed")
             except Exception as e:
                 log.exception("handler %s failed for event %s", handler.__name__, event_id)
                 await self._mark_failed(event_id, str(e))
+                try:
+                    await session.finish("failed", error=str(e))
+                except Exception:
+                    log.exception("session.finish failed for event %s", event_id)
+            finally:
+                _current_session.reset(token)
 
     # -- Event state transitions ----------------------------------------
 

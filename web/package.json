@@ -2,8 +2,12 @@
   "name": "boardroom-web",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
-    "dev": "next dev",
+    "predev": "node -e \"var m=+process.versions.node.split('.')[0];if(m<20){console.error('\\n  Boardroom web requires Node >=20 (you are on '+process.version+').\\n  Run: nvm use   (see .nvmrc)\\n');process.exit(1);}\"",
+    "dev": "next dev -p 8088",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -11,6 +15,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@xyflow/react": "^12.10.2",
+    "dagre": "^0.8.5",
     "framer-motion": "^11.11.0",
     "lucide-react": "^0.456.0",
     "next": "16.2.4",
@@ -22,6 +28,7 @@
     "@tailwindcss/postcss": "^4",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
+    "@types/dagre": "^0.7.54",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

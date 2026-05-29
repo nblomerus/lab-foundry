@@ -1,7 +1,7 @@
 """
-CEO handler — triggered by 'thesis.invalidated' events.
+CEO handler — triggered by 'claim.invalidated' events.
 
-When the Adversary kills a thesis, the CEO decides what to do next:
+When the Adversary kills a claim, the CEO decides what to do next:
 
   - spawn:     1-2 new replacement categories with disambiguating tasks
   - no_action: the loss is fine; existing siblings cover the space
@@ -45,9 +45,9 @@ class SpawnReplacementDecision(BaseModel):
         default_factory=list, max_length=2,
         description="If action='spawn': 1-2 new categories. Empty otherwise.",
     )
-    pivot_thesis_id: Optional[int] = Field(
+    pivot_claim_id: Optional[int] = Field(
         default=None,
-        description="If action='pivot': sibling thesis whose priority should rise.",
+        description="If action='pivot': sibling claim whose priority should rise.",
     )
 
 
@@ -56,11 +56,11 @@ class SpawnReplacementDecision(BaseModel):
 # -------------------------------------------------------------------------
 
 async def _build_spawn_replacement_task_data(ctx: dict, state, memory) -> PromptLayer:
-    killed_thesis_id = ctx["killed_thesis_id"]
+    killed_claim_id = ctx["killed_claim_id"]
 
     killed_thesis, siblings = await asyncio.gather(
-        state.get_thesis(killed_thesis_id),
-        state.get_active_theses(limit=20),
+        state.get_claim(killed_claim_id),
+        state.get_active_claims(limit=20),
     )
 
     sibling_lines = "\n".join(
@@ -68,9 +68,9 @@ async def _build_spawn_replacement_task_data(ctx: dict, state, memory) -> Prompt
         for t in siblings
     ) or "(no active siblings — this kill leaves the slate near-empty)"
 
-    content = f"""## A thesis was just killed — what's next?
+    content = f"""## A claim was just killed — what's next?
 
-## The killed thesis
+## The killed claim
 **Claim:** {killed_thesis.claim}
 **Born:** {killed_thesis.created_at:%Y-%m-%d}
 **Final confidence:** {killed_thesis.confidence:.2f}
@@ -84,13 +84,13 @@ async def _build_spawn_replacement_task_data(ctx: dict, state, memory) -> Prompt
 Decide ONE of:
 
   - `spawn`:     1-2 NEW candidate categories that explore adjacent space.
-                Each must NOT repeat the killed thesis's failure mode.
+                Each must NOT repeat the killed claim's failure mode.
                 Distinct from existing siblings.
 
-  - `no_action`: the killed thesis is a dead-end already covered by
+  - `no_action`: the killed claim is a dead-end already covered by
                 replacements. Don't pad the slate. Empty categories list.
 
-  - `pivot`:     instead of spawning, name ONE sibling thesis_id whose
+  - `pivot`:     instead of spawning, name ONE sibling claim_id whose
                 energy should rise. The Planner will weight tasks toward it.
 
 Be honest. If you don't have a sharp replacement idea, say no_action.
@@ -102,11 +102,11 @@ Padding the slate is worse than fewer-but-real categories.
 if "ceo.spawn_replacement" not in RECIPES:
     RECIPES["ceo.spawn_replacement"] = Recipe(
         invocation_type="ceo.spawn_replacement",
-        description="CEO decides whether to spawn replacements after a thesis is killed.",
+        description="CEO decides whether to spawn replacements after a claim is killed.",
         agent="ceo",
         total_budget=8_000,
         use_cold_path=True,
-        recall_sessions=["theses-lifecycle", "ceo-deliberations"],
+        recall_sessions=["claims-lifecycle", "ceo-deliberations"],
         recall_k=8,
         output_schema="SpawnReplacementDecision",
         task_data_builder=_build_spawn_replacement_task_data,
@@ -117,15 +117,15 @@ if "ceo.spawn_replacement" not in RECIPES:
 # Handler
 # -------------------------------------------------------------------------
 
-async def handle_thesis_invalidated(event: dict, dispatcher) -> Optional[dict]:
+async def handle_claim_invalidated(event: dict, dispatcher) -> Optional[dict]:
     """
-    Triggered by thesis.invalidated. CEO decides how to respond.
+    Triggered by claim.invalidated. CEO decides how to respond.
     """
-    killed_thesis_id = event["target_id"]
+    killed_claim_id = event["target_id"]
 
     prompt = await dispatcher.curator.build(
         invocation_type="ceo.spawn_replacement",
-        context={"killed_thesis_id": killed_thesis_id},
+        context={"killed_claim_id": killed_claim_id},
     )
 
     decision, run_id = await dispatcher.router.invoke(
@@ -135,21 +135,21 @@ async def handle_thesis_invalidated(event: dict, dispatcher) -> Optional[dict]:
     )
 
     result: dict = {
-        "killed_thesis_id": killed_thesis_id,
+        "killed_claim_id": killed_claim_id,
         "action": decision.action,
         "run_id": run_id,
     }
 
     if decision.action == "spawn":
-        new_thesis_ids: list[int] = []
+        new_claim_ids: list[int] = []
         for cat in decision.categories:
-            thesis = await dispatcher.state.create_thesis(
+            claim = await dispatcher.state.create_claim(
                 claim=cat.claim,
                 initial_confidence=0.40,
-                parent_id=killed_thesis_id,
+                parent_id=killed_claim_id,
                 created_by_run_id=run_id,
             )
-            new_thesis_ids.append(thesis.id)
+            new_claim_ids.append(claim.id)
 
             async with dispatcher.pool.acquire() as conn:
                 async with conn.transaction():
@@ -157,37 +157,37 @@ async def handle_thesis_invalidated(event: dict, dispatcher) -> Optional[dict]:
                         await conn.execute(
                             """
                             INSERT INTO tasks (
-                                thesis_id, department, task_type,
+                                claim_id, department, task_type,
                                 description, payload, priority
                             )
                             VALUES ($1, 'research', 'disambiguate', $2, $3::jsonb, 5)
                             """,
-                            thesis.id, q,
+                            claim.id, q,
                             json.dumps({
                                 "query": q,
                                 "sources": ["web", "hacker_news", "reddit"],
                             }),
                         )
-        result["new_thesis_ids"] = new_thesis_ids
+        result["new_claim_ids"] = new_claim_ids
 
-    elif decision.action == "pivot" and decision.pivot_thesis_id is not None:
+    elif decision.action == "pivot" and decision.pivot_claim_id is not None:
         async with dispatcher.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE tasks SET priority = LEAST(10, priority + 2) "
-                "WHERE thesis_id = $1 AND status = 'pending'",
-                decision.pivot_thesis_id,
+                "WHERE claim_id = $1 AND status = 'pending'",
+                decision.pivot_claim_id,
             )
-        result["pivoted_thesis_id"] = decision.pivot_thesis_id
+        result["pivoted_claim_id"] = decision.pivot_claim_id
 
     await dispatcher.memory.write_message(
         session_id="ceo-deliberations",
         content=(
-            f"On the kill of T{killed_thesis_id}: action={decision.action}. "
+            f"On the kill of T{killed_claim_id}: action={decision.action}. "
             f"Reasoning: {decision.reasoning}"
         ),
         role_type="ceo",
         metadata={
-            "killed_thesis_id": killed_thesis_id,
+            "killed_claim_id": killed_claim_id,
             "run_id": run_id,
             "action": decision.action,
         },

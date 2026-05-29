@@ -4,7 +4,7 @@ import { Target } from "lucide-react";
 import type { Thesis } from "../lib/types";
 import { Badge, Card, SectionTitle, Progress } from "./ui";
 
-function deltaPill(t: Thesis): { label: string; tone: "green" | "red" | "default" } {
+function deltaPill(t: Claim): { label: string; tone: "green" | "red" | "default" } {
   if (t.confidence_prev == null) return { label: "—", tone: "default" };
   const d = t.confidence - t.confidence_prev;
   if (d > 0.05) return { label: `+${d.toFixed(2)}`, tone: "green" };
@@ -12,21 +12,21 @@ function deltaPill(t: Thesis): { label: string; tone: "green" | "red" | "default
   return { label: "flat", tone: "default" };
 }
 
-export function ThesesPanel({ theses }: { theses: Thesis[] }) {
+export function ThesesPanel({ claims }: { claims: Claim[] }) {
   return (
     <Card className="lg:col-span-5">
       <SectionTitle
         icon={Target}
-        title="Active theses"
+        title="Active claims"
         subtitle="Candidate businesses. Ranked by confidence."
       />
-      {theses.length === 0 ? (
+      {claims.length === 0 ? (
         <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
-          No active theses. CEO needs to spawn replacements.
+          No active claims. CEO needs to spawn replacements.
         </div>
       ) : (
         <div className="space-y-3">
-          {theses.map((t) => {
+          {claims.map((t) => {
             const d = deltaPill(t);
             const confPct = Math.round(t.confidence * 100);
             const confTone =

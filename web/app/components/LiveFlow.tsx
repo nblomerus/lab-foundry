@@ -92,14 +92,14 @@ function deriveNodeStatus(node: NodeDef, snap: Snapshot): NodeStatus {
     };
   }
 
-  if (node.id === "theses") {
-    const a = snap.state.active_thesis_count;
-    const k = snap.state.killed_thesis_count;
-    const top = snap.active_theses[0];
+  if (node.id === "claims") {
+    const a = snap.state.active_claim_count;
+    const k = snap.state.invalidated_claim_count;
+    const top = snap.active_claims[0];
     return {
       tone: a > 0 ? "active" : "warn",
       badge: `${a} active`,
-      current: top ? `top T${top.id} conf ${top.confidence.toFixed(2)}` : "no theses",
+      current: top ? `top T${top.id} conf ${top.confidence.toFixed(2)}` : "no claims",
       details: [
         `${a} active · ${k} killed/merged`,
         top ? `top T${top.id}: conf ${top.confidence.toFixed(2)}` : "no active",

@@ -16,6 +16,7 @@ applications, or retires after 3 contradicting applications.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -44,6 +45,18 @@ class ReflectionOutput(BaseModel):
     reasoning:           str = Field(..., min_length=10)
 
 
+# v2 (REFLECTION_LOOP=v2): one LLM call sees a *batch* of recent dissenting
+# runs and looks for patterns ACROSS them. Lessons that show up once aren't
+# patterns; lessons that show up three times are.
+class BatchReflectionOutput(BaseModel):
+    lessons: list[LessonCandidate] = Field(
+        default_factory=list,
+        description="0-3 lessons that recur across the batch. Empty is the correct answer when no pattern is visible.",
+    )
+    reasoning: str = Field(..., min_length=10,
+                           description="One sentence per emitted lesson, or 'no recurring pattern' if none.")
+
+
 # -------------------------------------------------------------------------
 # Task-data builder + recipe
 # -------------------------------------------------------------------------
@@ -70,13 +83,13 @@ A good lesson is:
 
 Good examples:
   - "Findings citing AI-generated newsletters often score 8+ but yield
-    low-quality theses — discount them by 2 points."
+    low-quality claims — discount them by 2 points."
   - "Theses depending on 'enterprises will need X' fail when X already has
     competitors — always check the existing-solutions landscape first."
 
 Bad examples (do NOT write these):
   - "Always be more careful." (vague)
-  - "Don't propose thesis T17 again." (too specific)
+  - "Don't propose claim T17 again." (too specific)
   - "Try harder." (worthless)
 
 Bias is toward should_create_lesson=FALSE. Most dissents are one-off
@@ -100,11 +113,92 @@ if "reflect.lesson_propose" not in RECIPES:
     )
 
 
+# v2 batch prompt: read N recent dissents and surface lessons that RECUR.
+async def _build_batch_reflection_task_data(ctx: dict, state, memory) -> PromptLayer:
+    runs = ctx["runs"]  # list[dict]: {id, invocation_type, output_summary, started_at}
+    if not runs:
+        body = "(no dissents in the window — emit empty lessons list)"
+    else:
+        blocks = []
+        for r in runs:
+            blocks.append(
+                f"### Run #{r['id']} ({r['invocation_type']}, {r['ago']})\n"
+                f"{(r['output_summary'] or '(no summary)')[:1200]}"
+            )
+        body = "\n\n".join(blocks)
+
+    content = f"""## Reflection across recent dissenting runs
+
+You see {len(runs)} runs from the last batch window. Each is a run that
+involved dissent (audit slop, adversary kill, critic non-pass).
+
+{body}
+
+---
+
+Find **recurring** patterns. A lesson is only worth proposing when:
+
+- It appears in **≥ 2** runs above (one-off mistakes don't generalize), AND
+- It's **specific enough** for a future agent to act on, AND
+- It's **falsifiable** — a future run will validate or contradict it.
+
+For each lesson, set:
+  - `applies_to_invocation`: the invocation_type the lesson targets
+    (e.g. `researcher.synthesize`, `adversary.judge_verdict`).
+  - `applies_when`: a small predicate dict, or {{}} for always.
+  - `lesson_text`: the heuristic. Imperative voice. ≤ 1 sentence.
+  - `rationale`: which 2+ runs above show the pattern, briefly.
+
+Emit at most 3 lessons. **Empty list is the correct answer** when no pattern
+recurs — most batches should be empty. `reasoning`: one sentence per lesson,
+or "no recurring pattern" if none.
+
+Bad (do NOT emit):
+  - "Be more careful" (vague, unfalsifiable)
+  - "Don't kill T17" (too specific)
+  - A lesson visible in only 1 run (not recurring)
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
+if "reflect.batch_propose_lessons" not in RECIPES:
+    RECIPES["reflect.batch_propose_lessons"] = Recipe(
+        invocation_type="reflect.batch_propose_lessons",
+        description="Find lessons that recur across a batch of recent dissents.",
+        agent="auditor",
+        # Larger budget: batch of ~10-20 dissents × 1200 chars each
+        total_budget=12_000,
+        use_cold_path=False,
+        recall_sessions=[],
+        recall_k=0,
+        output_schema="BatchReflectionOutput",
+        task_data_builder=_build_batch_reflection_task_data,
+    )
+
+
 # -------------------------------------------------------------------------
 # Handler
 # -------------------------------------------------------------------------
 
 async def handle_reflection_requested(event: dict, dispatcher) -> Optional[dict]:
+    """
+    REFLECTION_LOOP=v2 → batch mode: gather the last `REFLECTION_BATCH_HOURS`
+    of dissenting runs, propose lessons that recur across them.
+
+    Default (legacy) → original per-event behaviour: read one run, judge if
+    it generalizes.
+
+    Batch mode is the higher-leverage redesign because lessons that only
+    show up in a single run are usually one-off mistakes; lessons that
+    show up in three are patterns worth recording.
+    """
+    impl = os.environ.get("REFLECTION_LOOP", "v2").lower()
+    if impl == "v2":
+        return await _handle_batch_reflection(event, dispatcher)
+    return await _handle_legacy_reflection(event, dispatcher)
+
+
+async def _handle_legacy_reflection(event: dict, dispatcher) -> Optional[dict]:
     target_run_id = event["target_id"]
 
     async with dispatcher.pool.acquire() as conn:
@@ -128,6 +222,8 @@ async def handle_reflection_requested(event: dict, dispatcher) -> Optional[dict]
         prompt=prompt,
         output_schema_class=ReflectionOutput,
         triggered_by_event_id=event["id"],
+        session=dispatcher.session,
+        step_name="reflect_legacy",
     )
 
     if not reflection.should_create_lesson or reflection.candidate is None:
@@ -151,4 +247,113 @@ async def handle_reflection_requested(event: dict, dispatcher) -> Optional[dict]
         "lesson_id":      lesson_id,
         "lesson_text":    reflection.candidate.lesson_text,
         "run_id":         run_id,
+    }
+
+
+# v2 batch handler -----------------------------------------------------------
+
+# How far back to gather dissenting runs. Default 7 days — short enough that
+# the LLM batch fits comfortably, long enough that recurring patterns have
+# room to repeat. Override via env.
+_BATCH_HOURS = int(os.environ.get("REFLECTION_BATCH_HOURS", "168"))
+
+# Cap on how many runs go into one batch prompt. Per-run summaries are capped
+# in the builder (1200 chars), so 20 runs ≈ 24KB worst case — well inside the
+# 12k token budget once the system + recall layers are added.
+_BATCH_MAX_RUNS = 20
+
+# Dedup: don't fire batch reflection more than once per N seconds. The trigger
+# fires per event, but batch mode wants weekly cadence. We approximate that
+# by short-circuiting when a recent batch already ran successfully.
+_BATCH_MIN_GAP_SECONDS = 6 * 3600
+
+
+async def _handle_batch_reflection(event: dict, dispatcher) -> Optional[dict]:
+    async with dispatcher.pool.acquire() as conn:
+        # Dedup: did a successful batch reflection run recently?
+        recent_batch = await conn.fetchval(
+            """
+            SELECT EXTRACT(EPOCH FROM (NOW() - started_at))::int
+            FROM agent_runs
+            WHERE invocation_type = 'reflect.batch_propose_lessons'
+              AND status = 'completed'
+            ORDER BY started_at DESC LIMIT 1
+            """
+        )
+        if recent_batch is not None and recent_batch < _BATCH_MIN_GAP_SECONDS:
+            return {
+                "skipped": True,
+                "reason": f"recent batch reflection {recent_batch}s ago (< {_BATCH_MIN_GAP_SECONDS}s)",
+            }
+
+        rows = await conn.fetch(
+            f"""
+            SELECT id, invocation_type, output_summary, started_at
+            FROM agent_runs
+            WHERE status = 'completed'
+              AND output_summary IS NOT NULL
+              AND started_at > NOW() - INTERVAL '{_BATCH_HOURS} hours'
+              -- focus on invocation types where dissent is informative
+              AND invocation_type IN (
+                  'adversary.kill_verdict',
+                  'adversary.judge_verdict',
+                  'auditor.slop_score',
+                  'auditor.batch_score',
+                  'ceo.thesis_kill'
+              )
+            ORDER BY started_at DESC LIMIT $1
+            """,
+            _BATCH_MAX_RUNS,
+        )
+
+    if not rows:
+        return {"skipped": True, "reason": f"no dissenting runs in last {_BATCH_HOURS}h"}
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    def _ago(ts) -> str:
+        delta = (now - ts).total_seconds()
+        if delta < 3600:
+            return f"{int(delta // 60)}m ago"
+        if delta < 86400:
+            return f"{int(delta // 3600)}h ago"
+        return f"{int(delta // 86400)}d ago"
+
+    runs = [
+        {"id": r["id"], "invocation_type": r["invocation_type"],
+         "output_summary": r["output_summary"], "ago": _ago(r["started_at"])}
+        for r in rows
+    ]
+
+    prompt = await dispatcher.curator.build(
+        invocation_type="reflect.batch_propose_lessons",
+        context={"runs": runs},
+    )
+
+    output, run_id = await dispatcher.router.invoke(
+        prompt=prompt,
+        output_schema_class=BatchReflectionOutput,
+        triggered_by_event_id=event["id"],
+        session=dispatcher.session,
+        step_name="batch_propose_lessons",
+    )
+
+    created_ids: list[int] = []
+    for cand in output.lessons:
+        lid = await dispatcher.lessons.insert_lesson_candidate(
+            invocation_type=cand.applies_to_invocation,
+            applies_when=cand.applies_when,
+            lesson_text=cand.lesson_text,
+            rationale=cand.rationale,
+            derived_from_run_id=run_id,
+            derived_via="reflection",
+        )
+        created_ids.append(lid)
+
+    return {
+        "batch_size":    len(runs),
+        "lessons":       len(created_ids),
+        "lesson_ids":    created_ids,
+        "run_id":        run_id,
+        "reasoning":     output.reasoning,
     }

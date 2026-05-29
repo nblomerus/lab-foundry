@@ -1,19 +1,19 @@
 """
-Bootstrap the company. Run once at the start of a 30-day cycle.
+Bootstrap the LabFoundry research lab. Run once at the start of a research mandate.
 
 Steps:
-  1. Seed company_state with the problem / stance / success-criterion.
-  2. Invoke the CEO in 'ceo.exploration_kickoff' mode to generate 4-6
-     candidate business categories.
-  3. Insert each category as a probationary thesis (confidence=0.40).
-  4. For each thesis, queue its disambiguating questions as research tasks.
-  5. Emit 'company.bootstrapped' event so the dispatcher takes over.
+  1. Seed company_state with the research mandate / methodology / success-criterion.
+  2. Invoke the PI in 'pi.frame_research' mode to generate 4-6
+     candidate research questions.
+  3. Insert each question as a claim with initial confidence (confidence=0.40).
+  4. For each claim, queue knowledge acquisition tasks to ground it in literature.
+  5. Emit 'company.bootstrapped' event so the harness begins the research loop.
 
 Usage:
-    python -m src.bootstrap
+    python -m boardroom.bootstrap
 
 Env:
-    DATABASE_URL   postgres://user:pass@host:5432/boardroom
+    DATABASE_URL   postgres://user:pass@host:5432/labfoundry
     OLLAMA_URL     http://localhost:11434  (default)
 """
 from __future__ import annotations

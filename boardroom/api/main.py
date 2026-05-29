@@ -1,10 +1,10 @@
 """
-FastAPI command-center backend.
+LabFoundry command-center backend (autonomous research lab).
 
 Endpoints:
     GET  /snapshot          — everything the dashboard needs on load
     GET  /events            — recent raw events
-    GET  /theses/{id}/findings
+    GET  /claims/{id}/findings
     WS   /ws/events         — live event stream (push)
 
 Run with:
@@ -17,11 +17,22 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+# Load .env BEFORE any boardroom imports so DEEPSEEK_API_KEY etc. are present
+# when the router builds its provider chains at import time. systemd already
+# loads .env via EnvironmentFile=; this is for manual `uvicorn boardroom.api.main:app`
+# launches (e.g. the demo on a side instance) where forgetting to `set -a` and
+# source .env silently disables paid providers and the cost panel.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv is a runtime dep; skip if not installed
+
 import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from boardroom.api import snapshot, stream
+from boardroom.api import snapshot, stream, bench, debug, trace
 
 
 async def _init_conn(conn: asyncpg.Connection) -> None:
@@ -61,7 +72,7 @@ async def lifespan(app: FastAPI):
         await app.state.pool.close()
 
 
-app = FastAPI(title="Boardroom Command Center", lifespan=lifespan)
+app = FastAPI(title="LabFoundry Command Center", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -77,6 +88,9 @@ app.add_middleware(
 
 app.include_router(snapshot.router)
 app.include_router(stream.router)
+app.include_router(bench.router)
+app.include_router(debug.router)
+app.include_router(trace.router)
 
 
 @app.get("/health")

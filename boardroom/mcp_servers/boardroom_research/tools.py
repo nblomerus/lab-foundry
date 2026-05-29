@@ -94,13 +94,18 @@ async def search_web(query: str, limit: int = 10) -> list[SearchResult]:
     except Exception:
         pass  # fall through
 
-    # 2) DuckDuckGo HTML fallback (no key, no infra)
-    return await _search_duckduckgo(query, limit)
+    # 2) DuckDuckGo HTML fallback (no key, no infra). Returns [] on any
+    # network/parse failure so callers get a consistent empty-list contract
+    # rather than an exception from a best-effort fallback.
+    try:
+        return await _search_duckduckgo(query, limit)
+    except (httpx.HTTPError, httpx.InvalidURL):
+        return []
 
 
 async def _search_duckduckgo(query: str, limit: int = 10) -> list[SearchResult]:
     async with httpx.AsyncClient(
-        timeout=HTTP_TIMEOUT,
+        timeout=httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0),
         headers={"User-Agent": USER_AGENT},
         follow_redirects=True,
     ) as client:
@@ -132,6 +137,50 @@ async def _search_duckduckgo(query: str, limit: int = 10) -> list[SearchResult]:
 # Reddit
 # ---------------------------------------------------------------------------
 
+# Common English stop words + low-signal sentence connectors. We post-filter
+# Reddit results to require at least one meaningful query term in the
+# (title + snippet) of each result. Reddit's "relevance" sort is famously
+# loose — without this filter it routinely returns /r/cats threads for
+# "MCP adoption" queries (observed in T5).
+_REDDIT_QUERY_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "what", "how", "are", "any", "can", "you",
+    "your", "this", "that", "have", "has", "their", "from", "about", "into",
+    "use", "uses", "using", "used", "will", "would", "could", "should",
+    "all", "some", "more", "most", "other", "they", "them", "than", "out",
+    "main", "key", "real", "ever", "good", "bad", "much", "many",
+    "current", "popular", "common",
+    # research-prompt-shaped filler
+    "tool", "tools", "thing", "things", "ways", "way", "data",
+})
+
+
+def _meaningful_terms(query: str) -> list[str]:
+    """Tokenise a free-text query into the keywords that have to appear in
+    a result's text for it to be relevant. Length >= 3, alphanumeric, not a
+    stop word. Lowercased. Preserves order, deduped."""
+    import re
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_/.]*", query):
+        t = raw.lower()
+        if len(t) < 3 or t in _REDDIT_QUERY_STOPWORDS or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def _reddit_relevant(hit_title: str, hit_snippet: str, terms: list[str]) -> bool:
+    """A hit is relevant if at least one meaningful term from the query
+    appears in title OR snippet. Token-substring match (so 'mcp' matches
+    'MCP', 'mcps', '#mcp'). Permissive on purpose — we just want to filter
+    /r/cats out, not require an exact phrase."""
+    if not terms:
+        return True   # nothing to filter against; let it through
+    haystack = (hit_title + " \n " + hit_snippet).lower()
+    return any(t in haystack for t in terms)
+
+
 async def search_reddit(
     query: str,
     subreddit: Optional[str] = None,
@@ -141,13 +190,16 @@ async def search_reddit(
     Search Reddit. If 'subreddit' is provided, restricts to that subreddit;
     otherwise searches all of Reddit. Uses the public JSON API; rate-limited
     by Reddit (~60/min unauthenticated).
+
+    Post-filters by query-term overlap with title+snippet because Reddit's
+    relevance sort returns wildly off-topic threads otherwise.
     """
     if subreddit:
         url = f"https://www.reddit.com/r/{subreddit}/search.json"
-        params = {"q": query, "restrict_sr": "true", "limit": limit, "sort": "relevance"}
+        params = {"q": query, "restrict_sr": "true", "limit": limit * 3, "sort": "relevance"}
     else:
         url = "https://www.reddit.com/search.json"
-        params = {"q": query, "limit": limit, "sort": "relevance"}
+        params = {"q": query, "limit": limit * 3, "sort": "relevance"}
 
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT,
@@ -157,21 +209,37 @@ async def search_reddit(
         resp.raise_for_status()
         data = resp.json()
 
+    terms = _meaningful_terms(query)
     out: list[SearchResult] = []
-    for child in data.get("data", {}).get("children", [])[:limit]:
+    dropped: list[str] = []
+    for child in data.get("data", {}).get("children", []):
         post = child.get("data", {}) or {}
         title = post.get("title", "")
         if not title:
             continue
-        snippet = post.get("selftext", "")[:300]
-        if not snippet:
-            snippet = f"r/{post.get('subreddit', '')} — {post.get('num_comments', 0)} comments, score {post.get('score', 0)}"
+        selftext = post.get("selftext", "")[:300]
+        snippet = selftext or (
+            f"r/{post.get('subreddit', '')} — "
+            f"{post.get('num_comments', 0)} comments, score {post.get('score', 0)}"
+        )
+        if not _reddit_relevant(title, selftext, terms):
+            dropped.append(title[:60])
+            continue
         out.append(SearchResult(
             title=title,
             url=f"https://www.reddit.com{post.get('permalink', '')}",
             snippet=snippet,
             source="reddit",
         ))
+        if len(out) >= limit:
+            break
+
+    if dropped:
+        import logging
+        logging.getLogger(__name__).debug(
+            "search_reddit dropped %d off-topic results for %r: %s",
+            len(dropped), query, dropped[:5],
+        )
     return out
 
 

@@ -75,7 +75,7 @@ export default function CommandCenter() {
     <div className="space-y-6">
       <Header state={snap.state} />
 
-      <StatsGrid stats={snap.stats} activeTheses={snap.state.active_thesis_count} />
+      <StatsGrid stats={snap.stats} activeTheses={snap.state.active_claim_count} />
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <WorkflowLoop
@@ -85,7 +85,7 @@ export default function CommandCenter() {
         />
         <DissentPanel items={snap.dissent} />
 
-        <ThesesPanel theses={snap.active_theses} />
+        <ThesesPanel claims={snap.active_claims} />
         <TaskQueuePanel
           taskCounts={snap.task_counts}
           recentRuns={snap.recent_runs}

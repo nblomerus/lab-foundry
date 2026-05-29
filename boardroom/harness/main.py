@@ -1,12 +1,13 @@
 """
-Harness entry point.
+LabFoundry harness entry point — the autonomous research lab's event-driven agent loop.
 
 Run after bootstrap:
 
-    python -m src.harness.main
+    python -m boardroom.harness.main
 
 Wires Postgres pool, state/memory/lessons clients, Curator, Router,
-Dispatcher; registers handlers; runs forever until SIGINT/SIGTERM.
+Dispatcher; registers handlers for the research lifecycle (knowledge acquisition,
+evaluation, critic, planning, reflection); runs forever until SIGINT/SIGTERM.
 
 The Dispatcher gets state/memory/curator/router attached after construction
 so handlers can reach them through their `dispatcher` parameter.
@@ -31,10 +32,10 @@ from boardroom.memory.client import ZepClient
 from boardroom.skills.client import LessonsClient
 from boardroom.handlers.task_completed         import handle_task_completed
 from boardroom.handlers.researcher             import handle_task_created
-from boardroom.handlers.adversary              import handle_finding_high_signal
-from boardroom.handlers.thesis_invalidated     import handle_thesis_invalidated
+from boardroom.handlers.critic                 import handle_finding_high_signal
+from boardroom.handlers.claim_invalidated      import handle_claim_invalidated
 from boardroom.handlers.queue_empty            import handle_queue_empty
-from boardroom.handlers.phase_adjudicator      import handle_thesis_confidence_changed
+from boardroom.handlers.phase_adjudicator      import handle_claim_confidence_changed
 from boardroom.handlers.phase_transition       import handle_phase_transition_proposed
 from boardroom.handlers.reflection             import handle_reflection_requested
 from boardroom.handlers.audit_slop_detected    import handle_audit_slop_detected
@@ -50,9 +51,9 @@ log = logging.getLogger("harness")
 
 # Sessions Zep must contain (created lazily on first use, but eager is cleaner)
 ZEP_SESSIONS = [
-    "theses-lifecycle",
+    "claims-lifecycle",
     "phase-transitions",
-    "ceo-deliberations",
+    "pi-deliberations",
     "dissent",
     "charter",
 ]
@@ -144,8 +145,18 @@ async def main() -> int:
         await pool.close()
         return 1
 
+    # Sequence Zep init calls with a small gap so the boot burst is shaped
+    # rather than fire-everything-at-once. Free-tier /threads caps at 5/min,
+    # which 6 sequenced calls still exceed — but doing them here (a) makes the
+    # cap-hit deterministic and visible in preflight instead of intermittent
+    # in handler execution, and (b) gives a single tunable knob if you upgrade
+    # the plan or want to add longer backoff later. Combined with single-flight
+    # in ensure_session and the defensive write_message, a 429 here is logged
+    # and the rest of boot continues.
+    zep_gap_s = float(os.environ.get("ZEP_INIT_GAP_S", "0.25"))
     await memory.ensure_user()
     for session in ZEP_SESSIONS:
+        await asyncio.sleep(zep_gap_s)
         await memory.ensure_session(session)
 
     curator    = Curator(state=state, memory=memory, lessons=lessons)
@@ -162,13 +173,13 @@ async def main() -> int:
     dispatcher.curator = curator
     dispatcher.router  = router
 
-    # Register handlers — covers the full exploration → execution loop
+    # Register handlers — covers the full frame → submit loop
     dispatcher.register("task.created",              handle_task_created)
     dispatcher.register("task.completed",            handle_task_completed)
     dispatcher.register("finding.high_signal",       handle_finding_high_signal)
-    dispatcher.register("thesis.invalidated",        handle_thesis_invalidated)
+    dispatcher.register("claim.invalidated",         handle_claim_invalidated)
     dispatcher.register("queue.empty",               handle_queue_empty)
-    dispatcher.register("thesis.confidence_changed", handle_thesis_confidence_changed)
+    dispatcher.register("claim.confidence_changed",  handle_claim_confidence_changed)
     dispatcher.register("phase.transition_proposed", handle_phase_transition_proposed)
     dispatcher.register("reflection.requested",      handle_reflection_requested)
     dispatcher.register("audit.slop_detected",       handle_audit_slop_detected)

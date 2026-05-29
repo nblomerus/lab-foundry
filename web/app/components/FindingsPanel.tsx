@@ -51,7 +51,7 @@ export function FindingsPanel({ findings }: { findings: Finding[] }) {
                   </p>
                 )}
                 <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-                  <span>{f.source || "?"} · T{f.thesis_id ?? "—"}</span>
+                  <span>{f.source || "?"} · T{f.claim_id ?? "—"}</span>
                   {f.url && (
                     <a
                       href={f.url}

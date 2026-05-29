@@ -1,15 +1,15 @@
 """
-Phase adjudicator — fires on 'thesis.confidence_changed' events and decides
+Phase adjudicator — fires on 'claim.confidence_changed' events and decides
 whether the criteria for a phase transition are met.
 
-Cheap F-tier model; runs every confidence change (with the per-thesis
+Cheap F-tier model; runs every confidence change (with the per-claim
 cooldown configured in dispatch.py). Emits phase.transition_proposed when
 ready; the CEO ratifies separately.
 
 Criteria (strict — bias toward "not yet"):
-  exploration  → convergence: ≥3 active theses with confidence ≥ 0.55,
+  exploration  → convergence: ≥3 active claims with confidence ≥ 0.55,
                               ≥4 days in phase, evidence accumulating.
-  convergence  → commitment:  top thesis confidence ≥ 0.75, ≥5 supporting
+  convergence  → commitment:  top claim confidence ≥ 0.75, ≥5 supporting
                               findings, evidence growth slowing OR ≥6 days
                               in phase.
 """
@@ -36,7 +36,7 @@ class AdjudicatorVerdict(BaseModel):
     transition: bool
     target_phase: Optional[Literal["convergence", "commitment", "execution"]] = None
     reasoning: str = Field(..., min_length=20)
-    cited_thesis_ids: list[int] = Field(default_factory=list)
+    cited_claim_ids: list[int] = Field(default_factory=list)
     confidence: float = Field(..., ge=0.0, le=1.0,
                               description="Confidence in this verdict (not in the company).")
 
@@ -48,14 +48,14 @@ class AdjudicatorVerdict(BaseModel):
 async def _build_adjudicator_task_data(ctx: dict, state, memory) -> PromptLayer:
     current_phase = ctx["current_phase"]
     days_in_phase = ctx["days_in_phase"]
-    theses_summary = ctx["theses_summary"]
+    claims_summary = ctx["claims_summary"]
 
     content = f"""## Phase transition adjudication
 
 Current phase: **{current_phase}**  |  Day in phase: {days_in_phase}
 
 ## Theses snapshot
-{theses_summary}
+{claims_summary}
 
 ---
 
@@ -63,13 +63,13 @@ Determine whether phase-transition criteria are met. Be strict — bias toward
 'not yet'. Most calls should return transition=false.
 
 Criteria:
-  - exploration → convergence: ≥3 active theses with confidence ≥ 0.55,
+  - exploration → convergence: ≥3 active claims with confidence ≥ 0.55,
                               ≥4 days in phase, evidence is accumulating.
-  - convergence → commitment:  top thesis confidence ≥ 0.75, ≥5 supporting
+  - convergence → commitment:  top claim confidence ≥ 0.75, ≥5 supporting
                               findings, evidence growth slowing OR ≥6 days
                               in phase.
 
-If transition=true, set target_phase and cite the thesis IDs that justify it.
+If transition=true, set target_phase and cite the claim IDs that justify it.
 """
     return PromptLayer(name="task_data", content=content, priority=1)
 
@@ -92,32 +92,32 @@ if "phase_adjudicator.check" not in RECIPES:
 # Handler
 # -------------------------------------------------------------------------
 
-async def handle_thesis_confidence_changed(event: dict, dispatcher) -> Optional[dict]:
+async def handle_claim_confidence_changed(event: dict, dispatcher) -> Optional[dict]:
     """
-    Triggered by thesis.confidence_changed. Cheap check for phase transition.
+    Triggered by claim.confidence_changed. Cheap check for phase transition.
     """
-    state_obj, theses = await asyncio.gather(
+    state_obj, claims = await asyncio.gather(
         dispatcher.state.get_company_state(),
-        dispatcher.state.get_active_theses(limit=20),
+        dispatcher.state.get_active_claims(limit=20),
     )
 
     if state_obj.current_phase == "execution":
         return {"skipped": True, "reason": "already in execution"}
     if state_obj.paused:
         return {"skipped": True, "reason": "company paused"}
-    if not theses:
-        return {"skipped": True, "reason": "no active theses"}
+    if not claims:
+        return {"skipped": True, "reason": "no active claims"}
 
     days_in_phase = (datetime.now(timezone.utc) - state_obj.phase_started_at).days
 
-    # Build snapshot: per-thesis confidence + supporting evidence count
+    # Build snapshot: per-claim confidence + supporting evidence count
     findings_per_thesis = await asyncio.gather(*[
-        dispatcher.state.get_recent_findings_for_thesis(t.id, limit=30)
-        for t in theses
+        dispatcher.state.get_recent_findings_for_claim(t.id, limit=30)
+        for t in claims
     ])
 
     lines: list[str] = []
-    for t, findings in zip(theses, findings_per_thesis):
+    for t, findings in zip(claims, findings_per_thesis):
         supporting = sum(
             1 for f in findings
             if f.audit_verdict == "pass" and f.supports_thesis is True
@@ -126,21 +126,27 @@ async def handle_thesis_confidence_changed(event: dict, dispatcher) -> Optional[
             f"- T{t.id}: conf={t.confidence:.2f}  ·  "
             f"supporting_findings={supporting}  ·  '{t.claim[:80]}'"
         )
-    theses_summary = "\n".join(lines)
+    claims_summary = "\n".join(lines)
 
     prompt = await dispatcher.curator.build(
         invocation_type="phase_adjudicator.check",
         context={
             "current_phase":  state_obj.current_phase,
             "days_in_phase":  days_in_phase,
-            "theses_summary": theses_summary,
+            "claims_summary": claims_summary,
         },
     )
 
+    # Single-step LLM call, but routed through Session for /trace visibility.
+    # The deterministic gather_signals work (per-claim supporting-finding
+    # counts) is already computed above and lives in the prompt's input_summary
+    # — visible in the trace detail panel without needing a separate node.
     verdict, run_id = await dispatcher.router.invoke(
         prompt=prompt,
         output_schema_class=AdjudicatorVerdict,
         triggered_by_event_id=event["id"],
+        session=dispatcher.session,
+        step_name="adjudicate",
     )
 
     if not verdict.transition or verdict.target_phase is None:
@@ -167,7 +173,7 @@ async def handle_thesis_confidence_changed(event: dict, dispatcher) -> Optional[
                 "from_phase":       state_obj.current_phase,
                 "to_phase":         verdict.target_phase,
                 "reasoning":        verdict.reasoning,
-                "cited_thesis_ids": verdict.cited_thesis_ids,
+                "cited_claim_ids": verdict.cited_claim_ids,
                 "confidence":       verdict.confidence,
                 "forced":           False,
             }),

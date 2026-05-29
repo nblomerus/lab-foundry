@@ -19,11 +19,11 @@ export interface CompanyState {
   charter: string | null;
   paused: boolean;
   paused_reason: string | null;
-  active_thesis_count: number;
-  killed_thesis_count: number;
+  active_claim_count: number;
+  invalidated_claim_count: number;
 }
 
-export interface Thesis {
+export interface Claim {
   id: number;
   claim: string;
   status: string;
@@ -33,7 +33,7 @@ export interface Thesis {
   created_at: string;
   updated_at: string;
   killed_at: string | null;
-  kill_reason: string | null;
+  invalidation_reason: string | null;
   finding_count: number;
   supporting_count: number;
   contradicting_count: number;
@@ -42,7 +42,7 @@ export interface Thesis {
 export interface Finding {
   id: number;
   task_id: number;
-  thesis_id: number | null;
+  claim_id: number | null;
   source: string | null;
   url: string | null;
   title: string | null;
@@ -74,7 +74,7 @@ export interface AgentRun {
 export interface DissentItem {
   kind: "adversary" | "audit-slop";
   id: number;
-  thesis_id: number;
+  claim_id: number;
   detail: string;
   confidence: number | null;
   reasoning: string | null;
@@ -144,8 +144,8 @@ export interface EdgeActivity {
 
 export interface Snapshot {
   state: CompanyState;
-  active_theses: Thesis[];
-  killed_theses: Thesis[];
+  active_claims: Claim[];
+  killed_claims: Claim[];
   recent_findings: Finding[];
   recent_runs: AgentRun[];
   dissent: DissentItem[];
@@ -165,6 +165,7 @@ export interface BoardroomEvent {
   event_type: string;
   target_type: string | null;
   target_id: number | null;
+  session_id?: number | null;
   payload: Record<string, unknown>;
   status: string;
   suppression_reason?: string | null;
@@ -178,7 +179,7 @@ export type StreamMessage =
   | {
       type: "event";
       event: BoardroomEvent;
-      thesis?: Thesis;
+      thesis?: Claim;
       task?: unknown;
       finding?: Finding;
       company_state?: CompanyState;

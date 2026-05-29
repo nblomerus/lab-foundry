@@ -48,7 +48,7 @@ class ThesisOut(BaseModel):
 class FindingOut(BaseModel):
     id: int
     task_id: int
-    thesis_id: Optional[int]
+    claim_id: Optional[int]
     source: Optional[str]
     url: Optional[str]
     title: Optional[str]
@@ -80,7 +80,7 @@ class AgentRunOut(BaseModel):
 class DissentItem(BaseModel):
     kind: str                   # 'adversary' | 'audit-slop'
     id: int
-    thesis_id: int
+    claim_id: int
     detail: str                 # verdict or audit_verdict
     confidence: Optional[float]
     reasoning: Optional[str]
@@ -179,8 +179,8 @@ class EdgeActivity(BaseModel):
 
 class SnapshotOut(BaseModel):
     state: CompanyStateOut
-    active_theses: list[ThesisOut]
-    killed_theses: list[ThesisOut]
+    active_claims: list[ThesisOut]
+    invalidated_claims: list[ThesisOut]
     recent_findings: list[FindingOut]
     recent_runs: list[AgentRunOut]
     dissent: list[DissentItem]

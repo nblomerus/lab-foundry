@@ -3,9 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { StreamMessage } from "./types";
 
+// Same-origin WS path; the Next.js dev server proxies /ws/* to the FastAPI
+// backend (see next.config.ts). That lets port-forwarding 8088 alone cover
+// both HTTP and the live event stream, instead of needing :8503 forwarded too.
 const WS_URL =
   typeof window !== "undefined"
-    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8503/ws/events`
+    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/events`
     : "";
 
 /**

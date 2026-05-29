@@ -23,22 +23,22 @@ export default function ThesesPage() {
       <Card>
         <SectionTitle
           icon={Layers3}
-          title={`Theses (${snap.active_theses.length} active, ${snap.killed_theses.length} archived)`}
+          title={`Theses (${snap.active_claims.length} active, ${snap.killed_claims.length} archived)`}
           subtitle="Born, evolved, killed, or merged. The full history of the company's strategic candidates."
         />
       </Card>
 
-      <ThesesPanel theses={snap.active_theses} />
+      <ThesesPanel claims={snap.active_claims} />
 
-      {snap.killed_theses.length > 0 && (
+      {snap.killed_claims.length > 0 && (
         <Card>
           <SectionTitle
             icon={Layers3}
-            title={`Killed / merged (${snap.killed_theses.length})`}
+            title={`Killed / merged (${snap.killed_claims.length})`}
             subtitle="Preserved with their kill reason so the CEO doesn't re-litigate."
           />
           <div className="space-y-2">
-            {snap.killed_theses.map((t) => (
+            {snap.killed_claims.map((t) => (
               <div key={t.id} className="rounded-3xl border border-slate-200 bg-slate-50 p-4 opacity-80">
                 <div className="flex items-baseline justify-between">
                   <span className="text-xs font-semibold text-slate-400">T{t.id}</span>
@@ -50,8 +50,8 @@ export default function ThesesPage() {
                   </div>
                 </div>
                 <div className="mt-1 text-sm line-through decoration-slate-300">{t.claim}</div>
-                {t.kill_reason && (
-                  <div className="mt-2 text-xs text-red-700">💀 {t.kill_reason}</div>
+                {t.invalidation_reason && (
+                  <div className="mt-2 text-xs text-red-700">💀 {t.invalidation_reason}</div>
                 )}
               </div>
             ))}
