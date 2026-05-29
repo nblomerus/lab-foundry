@@ -150,7 +150,7 @@ async def _build_thesis_kill_task_data(ctx: dict, state, memory) -> PromptLayer:
 **Decide one of:**
   - `kill`         — the verdict is right. Write a 1-2 sentence kill_reason for the permanent record.
   - `demote`       — the evidence weakens but does not kill. Propose new_confidence.
-  - `reject`       — the adversary missed something. Explain what.
+  - `reject`       — the critic missed something. Explain what.
 
 Your decision will be logged immutably. The Adversary is good but not infallible.
 """

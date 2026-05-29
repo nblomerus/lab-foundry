@@ -31,7 +31,7 @@ const PRIMARY_FLOW: AgentSpec[] = [
     name: "CEO",
     cadence: "Strategic · R-tier",
     reads: "Findings, killed claims",
-    writes: "Theses, charter, kill verdicts",
+    writes: "Claims, charter, kill verdicts",
     icon: BrainCircuit,
   },
   {
@@ -63,9 +63,9 @@ const CRITICS: AgentSpec[] = [
   },
   {
     key: "adversary",
-    name: "Adversary",
+    name: "Critic",
     cadence: "High-signal · W/R-tier",
-    reads: "Theses + findings",
+    reads: "Claims + findings",
     writes: "Kill / weaken / watch",
     icon: Telescope,
   },

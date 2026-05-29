@@ -253,7 +253,7 @@ async def invalidate_claim(
     run_id: Optional[int] = None,
 ) -> Thesis:
     """
-    Kill an active thesis. Requires the adversary_verdict_id that justified the kill.
+    Kill an active thesis. Requires the critic_verdict_id that justified the kill.
     Findings tied to this thesis are marked stale so the curator filters them
     from future recall.
 
@@ -342,7 +342,7 @@ async def claim_task(worker_id: str, department: str) -> Optional[Task]:
 async def complete_task(task_id: int, result: dict) -> None:
     """
     Mark a task completed with its result payload. Emits `task.completed`,
-    which downstream wakes Auditor + Adversary handlers.
+    which downstream wakes Auditor + Critic handlers.
     """
     pool = await _pool_handle()
     async with pool.acquire() as conn:

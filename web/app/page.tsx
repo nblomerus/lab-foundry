@@ -9,7 +9,7 @@ import { Header } from "./components/Header";
 import { StatsGrid } from "./components/StatsGrid";
 import { WorkflowLoop } from "./components/WorkflowLoop";
 import { DissentPanel } from "./components/DissentPanel";
-import { ThesesPanel } from "./components/ThesesPanel";
+import { ClaimsPanel } from "./components/ClaimsPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
 import { FindingsPanel } from "./components/FindingsPanel";
 import { TelemetryPanel } from "./components/TelemetryPanel";
@@ -75,7 +75,7 @@ export default function CommandCenter() {
     <div className="space-y-6">
       <Header state={snap.state} />
 
-      <StatsGrid stats={snap.stats} activeTheses={snap.state.active_claim_count} />
+      <StatsGrid stats={snap.stats} activeClaims={snap.state.active_claim_count} />
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <WorkflowLoop
@@ -85,7 +85,7 @@ export default function CommandCenter() {
         />
         <DissentPanel items={snap.dissent} />
 
-        <ThesesPanel claims={snap.active_claims} />
+        <ClaimsPanel claims={snap.active_claims} />
         <TaskQueuePanel
           taskCounts={snap.task_counts}
           recentRuns={snap.recent_runs}

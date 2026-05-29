@@ -5,16 +5,16 @@ import { type Stats } from "../lib/types";
 import { StatTile } from "./ui";
 
 export function StatsGrid({
-  stats, activeTheses,
-}: { stats: Stats; activeTheses: number }) {
+  stats, activeClaims,
+}: { stats: Stats; activeClaims: number }) {
   return (
     <section className="mb-6 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
       <StatTile
         icon={Target}
-        value={activeTheses}
+        value={activeClaims}
         label="active claims"
-        helper={activeTheses === 0 ? "none active" : "exploring"}
-        helperTone={activeTheses === 0 ? "amber" : "green"}
+        helper={activeClaims === 0 ? "none active" : "exploring"}
+        helperTone={activeClaims === 0 ? "amber" : "green"}
       />
       <StatTile
         icon={GitBranch}

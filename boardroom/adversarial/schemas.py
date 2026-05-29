@@ -51,7 +51,7 @@ class ExperimentProposal(BaseModel):
 
 
 class AttackPlan(BaseModel):
-    """Adversary's investigation plan: where the thesis is brittle and how to test."""
+    """Critic's investigation plan: where the thesis is brittle and how to test."""
     weak_points: list[WeakPoint] = Field(
         ...,
         min_length=1,

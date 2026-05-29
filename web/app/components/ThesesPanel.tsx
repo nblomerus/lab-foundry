@@ -12,7 +12,7 @@ function deltaPill(t: Claim): { label: string; tone: "green" | "red" | "default"
   return { label: "flat", tone: "default" };
 }
 
-export function ThesesPanel({ claims }: { claims: Claim[] }) {
+export function ClaimsPanel({ claims }: { claims: Claim[] }) {
   return (
     <Card className="lg:col-span-5">
       <SectionTitle

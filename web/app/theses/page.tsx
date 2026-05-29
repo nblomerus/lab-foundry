@@ -3,11 +3,11 @@
 import { useEffect, useState } from "react";
 import { Layers3 } from "lucide-react";
 import { api } from "../lib/api";
-import { ThesesPanel } from "../components/ThesesPanel";
+import { ClaimsPanel } from "../components/ClaimsPanel";
 import { Badge, Card, SectionTitle } from "../components/ui";
 import type { Snapshot } from "../lib/types";
 
-export default function ThesesPage() {
+export default function ClaimsPage() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   useEffect(() => {
     const load = () => api.snapshot().then(setSnap).catch(() => {});
@@ -23,12 +23,12 @@ export default function ThesesPage() {
       <Card>
         <SectionTitle
           icon={Layers3}
-          title={`Theses (${snap.active_claims.length} active, ${snap.killed_claims.length} archived)`}
+          title={`Claims (${snap.active_claims.length} active, ${snap.killed_claims.length} archived)`}
           subtitle="Born, evolved, killed, or merged. The full history of the company's strategic candidates."
         />
       </Card>
 
-      <ThesesPanel claims={snap.active_claims} />
+      <ClaimsPanel claims={snap.active_claims} />
 
       {snap.killed_claims.length > 0 && (
         <Card>

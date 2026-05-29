@@ -50,7 +50,7 @@ export const ARROW_PENETRATION = 3.0;
 /**
  * How far an outside-U route loops past the source/target column, in SVG
  * units. Must be big enough to clear any node sitting between the endpoints
- * in adjacent columns (e.g. phase → ceo has to loop around Theses).
+ * in adjacent columns (e.g. phase → ceo has to loop around Claims).
  */
 export const OUTSIDE_STUB = 22 * (SVG_W / 100);
 
@@ -95,8 +95,8 @@ export const NODES: NodeDef[] = [
   { id: "auditor",     label: "Auditor",      type: "Critic", icon: ShieldCheck,    x: 49, y: 64 },
   { id: "planner",     label: "Planner",      type: "Agent",  icon: GitBranch,      x: 49, y: 92 },
 
-  { id: "adversary",   label: "Adversary",    type: "Critic", icon: Telescope,      x: 70, y: 16 },
-  { id: "claims",      label: "Theses",       type: "Store",  icon: Target,         x: 70, y: 52 },
+  { id: "adversary",   label: "Critic",    type: "Critic", icon: Telescope,      x: 70, y: 16 },
+  { id: "claims",      label: "Claims",       type: "Store",  icon: Target,         x: 70, y: 52 },
 
   { id: "ceo",         label: "CEO",          type: "Agent",  icon: BrainCircuit,   x: 90, y: 16 },
   { id: "adjudicator", label: "Adjudicator",  type: "Agent",  icon: Activity,       x: 90, y: 52 },
@@ -117,10 +117,10 @@ export const EDGES: EdgeDef[] = [
   { id: "find-aud",  from: "findings",    fromSide: "bottom", to: "auditor",    toSide: "top",                     label: "audit",           event_type: "task.completed" },
   { id: "find-adv",  from: "findings",    fromSide: "top",    to: "adversary",  toSide: "left",                    label: "high signal",     event_type: "finding.high_signal" },
 
-  // Adversary → Theses
+  // Critic → Claims
   { id: "adv-thes",  from: "adversary",   fromSide: "bottom", to: "claims",     toSide: "top",                     label: "kill / weaken",   event_type: "thesis.invalidated" },
 
-  // CEO ↔ Theses (parallel via ±0.35 offsets)
+  // CEO ↔ Claims (parallel via ±0.35 offsets)
   { id: "thes-ceo",  from: "claims",      fromSide: "top",    fromOffset: -0.35, to: "ceo",        toSide: "bottom", toOffset: -0.35, label: "invalidated",     event_type: "thesis.invalidated" },
   { id: "ceo-thes",  from: "ceo",         fromSide: "bottom", fromOffset: +0.35, to: "claims",     toSide: "top",    toOffset: +0.35, label: "spawn / charter", event_type: "thesis.created" },
 
@@ -130,8 +130,8 @@ export const EDGES: EdgeDef[] = [
 
   // phase → ceo: long-range. Both nodes sit in the governance column with
   // Adjudicator between them, and the strategic column to the left holds
-  // Adversary + Theses stacked at the same y as CEO + Phase respectively.
-  // Outside-LEFT would have to thread past Adversary on the way in; route
+  // Critic + Claims stacked at the same y as CEO + Phase respectively.
+  // Outside-LEFT would have to thread past Critic on the way in; route
   // outside-RIGHT instead, looping past the right edge of the canvas where
   // nothing else lives.
   { id: "phase-ceo", from: "phase",       fromSide: "right",  to: "ceo",         toSide: "right",  route: "outside-right", label: "ratify",     event_type: "phase.transition_proposed" },

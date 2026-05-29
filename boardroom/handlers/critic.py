@@ -1,5 +1,5 @@
 """
-Adversary handler — triggered by 'finding.high_signal' events.
+Critic handler — triggered by 'finding.high_signal' events.
 
 For each high-signal finding (audit=pass, relevance>=8), examine the affected
 claim and decide whether killing evidence has accumulated. Three outcomes:
@@ -61,7 +61,7 @@ class AdversaryVerdictOut(BaseModel):
 
 
 # -------------------------------------------------------------------------
-# Adversary task-data builder + recipe
+# Critic task-data builder + recipe
 # -------------------------------------------------------------------------
 
 async def _build_adversary_task_data(ctx: dict, state, memory) -> PromptLayer:
@@ -128,7 +128,7 @@ three actions is not.
 if "adversary.kill_verdict" not in RECIPES:
     RECIPES["adversary.kill_verdict"] = Recipe(
         invocation_type="critic.kill_verdict",
-        description="Adversary examines a claim for killing evidence and emits a verdict.",
+        description="Critic examines a claim for killing evidence and emits a verdict.",
         agent="adversary",
         total_budget=12_000,
         use_cold_path=True,

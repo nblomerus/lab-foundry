@@ -20,7 +20,7 @@ Why four steps:
 The legacy single-shot adversary argues from priors — the prompt at
 boardroom/handlers/adversary.py:91-123 hands the model the thesis +
 recent findings and asks "watch / weaken / kill?". There's no actual
-evidence gathering. Multi-step here lets the adversary *do its own
+evidence gathering. Multi-step here lets the critic *do its own
 research pass* targeted at the thesis it's attacking, which is the whole
 point of an adversary that isn't just a gut check.
 
@@ -173,7 +173,7 @@ hypothesis. For each:
 - `claim`: what the quote means against the weak point, one sentence.
 - `stance`:
     * `refutes` — the quote backs the WEAK POINT, meaning it refutes the
-                   thesis (the adversary's goal).
+                   thesis (the critic's goal).
     * `supports` — the quote backs the THESIS (the opposite of what we
                     wanted, but honest).
     * `neutral`  — ambiguous but worth recording.
@@ -200,7 +200,7 @@ async def _build_stress_test_interp(ctx: dict, state, memory) -> PromptLayer:
 
 **Thesis under attack:** {thesis_claim}
 
-**Weak points the adversary is testing:**
+**Weak points the critic is testing:**
 {wp_lines}
 
 ## Experiment run
