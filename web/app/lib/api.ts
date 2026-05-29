@@ -1,4 +1,4 @@
-import type { Snapshot, LabFoundryEvent, Finding } from "./types";
+import type { Snapshot, LabFoundryEvent, Finding, QueryResponse } from "./types";
 
 const API_BASE = "/api";
 
@@ -277,6 +277,32 @@ export interface GraphStats {
   edges?: { grounds: number; challenged: number; cited_by: number };
   error?: string;
 }
+export interface GraphEvidence {
+  finding_id: number;
+  source: string | null;
+  url: string | null;
+  title: string | null;
+  summary: string | null;
+  relevance_score: number | null;
+  supports_claim: boolean | null;
+  audit_verdict: string | null;
+}
+export interface GraphVerdict {
+  verdict_id: number;
+  verdict: string | null;
+  confidence: number | null;
+  reasoning: string | null;
+  action: string | null;
+  created_at: string | null;
+  cited_finding_ids: number[];
+}
+export interface GraphClaim {
+  status: "ok" | "unavailable";
+  claim_id: number;
+  evidence_chain?: GraphEvidence[];
+  critic_verdicts?: GraphVerdict[];
+  error?: string;
+}
 
 export interface BenchRunResponse {
   error?: string;
@@ -300,6 +326,8 @@ export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
   events:    (limit = 100) => jget<LabFoundryEvent[]>(`/events?limit=${limit}`),
   findings:  (thesisId: number) => jget<Finding[]>(`/claims/${thesisId}/findings`),
+  query:     (body: { query: string; context_window?: number; include_sources?: boolean }) =>
+    jpost<QueryResponse>("/query", body),
   benchOptions: () => jget<BenchOptions>("/bench/options"),
   benchRun: (body: { invocation_type: string; models: { provider: string; model_name: string }[]; claim_id?: number }) =>
     jpost<BenchRunResponse>("/bench/run", body),
@@ -327,4 +355,5 @@ export const api = {
   },
   traceSession: (id: number) => jget<TraceSessionDetail>(`/trace/sessions/${id}`),
   graphStats: () => jget<GraphStats>("/trace/graph/stats"),
+  graphClaim: (id: number) => jget<GraphClaim>(`/trace/graph/claim/${id}`),
 };

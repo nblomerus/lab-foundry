@@ -5,11 +5,23 @@ import {
   BrainCircuit, Database, GitBranch, Layers3,
   Search, ShieldCheck, Target, Wallet, type LucideIcon,
 } from "lucide-react";
-import { api } from "../lib/api";
+import { api, type GraphClaim } from "../lib/api";
 import { useEventStream } from "../lib/ws";
-import type { Claim, Snapshot } from "../lib/types";
+import type { Claim, Finding, DissentItem, LabFoundryEvent, Snapshot } from "../lib/types";
 import type { PowerSummary } from "./LiveFlow";
 import { Badge, Card, cx } from "./ui";
+
+function fmtTime(iso: string): string {
+  try { return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+  catch { return "—"; }
+}
+function ago(iso?: string | null): string {
+  if (!iso) return "never";
+  const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
 
 // =========================================================================
 // Geometry — polar layout in a square SVG (0..100). Center (50,50).
@@ -62,10 +74,35 @@ type Selection =
 // Top-level
 // =========================================================================
 
+// Graph-mutating events — what the knowledge hub records.
+const HUB_EVENTS = [
+  "claim.created", "thesis.created", "finding.high_signal",
+  "thesis.invalidated", "claim.invalidated", "thesis.confidence_changed",
+];
+
 export function ResearchLoop({ snapshot, power }: { snapshot: Snapshot; power?: PowerSummary | null }) {
-  const { recent, connected } = useEventStream(40);
+  const { recent, connected } = useEventStream(60);
   const [kg, setKg] = useState<KgStats | null>(null);
   const [sel, setSel] = useState<Selection>(null);
+  const [prefill, setPrefill] = useState<LabFoundryEvent[]>([]);
+
+  // Backlog so the per-node flow isn't empty when the harness is idle.
+  useEffect(() => { api.events(80).then(setPrefill).catch(() => {}); }, []);
+
+  // Live + backlog, deduped by id, newest first.
+  const events = useMemo(() => {
+    const live = recent
+      .filter((m): m is Extract<typeof m, { type: "event" }> => m.type === "event")
+      .map((m) => m.event);
+    const seen = new Set<number>();
+    const out: LabFoundryEvent[] = [];
+    for (const e of [...live, ...prefill]) {
+      if (seen.has(e.id)) continue;
+      seen.add(e.id);
+      out.push(e);
+    }
+    return out.sort((a, b) => new Date(b.emitted_at).getTime() - new Date(a.emitted_at).getTime());
+  }, [recent, prefill]);
 
   // Hub counts from the live Neo4j graph (best-effort).
   useEffect(() => {
@@ -167,7 +204,7 @@ export function ResearchLoop({ snapshot, power }: { snapshot: Snapshot; power?: 
 
         {/* Inspector */}
         <aside className="lg:col-span-4">
-          <Inspector sel={sel} activity={stageActivity} kg={kg} snapshot={snapshot} power={power} />
+          <Inspector sel={sel} activity={stageActivity} kg={kg} snapshot={snapshot} power={power} events={events} />
         </aside>
       </div>
     </div>
@@ -387,20 +424,21 @@ function RimMeter({ cost, power }: { cost: Snapshot["cost"]; power?: PowerSummar
 // =========================================================================
 
 function Inspector({
-  sel, activity, kg, snapshot, power,
+  sel, activity, kg, snapshot, power, events,
 }: {
   sel: Selection;
   activity: (s: Stage) => { running: number; today: number; hot: boolean };
   kg: KgStats | null;
   snapshot: Snapshot;
   power?: PowerSummary | null;
+  events: LabFoundryEvent[];
 }) {
   if (!sel) {
     return (
-      <Card>
+      <Card className="max-h-[640px] overflow-y-auto">
         <div className="text-xs uppercase tracking-wider text-slate-400">Inspector</div>
         <p className="mt-2 text-sm text-slate-500">
-          Click a stage, the knowledge hub, or an orbiting hypothesis.
+          Click a stage, the knowledge hub, or an orbiting hypothesis to drill into its flow.
         </p>
         <div className="mt-4 space-y-2 text-sm text-slate-600">
           <Legend tone="bg-emerald-400" label="Supported hypothesis (conf ≥ 50%)" />
@@ -414,51 +452,265 @@ function Inspector({
     );
   }
 
-  if (sel.kind === "hub") {
-    return (
-      <Card>
-        <Head icon={Database} title="Knowledge core" sub="RAG corpus + evidence graph" />
-        <Rows rows={[
-          ["Knowledge graph", kg ? `${kg.claims} claims · ${kg.findings} findings · ${kg.verdicts} verdicts` : "Neo4j (loading)"],
-          ["RAG corpus", "papers · media · datasets (planned)"],
-          ["Phase", snapshot.state.current_phase],
-          ["Read/write by", "every stage of the loop"],
-        ]} />
-      </Card>
-    );
-  }
+  if (sel.kind === "hub") return <HubInspector kg={kg} snapshot={snapshot} events={events} />;
+  if (sel.kind === "claim") return <ClaimInspector claim={sel.claim} />;
+  return <StageInspector stage={sel.stage} activity={activity} snapshot={snapshot} power={power} events={events} />;
+}
 
-  if (sel.kind === "claim") {
-    const c = sel.claim;
-    return (
-      <Card>
-        <Head icon={Target} title={`Hypothesis C${c.id}`} sub={`confidence ${(c.confidence * 100).toFixed(0)}%`} />
-        <p className="mb-3 text-sm font-medium leading-snug text-slate-900">{c.claim}</p>
-        <Rows rows={[
-          ["Status", c.status],
-          ["Findings", String(c.finding_count)],
-          ["Supporting", String(c.supporting_count)],
-          ["Contradicting", String(c.contradicting_count)],
-        ]} />
-      </Card>
-    );
-  }
+// ----- Knowledge hub: sources + graph events + corpus/graph stats -----
 
-  const s = sel.stage;
-  const { running, today } = activity(s);
-  const Icon = s.icon;
+function HubInspector({ kg, snapshot, events }: { kg: KgStats | null; snapshot: Snapshot; events: LabFoundryEvent[] }) {
+  const graphEvents = events.filter((e) => HUB_EVENTS.includes(e.event_type)).slice(0, 8);
   return (
-    <Card>
-      <Head icon={Icon} title={s.label} sub={s.division} />
+    <Card className="max-h-[640px] overflow-y-auto">
+      <Head icon={Database} title="Knowledge core" sub="RAG corpus + evidence graph" />
       <Rows rows={[
-        ["Agents", s.roles.map((r) => r.replace(/_/g, " ")).join(", ")],
-        ["Running now", String(running)],
-        ["Runs today", String(today)],
-        ["Reacts to", s.events.join(", ")],
-        ...(s.id === "converge" ? [["Resources", power ? `${Math.round(power.total_watts)}W · ${power.gpu_count} GPU` : "—"] as [string, string]] : []),
+        ["Knowledge graph (Neo4j)", kg ? `${kg.claims} claims · ${kg.findings} findings · ${kg.verdicts} verdicts` : "loading…"],
+        ["RAG corpus", "papers · media · datasets (planned)"],
       ]} />
+
+      <SubHead label="Ingestion sources" />
+      <div className="flex flex-wrap gap-1.5">
+        {[
+          { name: "arXiv", live: true },
+          { name: "Web / SearXNG", live: true },
+          { name: "GitHub repos", live: false },
+          { name: "Datasets", live: false },
+          { name: "Media", live: false },
+        ].map((s) => (
+          <span key={s.name} className={cx(
+            "rounded-full border px-2 py-0.5 text-xs",
+            s.live ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-400",
+          )}>
+            {s.name}{!s.live && " · planned"}
+          </span>
+        ))}
+      </div>
+
+      <SubHead label="Recent graph events" />
+      <EventList events={graphEvents} empty="No graph writes recently." />
     </Card>
   );
+}
+
+// ----- Hypothesis: evidence chain + verdicts from the graph -----
+
+function ClaimInspector({ claim }: { claim: Claim }) {
+  const [data, setData] = useState<GraphClaim | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.graphClaim(claim.id)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [claim.id]);
+
+  const evidence = data?.status === "ok" ? data.evidence_chain ?? [] : [];
+  const verdicts = data?.status === "ok" ? data.critic_verdicts ?? [] : [];
+
+  return (
+    <Card className="max-h-[640px] overflow-y-auto">
+      <Head icon={Target} title={`Hypothesis C${claim.id}`} sub={`confidence ${(claim.confidence * 100).toFixed(0)}% · ${claim.status}`} />
+      <p className="mb-3 text-sm font-medium leading-snug text-slate-900">{claim.claim}</p>
+      <Rows rows={[
+        ["Findings", String(claim.finding_count)],
+        ["Supporting / Contradicting", `${claim.supporting_count} / ${claim.contradicting_count}`],
+      ]} />
+
+      <SubHead label={`Evidence chain${evidence.length ? ` (${evidence.length})` : ""}`} />
+      {loading ? (
+        <p className="text-sm text-slate-400">Loading from the graph…</p>
+      ) : evidence.length === 0 ? (
+        <p className="text-sm text-slate-400">No grounded findings in the graph yet.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {evidence.slice(0, 8).map((f) => (
+            <li key={f.finding_id} className="rounded-2xl border border-slate-200 bg-slate-50 p-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-slate-500">F{f.finding_id}</span>
+                <span className="flex items-center gap-1">
+                  {f.source && <Badge tone="default">{f.source}</Badge>}
+                  <Badge tone={f.audit_verdict === "pass" ? "green" : f.audit_verdict === "slop" ? "red" : "default"}>
+                    rel {f.relevance_score ?? "—"}
+                  </Badge>
+                </span>
+              </div>
+              <p className="mt-1 line-clamp-2 text-slate-600">{f.title || f.summary || "(no title)"}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <SubHead label={`Critic challenges${verdicts.length ? ` (${verdicts.length})` : ""}`} />
+      {verdicts.length === 0 ? (
+        <p className="text-sm text-slate-400">No verdicts recorded.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {verdicts.slice(0, 5).map((v) => (
+            <li key={v.verdict_id} className="rounded-2xl border border-slate-200 bg-slate-50 p-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <Badge tone={v.action === "kill" ? "red" : v.action === "weaken" ? "amber" : "default"}>
+                  {v.action || v.verdict || "verdict"}
+                </Badge>
+                <span className="text-slate-400">{v.cited_finding_ids?.length ?? 0} cited</span>
+              </div>
+              {v.reasoning && <p className="mt-1 line-clamp-2 text-slate-600">{v.reasoning}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+// ----- Stage: agents, live stats, recent flow, and what it produced -----
+
+function StageInspector({
+  stage, activity, snapshot, power, events,
+}: {
+  stage: Stage;
+  activity: (s: Stage) => { running: number; today: number; hot: boolean };
+  snapshot: Snapshot;
+  power?: PowerSummary | null;
+  events: LabFoundryEvent[];
+}) {
+  const { running, today } = activity(stage);
+  const Icon = stage.icon;
+  const stageEvents = events.filter((e) => stage.events.includes(e.event_type)).slice(0, 8);
+
+  return (
+    <Card className="max-h-[640px] overflow-y-auto">
+      <Head icon={Icon} title={stage.label} sub={stage.division} />
+      <Rows rows={[
+        ["Agents", stage.roles.map((r) => r.replace(/_/g, " ")).join(", ")],
+        ["Running now / today", `${running} / ${today}`],
+      ]} />
+
+      {/* Stage-specific outputs */}
+      {stage.id === "question" && (
+        <>
+          <SubHead label="Task queue" />
+          <Rows rows={[
+            ["Pending / running", `${snapshot.stats.pending_tasks} / ${snapshot.stats.running_tasks}`],
+          ]} />
+        </>
+      )}
+
+      {stage.id === "gather" && (
+        <>
+          <SubHead label={`Recent findings (${snapshot.stats.findings_today} today)`} />
+          <FindingList findings={snapshot.recent_findings.slice(0, 6)} />
+          <Rows rows={[["Live web search", `${snapshot.stats.source_web_in_flight} fetch(es) in flight`]]} />
+        </>
+      )}
+
+      {stage.id === "judge" && (
+        <>
+          <Rows rows={[["Audit today", `${snapshot.stats.high_signal_today} high-signal · ${snapshot.stats.slop_today} slop`]]} />
+          <SubHead label="Recent dissent" />
+          <DissentList items={snapshot.dissent.slice(0, 6)} />
+        </>
+      )}
+
+      {stage.id === "synthesise" && (
+        <>
+          <SubHead label={`Active hypotheses (${snapshot.active_claims.length})`} />
+          <ul className="space-y-1.5">
+            {snapshot.active_claims.slice(0, 6).map((c) => (
+              <li key={c.id} className="flex items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 text-xs">
+                <span className="line-clamp-1 text-slate-700">C{c.id} · {c.claim}</span>
+                <Badge tone={c.confidence >= 0.5 ? "green" : "default"}>{(c.confidence * 100).toFixed(0)}%</Badge>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {stage.id === "converge" && (
+        <>
+          <Rows rows={[
+            ["Phase", `${snapshot.state.current_phase} · day ${snapshot.state.days_in_phase}`],
+            ["Resources", power ? `${Math.round(power.total_watts)}W · ${power.gpu_count} GPU` : "—"],
+          ]} />
+          {snapshot.phase_transitions.length > 0 && (
+            <>
+              <SubHead label="Phase history" />
+              <ul className="space-y-1 text-xs text-slate-600">
+                {snapshot.phase_transitions.slice(0, 4).map((t) => (
+                  <li key={t.id} className="rounded-2xl bg-slate-50 px-3 py-1.5">
+                    {t.from_phase} → {t.to_phase} · {ago(t.decided_at)}{t.forced ? " (forced)" : ""}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </>
+      )}
+
+      <SubHead label="Recent flow" />
+      <EventList events={stageEvents} empty="No matching events recently." />
+    </Card>
+  );
+}
+
+// ----- Shared list renderers -----
+
+function EventList({ events, empty }: { events: LabFoundryEvent[]; empty: string }) {
+  if (events.length === 0) return <p className="text-sm text-slate-400">{empty}</p>;
+  return (
+    <ul className="space-y-1">
+      {events.map((e) => (
+        <li key={e.id} className="flex items-center gap-2 rounded-2xl bg-slate-50 px-3 py-1.5 text-xs">
+          <span className="w-14 shrink-0 font-mono text-slate-400">{fmtTime(e.emitted_at)}</span>
+          <span className="min-w-0 flex-1 truncate font-mono font-semibold text-slate-700">{e.event_type}</span>
+          {e.target_id != null && <span className="font-mono text-[11px] text-slate-400">{e.target_type}#{e.target_id}</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function FindingList({ findings }: { findings: Finding[] }) {
+  if (findings.length === 0) return <p className="text-sm text-slate-400">No findings cached.</p>;
+  return (
+    <ul className="space-y-1.5">
+      {findings.map((f) => (
+        <li key={f.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-2 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-slate-500">F{f.id}</span>
+            <Badge tone={f.audit_verdict === "pass" ? "green" : f.audit_verdict === "slop" ? "red" : "default"}>
+              {f.source || "?"} · rel {f.relevance_score}
+            </Badge>
+          </div>
+          <p className="mt-1 line-clamp-2 text-slate-600">{f.title || f.summary}</p>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function DissentList({ items }: { items: DissentItem[] }) {
+  if (items.length === 0) return <p className="text-sm text-slate-400">No dissent recorded.</p>;
+  return (
+    <ul className="space-y-1.5">
+      {items.map((d) => (
+        <li key={`${d.kind}-${d.id}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-2 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <Badge tone={d.kind === "audit-slop" ? "red" : "amber"}>{d.kind}</Badge>
+            <span className="font-mono text-slate-400">C{d.claim_id}</span>
+          </div>
+          <p className="mt-1 line-clamp-2 text-slate-600">{d.reasoning || d.detail}</p>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function SubHead({ label }: { label: string }) {
+  return <div className="mb-2 mt-4 text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</div>;
 }
 
 // =========================================================================
