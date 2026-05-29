@@ -97,12 +97,12 @@ async def _theses_with_counts(pool: asyncpg.Pool, status_filter: str, limit: int
         )
     return [
         ThesisOut(
-            id=r["id"], claim=r["claim"], status=r["status"],
+            id=r["id"], claim=r["statement"], status=r["status"],
             confidence=float(r["confidence"]),
             confidence_prev=float(r["confidence_prev"]) if r["confidence_prev"] is not None else None,
             parent_id=r["parent_id"],
             created_at=r["created_at"], updated_at=r["updated_at"],
-            killed_at=r["killed_at"], kill_reason=r["kill_reason"],
+            killed_at=r["invalidated_at"], kill_reason=r["invalidation_reason"],
             finding_count=r["finding_count"] or 0,
             supporting_count=r["supporting_count"] or 0,
             contradicting_count=r["contradicting_count"] or 0,
@@ -159,7 +159,7 @@ async def _dissent(pool: asyncpg.Pool, limit: int) -> list[DissentItem]:
     async with pool.acquire() as c:
         rows = await c.fetch(
             """
-            SELECT 'adversary' AS kind, av.id, av.claim_id,
+            SELECT 'critic' AS kind, av.id, av.thesis_id AS claim_id,
                    av.verdict AS detail, av.confidence,
                    av.reasoning, av.created_at
             FROM critic_verdicts av
