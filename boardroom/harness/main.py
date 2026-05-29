@@ -107,6 +107,29 @@ async def _preflight(pool, ollama_url: str, memory: ZepClient) -> bool:
     except Exception as e:
         log.error("preflight: NEO4J DEGRADED — graph writes will fail silently: %s", e)
 
+    # Embed model — non-fatal. The corpus read path (labfoundry_corpus) embeds
+    # queries via Ollama; if the model isn't pulled, retrieval degrades to empty
+    # results rather than blocking the loop. Guard both endpoint shapes: modern
+    # POST /api/embed {model,input} and legacy POST /api/embeddings {model,prompt}.
+    embed_model = os.environ.get("EMBED_MODEL", "nomic-embed-text")  # 768-dim default
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            r = await c.post(
+                f"{ollama_url}/api/embed",
+                json={"model": embed_model, "input": "preflight"},
+            )
+            if r.status_code == 404:
+                # Older Ollama: fall back to the legacy endpoint shape.
+                r = await c.post(
+                    f"{ollama_url}/api/embeddings",
+                    json={"model": embed_model, "prompt": "preflight"},
+                )
+            r.raise_for_status()
+        log.info("preflight: embed OK (%s)", embed_model)
+    except Exception as e:
+        log.error("preflight: EMBED DEGRADED — corpus query embedding will fail (model=%s): %s",
+                  embed_model, e)
+
     return ok
 
 

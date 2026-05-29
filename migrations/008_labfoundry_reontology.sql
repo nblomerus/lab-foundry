@@ -26,8 +26,11 @@ ALTER TABLE phase_transitions RENAME COLUMN cited_thesis_ids TO cited_claim_ids;
 
 -- (c) Rename verdict table
 ALTER TABLE adversary_verdicts RENAME TO critic_verdicts;
--- Update the FK in claims that references verdict table
-ALTER TABLE claims RENAME COLUMN invalidated_by_verdict_id TO invalidated_by_verdict_id;  -- already done above
+-- NOTE: claims.invalidated_by_verdict_id was already renamed in (a) above; no
+-- further rename is needed here. A prior dead self-rename at this spot
+-- (RENAME COLUMN x TO x) errored "already exists" and aborted a fresh
+-- docker-entrypoint-initdb.d run (ON_ERROR_STOP=1), even though `make migrate`
+-- (psql without ON_ERROR_STOP) tolerated it. Removed.
 
 -- (d) Recreate phase enum (Postgres doesn't support direct rename of enum values)
 ALTER TYPE phase RENAME TO _phase_old;
