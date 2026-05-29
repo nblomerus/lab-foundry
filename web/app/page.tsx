@@ -6,15 +6,17 @@ import { useEventStream } from "./lib/ws";
 import type { Snapshot } from "./lib/types";
 
 import { Header } from "./components/Header";
-import { StatsGrid } from "./components/StatsGrid";
-import { WorkflowLoop } from "./components/WorkflowLoop";
-import { DissentPanel } from "./components/DissentPanel";
-import { ClaimsPanel } from "./components/ClaimsPanel";
-import { TaskQueuePanel } from "./components/TaskQueuePanel";
-import { FindingsPanel } from "./components/FindingsPanel";
-import { TelemetryPanel } from "./components/TelemetryPanel";
-import { SkillPanel } from "./components/SkillPanel";
-import { EventStream } from "./components/EventStream";
+import { AskPanel } from "./components/AskPanel";
+import {
+  HealthCards,
+  ResearchPortfolio,
+  CompanyStatePanel,
+  EvidenceHealth,
+  AgentWorkforce,
+  BudgetBurn,
+  AttentionQueue,
+  MiniEvidenceGraph,
+} from "./components/Overview";
 
 export default function CommandCenter() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -65,44 +67,58 @@ export default function CommandCenter() {
     return <div className="text-sm text-slate-500">Loading snapshot…</div>;
   }
 
-  const latestEventType =
-    latest && latest.type === "event" ? latest.event.event_type : undefined;
-  const totalRuns =
-    snap.telemetry.reduce((sum, t) => sum + t.runs, 0);
-  const savedFindings = snap.recent_findings.length;
-
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <Header state={snap.state} />
 
-      <StatsGrid stats={snap.stats} activeClaims={snap.state.active_claim_count} />
+      <HealthCards snap={snap} />
 
-      <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <WorkflowLoop
-          roles={snap.org_roles}
-          latestEventType={latestEventType}
-          lastActivityAt={snap.stats.last_activity_at}
-        />
-        <DissentPanel items={snap.dissent} />
+      <main className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+        {/* Left column — the research portfolio is the headline. */}
+        <section className="lg:col-span-7">
+          <ResearchPortfolio claims={snap.active_claims} />
+        </section>
 
-        <ClaimsPanel claims={snap.active_claims} />
-        <TaskQueuePanel
-          taskCounts={snap.task_counts}
-          recentRuns={snap.recent_runs}
-          langfuseHost={snap.langfuse_host}
-        />
-        <FindingsPanel findings={snap.recent_findings} />
+        {/* Right column — ask, then live org state. */}
+        <section className="space-y-5 lg:col-span-5">
+          <AskPanel snap={snap} />
+          <CompanyStatePanel
+            claims={snap.active_claims}
+            dissent={snap.dissent}
+            recentRuns={snap.recent_runs}
+            transitions={snap.phase_transitions}
+          />
+          <EvidenceHealth
+            stats={snap.stats}
+            claims={snap.active_claims}
+            findings={snap.recent_findings}
+          />
+        </section>
 
-        <TelemetryPanel
-          telemetry={snap.telemetry}
-          cost={snap.cost}
-          totalRuns={totalRuns}
-          savedFindings={savedFindings}
-        />
-        <SkillPanel lessons={snap.lesson_counts} cost={snap.cost} />
+        {/* Three-up: workforce, budget, attention. */}
+        <section className="lg:col-span-4">
+          <AgentWorkforce roles={snap.org_roles} />
+        </section>
+        <section className="lg:col-span-4">
+          <BudgetBurn cost={snap.cost} findingsToday={snap.stats.findings_today} />
+        </section>
+        <section className="lg:col-span-4">
+          <AttentionQueue
+            stats={snap.stats}
+            dissent={snap.dissent}
+            transitions={snap.phase_transitions}
+          />
+        </section>
 
-        <EventStream keep={60} />
-      </section>
+        {/* Full-width evidence graph. */}
+        <section className="lg:col-span-12">
+          <MiniEvidenceGraph
+            findings={snap.recent_findings}
+            claims={snap.active_claims}
+            dissent={snap.dissent}
+          />
+        </section>
+      </main>
     </div>
   );
 }

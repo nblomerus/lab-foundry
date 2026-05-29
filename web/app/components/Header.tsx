@@ -12,31 +12,64 @@ const PHASE_TAGLINE: Record<string, string> = {
   execution:   "Charter set. Shipping to a paying customer.",
 };
 
+const PHASE_OBJECTIVE: Record<string, string> = {
+  exploration: "Map gaps, evidence, and the strongest candidate directions",
+  convergence: "Narrow to the few claims worth committing to",
+  commitment:  "Lock a thesis and write the charter",
+  execution:   "Ship a deliverable to a paying customer",
+};
+
+const NEXT_MILESTONE: Record<string, string> = {
+  exploration: "Thesis selection",
+  convergence: "Commitment decision",
+  commitment:  "Charter sign-off",
+  execution:   "First paying customer",
+};
+
+function totalPhaseDays(state: CompanyState): number {
+  // Whole run window in days, from bootstrap to deadline.
+  const start = new Date(state.bootstrap_at).getTime();
+  const end = new Date(state.deadline).getTime();
+  const days = Math.round((end - start) / 86_400_000);
+  return Number.isFinite(days) && days > 0 ? days : 30;
+}
+
 export function Header({ state }: { state: CompanyState }) {
+  const total = totalPhaseDays(state);
+  const dayN = Math.max(0, total - state.days_remaining);
+  const phase = state.current_phase;
+
   return (
-    <header className="mb-6 rounded-[2rem] border border-slate-200 bg-white/80 p-5 shadow-sm backdrop-blur">
-      <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-center">
-        <div>
+    <header className="mb-6 rounded-[2rem] border border-slate-200 bg-white/85 p-5 shadow-sm backdrop-blur">
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div className="max-w-4xl">
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <Badge tone="dark">LabFoundry</Badge>
-            <Badge tone="blue">Phase · {state.current_phase}</Badge>
-            <Badge tone="green">Autonomous</Badge>
+            <Badge tone="dark">Command Center</Badge>
+            <Badge tone="blue">Phase · {phase}</Badge>
+            <Badge tone="green">Autonomous with review gates</Badge>
             {state.paused && <Badge tone="amber">Paused</Badge>}
           </div>
-          <h1 className="max-w-4xl text-3xl font-semibold tracking-tight text-slate-950 sm:text-5xl">
-            {state.charter ? state.thesis : "Discover a business that makes real money in 30 days."}
+
+          <h1 className="text-3xl font-semibold tracking-tight text-slate-950 sm:text-4xl">
+            {state.charter && state.thesis
+              ? state.thesis
+              : "Explore, challenge, and converge on a real, fundable direction."}
           </h1>
-          <p className="mt-3 max-w-3xl text-base leading-7 text-slate-600">
-            {state.charter
-              ? PHASE_TAGLINE.execution
-              : PHASE_TAGLINE[state.current_phase] || "Autonomous AI-native company. Watch it run."}
+
+          <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600">
+            <span className="font-semibold text-slate-900">Mission:</span>{" "}
+            {state.problem_statement.split("\n").join(" ")}
           </p>
-        </div>
-        <div className="grid min-w-[280px] gap-3 rounded-3xl bg-slate-950 p-4 text-white sm:grid-cols-2 lg:grid-cols-1">
-          <Row label="Active claims" value={String(state.active_claim_count)} />
-          <Row label="Killed" value={String(state.invalidated_claim_count)} />
-          <Row label="Day in phase" value={`${state.days_in_phase}`} />
-          <Row label="Days to deadline" value={`${state.days_remaining}`} />
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Objective
+              label="Current objective"
+              value="Identify the strongest article-worthy direction"
+            />
+            <Objective label="Phase goal" value={PHASE_OBJECTIVE[phase] ?? "—"} />
+            <Objective label="Day" value={`${dayN} / ${total}`} />
+            <Objective label="Next milestone" value={NEXT_MILESTONE[phase] ?? "—"} />
+          </div>
         </div>
       </div>
 
@@ -60,11 +93,13 @@ export function Header({ state }: { state: CompanyState }) {
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Objective({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-4">
-      <span className="text-sm text-slate-300">{label}</span>
-      <span className="text-sm font-semibold">{value}</span>
+    <div className="rounded-2xl bg-slate-50 p-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+        {label}
+      </div>
+      <div className="mt-1 text-sm font-semibold text-slate-800">{value}</div>
     </div>
   );
 }

@@ -93,8 +93,8 @@ function deriveNodeStatus(node: NodeDef, snap: Snapshot): NodeStatus {
   }
 
   if (node.id === "claims") {
-    const a = snap.state.active_claim_count;
-    const k = snap.state.invalidated_claim_count;
+    const a = snap.state.active_claims_count;
+    const k = snap.state.invalidated_claims_count;
     const top = snap.active_claims[0];
     return {
       tone: a > 0 ? "active" : "warn",
