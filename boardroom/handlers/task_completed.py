@@ -189,11 +189,11 @@ Return one entry per finding. Use the same finding_id you saw.
     return PromptLayer(name="task_data", content=content, priority=1)
 
 
-if "auditor.slop_score" not in RECIPES:
-    RECIPES["auditor.slop_score"] = Recipe(
-        invocation_type="auditor.slop_score",
+if "evaluation.slop_score" not in RECIPES:
+    RECIPES["evaluation.slop_score"] = Recipe(
+        invocation_type="evaluation.slop_score",
         description="Auditor scores findings for substance AND groundedness against the evidence trail.",
-        agent="auditor",
+        agent="evaluation",
         # Bumped from 8k to 14k after the auditor was given the per-evidence
         # trail (quotes + claims grouped by URL) so it can score groundedness
         # in addition to substance. The evidence section is the largest growth
@@ -260,7 +260,7 @@ async def handle_task_completed(event: dict, dispatcher) -> Optional[dict]:
             return {"skipped": True, "reason": "v2 audit: all cross_check steps failed"}
     else:
         prompt = await dispatcher.curator.build(
-            invocation_type="auditor.slop_score",
+            invocation_type="evaluation.slop_score",
             context={"task": task, "findings": findings,
                      "evidence": evidence, "experiments": experiments,
                      "task_id": task_id},
@@ -281,6 +281,30 @@ async def handle_task_completed(event: dict, dispatcher) -> Optional[dict]:
             audit_verdict=verdict,
             run_id=run_id,
         )
+
+        # Write high-signal findings to graph (non-fatal if Neo4j unavailable)
+        if verdict == "pass" and score.relevance_score >= 8:
+            try:
+                from boardroom.mcp_servers.boardroom_knowledge.tools import merge_finding_grounds_claim
+                finding = by_id_for_graph.get(score.finding_id) if 'by_id_for_graph' in locals() else None
+                if finding is None:
+                    finding = await dispatcher.state.get_finding(score.finding_id)
+                if finding and finding.claim_id:
+                    claim = await dispatcher.state.get_claim(finding.claim_id)
+                    await merge_finding_grounds_claim(
+                        finding_id=finding.id,
+                        claim_id=finding.claim_id,
+                        source=finding.source or "",
+                        url=finding.url,
+                        title=finding.title,
+                        summary=finding.summary,
+                        relevance_score=finding.relevance_score,
+                        supports_claim=finding.supports_thesis,
+                        audit_verdict=verdict,
+                        created_at=finding.created_at,
+                    )
+            except Exception:
+                log.exception("graph_sink: finding→claim write failed — continuing")
 
     # Slop circuit-breaker per affected claim
     claims_seen = {f.claim_id for f in findings if f.claim_id is not None}
@@ -323,7 +347,7 @@ async def handle_task_completed(event: dict, dispatcher) -> Optional[dict]:
                 f"Theses affected: {sorted(claims_seen)}. "
                 f"Circuit-breakers tripped: {breakers_tripped or 'none'}."
             ),
-            role_type="auditor",
+            role_type="evaluation",
             metadata={"task_id": task_id, "run_id": run_id},
         )
 

@@ -271,6 +271,12 @@ export interface TraceSessionDetail {
   session: (TraceSessionSummary & { trigger_payload: Record<string, unknown> | null }) | null;
   runs: TraceRun[];
 }
+export interface GraphStats {
+  status: "ok" | "unavailable";
+  nodes?: { claims: number; findings: number; verdicts: number };
+  edges?: { grounds: number; challenged: number; cited_by: number };
+  error?: string;
+}
 
 export interface BenchRunResponse {
   error?: string;
@@ -320,4 +326,5 @@ export const api = {
     return jget<TraceSessionsResponse>(`/trace/sessions?${q.toString()}`);
   },
   traceSession: (id: number) => jget<TraceSessionDetail>(`/trace/sessions/${id}`),
+  graphStats: () => jget<GraphStats>("/trace/graph/stats"),
 };

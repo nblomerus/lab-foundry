@@ -40,6 +40,7 @@ from boardroom.handlers.phase_transition       import handle_phase_transition_pr
 from boardroom.handlers.reflection             import handle_reflection_requested
 from boardroom.handlers.audit_slop_detected    import handle_audit_slop_detected
 from boardroom.handlers.phase_budget_exceeded  import handle_phase_budget_exceeded
+from boardroom.handlers.graph_sink             import handle_graph_sink_claim_created
 
 
 logging.basicConfig(
@@ -96,6 +97,15 @@ async def _preflight(pool, ollama_url: str, memory: ZepClient) -> bool:
         log.info("preflight: zep OK")
     except Exception as e:
         log.error("preflight: ZEP DEGRADED — memory writes/recall will fail: %s", e)
+
+    # Neo4j — non-fatal. The graph is a read-optimized projection; its absence
+    # degrades query quality but never blocks the research loop.
+    try:
+        from boardroom.mcp_servers.boardroom_knowledge.tools import ensure_constraints
+        await ensure_constraints()
+        log.info("preflight: neo4j OK")
+    except Exception as e:
+        log.error("preflight: NEO4J DEGRADED — graph writes will fail silently: %s", e)
 
     return ok
 
@@ -184,6 +194,7 @@ async def main() -> int:
     dispatcher.register("reflection.requested",      handle_reflection_requested)
     dispatcher.register("audit.slop_detected",       handle_audit_slop_detected)
     dispatcher.register("phase.budget_exceeded",     handle_phase_budget_exceeded)
+    dispatcher.register("claim.created",             handle_graph_sink_claim_created)
 
     # Graceful shutdown
     stop_event = asyncio.Event()

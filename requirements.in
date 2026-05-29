@@ -1,5 +1,6 @@
 # Runtime
 asyncpg
+neo4j>=5.0,<6
 httpx
 pydantic
 tiktoken

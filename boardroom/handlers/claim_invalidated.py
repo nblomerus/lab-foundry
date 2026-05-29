@@ -99,11 +99,11 @@ Padding the slate is worse than fewer-but-real categories.
     return PromptLayer(name="task_data", content=content, priority=1)
 
 
-if "ceo.spawn_replacement" not in RECIPES:
-    RECIPES["ceo.spawn_replacement"] = Recipe(
-        invocation_type="ceo.spawn_replacement",
+if "pi.spawn_claim" not in RECIPES:
+    RECIPES["pi.spawn_claim"] = Recipe(
+        invocation_type="pi.spawn_claim",
         description="CEO decides whether to spawn replacements after a claim is killed.",
-        agent="ceo",
+        agent="pi",
         total_budget=8_000,
         use_cold_path=True,
         recall_sessions=["claims-lifecycle", "ceo-deliberations"],
@@ -124,7 +124,7 @@ async def handle_claim_invalidated(event: dict, dispatcher) -> Optional[dict]:
     killed_claim_id = event["target_id"]
 
     prompt = await dispatcher.curator.build(
-        invocation_type="ceo.spawn_replacement",
+        invocation_type="pi.spawn_claim",
         context={"killed_claim_id": killed_claim_id},
     )
 
@@ -185,7 +185,7 @@ async def handle_claim_invalidated(event: dict, dispatcher) -> Optional[dict]:
             f"On the kill of T{killed_claim_id}: action={decision.action}. "
             f"Reasoning: {decision.reasoning}"
         ),
-        role_type="ceo",
+        role_type="pi",
         metadata={
             "killed_claim_id": killed_claim_id,
             "run_id": run_id,

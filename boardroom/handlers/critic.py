@@ -9,7 +9,7 @@ claim and decide whether killing evidence has accumulated. Three outcomes:
   - kill:   evidence sufficient; adversary_verdict created and claim killed
             (state.invalidate_claim emits claim.invalidated → CEO handler triggers)
 
-The handler installs a 4-hour per-claim cooldown on adversary.kill_verdict
+The handler installs a 4-hour per-claim cooldown on critic.kill_verdict
 so multiple high-signal findings in a window batch into one Adversary run.
 """
 from __future__ import annotations
@@ -125,11 +125,11 @@ three actions is not.
     return PromptLayer(name="task_data", content=content, priority=1)
 
 
-if "adversary.kill_verdict" not in RECIPES:
-    RECIPES["adversary.kill_verdict"] = Recipe(
+if "critic.kill_verdict" not in RECIPES:
+    RECIPES["critic.kill_verdict"] = Recipe(
         invocation_type="critic.kill_verdict",
         description="Critic examines a claim for killing evidence and emits a verdict.",
-        agent="adversary",
+        agent="critic",
         total_budget=12_000,
         use_cold_path=True,
         recall_sessions=["claims-lifecycle", "dissent"],
@@ -194,6 +194,23 @@ async def handle_finding_high_signal(event: dict, dispatcher) -> Optional[dict]:
         run_id=run_id,
     )
 
+    # Write verdict to graph (non-fatal if Neo4j unavailable)
+    try:
+        from boardroom.mcp_servers.boardroom_knowledge.tools import merge_critic_verdict_challenged_claim
+        claim = await dispatcher.state.get_claim(claim_id)
+        await merge_critic_verdict_challenged_claim(
+            verdict_id=verdict_id,
+            claim_id=claim_id,
+            verdict=verdict.action,
+            confidence=verdict.confidence,
+            reasoning=verdict.reasoning,
+            action=verdict.action,
+            cited_finding_ids=verdict.cited_finding_ids,
+            created_at=claim.created_at,
+        )
+    except Exception:
+        log.exception("graph_sink: verdict write failed — continuing")
+
     result: dict = {
         "claim_id":  claim_id,
         "action":     verdict.action,
@@ -209,6 +226,19 @@ async def handle_finding_high_signal(event: dict, dispatcher) -> Optional[dict]:
             run_id=run_id,
         )
         result["killed"] = killed.status == "killed"
+
+        # Update claim status to invalidated in graph (non-fatal if Neo4j unavailable)
+        try:
+            from boardroom.mcp_servers.boardroom_knowledge.tools import merge_claim
+            await merge_claim(
+                id=claim_id,
+                statement=killed.statement,
+                status="invalidated",
+                confidence=killed.confidence,
+            )
+        except Exception:
+            log.exception("graph_sink: claim invalidation write failed — continuing")
+
         await dispatcher.memory.write_message(
             session_id="claims-lifecycle",
             content=(
@@ -216,7 +246,7 @@ async def handle_finding_high_signal(event: dict, dispatcher) -> Optional[dict]:
                 f"Reasoning: {verdict.reasoning} "
                 f"Cited findings: {verdict.cited_finding_ids}."
             ),
-            role_type="adversary",
+            role_type="critic",
             metadata={"claim_id": claim_id, "verdict_id": verdict_id, "run_id": run_id},
         )
 
@@ -244,7 +274,7 @@ async def handle_finding_high_signal(event: dict, dispatcher) -> Optional[dict]:
             f"Adversary on T{claim_id}: {verdict.action} "
             f"(action conf {verdict.confidence:.2f}). {verdict.reasoning}"
         ),
-        role_type="adversary",
+        role_type="critic",
         metadata={"verdict_id": verdict_id, "run_id": run_id},
     )
 

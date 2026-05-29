@@ -6,6 +6,7 @@ import { Network, RefreshCw, AlertTriangle, CheckCircle2, Loader2 } from "lucide
 import { api, type TraceSessionSummary, type TraceSessionsResponse } from "../lib/api";
 import { useEventStream } from "../lib/ws";
 import { Badge, Card, SectionTitle, cx } from "../components/ui";
+import GraphStatsPanel from "../components/GraphStats";
 
 const STATUS_TONE: Record<string, "amber" | "green" | "red" | "default"> = {
   running: "amber", completed: "green", failed: "red",
@@ -79,6 +80,8 @@ export default function TracePage() {
           <RefreshCw className="h-4 w-4" /> Refresh
         </button>
       </div>
+
+      <GraphStatsPanel />
 
       <Card>
         <SectionTitle

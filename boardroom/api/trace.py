@@ -7,15 +7,21 @@ inside it lands in `agent_runs` with a `session_id` / `step_name` /
 
     GET  /trace/sessions               list with filters
     GET  /trace/sessions/{id}          one session + its full step graph
+    GET  /trace/graph/claim/{id}       claim's evidence chain + verdicts
+    GET  /trace/graph/stats            node and edge counts in Neo4j
 
 The /trace web page subscribes to `/ws/events` and patches the DAG live as
 `step.started` / `step.completed` / `step.failed` events arrive.
+Neo4j graph endpoints return query results for visualization.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Request
+
+log = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/trace", tags=["trace"])
@@ -196,3 +202,62 @@ async def get_session(request: Request, session_id: int) -> dict:
     } for r in runs]
 
     return {"session": session, "runs": runs_out}
+
+
+# =========================================================================
+# Neo4j Graph Visualization Endpoints
+# =========================================================================
+
+
+@router.get("/graph/stats")
+async def graph_stats(request: Request) -> dict:
+    """Get Neo4j graph node and edge counts."""
+    try:
+        from boardroom.mcp_servers.boardroom_knowledge.tools import _get_driver
+        driver = await _get_driver()
+        async with driver.session() as session:
+            claims = await session.run("MATCH (c:Claim) RETURN COUNT(c) AS count")
+            findings = await session.run("MATCH (f:Finding) RETURN COUNT(f) AS count")
+            verdicts = await session.run("MATCH (v:CriticVerdict) RETURN COUNT(v) AS count")
+            grounds_edges = await session.run("MATCH (f:Finding)-[:GROUNDS]->(c:Claim) RETURN COUNT(*) AS count")
+            challenged_edges = await session.run("MATCH (v:CriticVerdict)-[:CHALLENGED]->(c:Claim) RETURN COUNT(*) AS count")
+            cited_edges = await session.run("MATCH (f:Finding)-[:CITED_BY]->(v:CriticVerdict) RETURN COUNT(*) AS count")
+
+            return {
+                "status": "ok",
+                "nodes": {
+                    "claims": (await claims.data())[0]["count"],
+                    "findings": (await findings.data())[0]["count"],
+                    "verdicts": (await verdicts.data())[0]["count"],
+                },
+                "edges": {
+                    "grounds": (await grounds_edges.data())[0]["count"],
+                    "challenged": (await challenged_edges.data())[0]["count"],
+                    "cited_by": (await cited_edges.data())[0]["count"],
+                },
+            }
+    except Exception as e:
+        log.warning("graph_stats failed: %s", e)
+        return {"status": "unavailable", "error": str(e)}
+
+
+@router.get("/graph/claim/{claim_id}")
+async def graph_claim(request: Request, claim_id: int) -> dict:
+    """Get a claim with its evidence chain and critic verdicts."""
+    try:
+        from boardroom.mcp_servers.boardroom_knowledge.tools import (
+            get_claim_evidence_chain,
+            get_claim_critics,
+        )
+        evidence = await get_claim_evidence_chain(claim_id, limit=50)
+        critics = await get_claim_critics(claim_id)
+
+        return {
+            "status": "ok",
+            "claim_id": claim_id,
+            "evidence_chain": evidence,
+            "critic_verdicts": critics,
+        }
+    except Exception as e:
+        log.warning("graph_claim failed for claim %d: %s", claim_id, e)
+        return {"status": "unavailable", "claim_id": claim_id, "error": str(e)}

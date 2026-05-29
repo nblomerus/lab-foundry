@@ -1,5 +1,3 @@
-name: boardroom
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -36,6 +34,25 @@ services:
       - SETGID
       - SETUID
 
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-boardroom}
+      NEO4J_dbms_memory_pagecache_size: 512M
+      NEO4J_dbms_memory_heap_initial__size: 512M
+      NEO4J_dbms_memory_heap_max__size: 1G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   # Langfuse self-host now requires ClickHouse + Redis + S3 — too heavy for dev.
   # Use Langfuse Cloud instead: https://cloud.langfuse.com (free tier).
   # Set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST in .env.
@@ -66,4 +83,5 @@ services:
 
 volumes:
   postgres-data:
+  neo4j-data:
   # zep-db-data:

@@ -78,7 +78,7 @@ if "phase_adjudicator.check" not in RECIPES:
     RECIPES["phase_adjudicator.check"] = Recipe(
         invocation_type="phase_adjudicator.check",
         description="Decides whether phase-transition criteria are met.",
-        agent="adversary",  # reuse the strict / skeptical role anchor
+        agent="critic",  # reuse the strict / skeptical role anchor
         total_budget=3_000,
         use_cold_path=False,
         recall_sessions=[],
