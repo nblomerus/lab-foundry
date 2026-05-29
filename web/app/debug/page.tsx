@@ -61,7 +61,7 @@ export default function DebugPage() {
         <SectionTitle
           icon={Bug}
           title="Debug — live agent runs"
-          subtitle="Every model call the running company makes, newest first: what each agent produced, what it cost, and why it failed. Read-only."
+          subtitle="Every model call the running organisation makes, newest first: what each agent produced, what it cost, and why it failed. Read-only."
         />
         <div className="flex flex-wrap items-center gap-2">
           <FilterChip label="all" active={status === ""} onClick={() => setStatus("")} />

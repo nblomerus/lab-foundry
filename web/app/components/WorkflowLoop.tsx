@@ -179,7 +179,7 @@ export function WorkflowLoop({
     <Card className="lg:col-span-8">
       <SectionTitle
         icon={Layers3}
-        title="Autonomous company loop"
+        title="Autonomous organisation loop"
         subtitle="Strategic → Tactical → Execution, with critics gating every output."
         action={
           <div className="flex items-center gap-2">

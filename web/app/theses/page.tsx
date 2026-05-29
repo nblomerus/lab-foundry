@@ -24,7 +24,7 @@ export default function ClaimsPage() {
         <SectionTitle
           icon={Layers3}
           title={`Claims (${snap.active_claims.length} active, ${snap.invalidated_claims.length} archived)`}
-          subtitle="Born, evolved, killed, or merged. The full history of the company's strategic candidates."
+          subtitle="Born, evolved, killed, or merged. The full history of the organisation's strategic candidates."
         />
       </Card>
 

@@ -114,7 +114,7 @@ export default function BenchPage() {
         <SectionTitle
           icon={FlaskConical}
           title="Model Bench"
-          subtitle="Run any agent's real template task across models, side by side. Read-only — it builds the exact prompt the harness would and does not touch the running company or its budget."
+          subtitle="Run any agent's real template task across models, side by side. Read-only — it builds the exact prompt the harness would and does not touch the running organisation or its budget."
         />
       </Card>
 

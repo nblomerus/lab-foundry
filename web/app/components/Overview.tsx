@@ -230,7 +230,7 @@ export function ResearchPortfolio({ claims }: { claims: Claim[] }) {
 }
 
 // =========================================================================
-// Current Company State — researching / testing / challenging / waiting.
+// Current Organisation State — researching / testing / challenging / waiting.
 // =========================================================================
 
 export function CompanyStatePanel({
@@ -277,7 +277,7 @@ export function CompanyStatePanel({
     <Card>
       <SectionTitle
         icon={Gauge}
-        title="Current Company State"
+        title="Current Organisation State"
         subtitle="What the organization is doing right now."
       />
       <div className="grid gap-3 sm:grid-cols-2">
