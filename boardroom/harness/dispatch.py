@@ -299,10 +299,10 @@ class Dispatcher:
         return bool(row and row["cap_reached"])
 
     async def _is_slop_paused(self, conn, event: dict) -> bool:
-        if event.get("target_type") != "thesis" or event.get("target_id") is None:
+        if event.get("target_type") != "claim" or event.get("target_id") is None:
             return False
         slop_rate = await conn.fetchval(
-            "SELECT slop_rate FROM slop_rate_by_thesis WHERE thesis_id = $1",
+            "SELECT slop_rate FROM slop_rate_by_claim WHERE claim_id = $1",
             event["target_id"],
         )
         return slop_rate is not None and slop_rate > 0.40
@@ -555,4 +555,7 @@ class Dispatcher:
             )
 
     async def _refresh_slop_view(self, conn) -> None:
-        await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY slop_rate_by_thesis")
+        # Plain REFRESH (not CONCURRENTLY): migration 008 recreated this matview as
+        # slop_rate_by_claim WITHOUT the unique index that CONCURRENTLY requires.
+        # The view is tiny (one row per claim), so the brief lock is negligible.
+        await conn.execute("REFRESH MATERIALIZED VIEW slop_rate_by_claim")
