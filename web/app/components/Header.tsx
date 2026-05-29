@@ -35,7 +35,7 @@ export function Header({ state }: { state: CompanyState }) {
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="max-w-4xl">
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <Badge tone="dark">Command Center</Badge>
+            <Badge tone="dark">Research OS</Badge>
             <Badge tone="blue">Phase · {phase}</Badge>
             <Badge tone="green">Autonomous with review gates</Badge>
             {state.paused && <Badge tone="amber">Paused</Badge>}

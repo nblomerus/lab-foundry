@@ -68,7 +68,7 @@ export function AskPanel({ snap }: { snap: Snapshot }) {
     <div className="rounded-3xl bg-slate-950 p-4 text-white">
       <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
         <Sparkles className="h-4 w-4 text-emerald-300" />
-        Ask the Command Center
+        Ask Research OS
       </div>
 
       <form
