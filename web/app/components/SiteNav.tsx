@@ -6,7 +6,7 @@ import { BrainCircuit, Eye, GitBranch, Layers3, Target, TerminalSquare, Play, Fl
 import { cx } from "./ui";
 
 const NAV = [
-  { href: "/",       icon: Target,         label: "Command" },
+  { href: "/",       icon: Target,         label: "Research OS" },
   { href: "/flow",   icon: GitBranch,      label: "Flow" },
   { href: "/claims", icon: Layers3,        label: "Claims" },
   { href: "/events", icon: TerminalSquare, label: "Events" },

@@ -6,7 +6,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { cx } from "./ui";
 
 export const PAGE_ORDER = [
-  { href: "/",       label: "Command" },
+  { href: "/",       label: "Research OS" },
   { href: "/flow",   label: "Flow" },
   { href: "/claims", label: "Claims" },
   { href: "/events", label: "Events" },
