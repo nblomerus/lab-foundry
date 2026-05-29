@@ -48,10 +48,10 @@ async def _state(pool: asyncpg.Pool) -> CompanyStateOut:
         if s is None:
             raise RuntimeError("company_state not seeded")
         active = await c.fetchval(
-            "SELECT COUNT(*) FROM claims WHERE status = 'active'"
+            "SELECT COUNT(*) FROM claims WHERE status IN ('proposed', 'tested', 'weakly_supported', 'replicated')"
         )
         killed = await c.fetchval(
-            "SELECT COUNT(*) FROM claims WHERE status != 'active'"
+            "SELECT COUNT(*) FROM claims WHERE status IN ('invalidated', 'merged')"
         )
 
     now = datetime.now(timezone.utc)
@@ -77,7 +77,12 @@ async def _state(pool: asyncpg.Pool) -> CompanyStateOut:
 
 
 async def _theses_with_counts(pool: asyncpg.Pool, status_filter: str, limit: int) -> list[ThesisOut]:
-    op = "=" if status_filter == "active" else "!="
+    # Filter for active (not invalidated/merged) or inactive claims
+    if status_filter == "active":
+        status_clause = "status IN ('proposed', 'tested', 'weakly_supported', 'replicated')"
+    else:
+        status_clause = "status IN ('invalidated', 'merged')"
+
     async with pool.acquire() as c:
         rows = await c.fetch(
             f"""
@@ -89,7 +94,7 @@ async def _theses_with_counts(pool: asyncpg.Pool, status_filter: str, limit: int
               (SELECT COUNT(*) FROM findings f WHERE f.claim_id = t.id
                 AND f.supports_thesis = false AND f.audit_verdict = 'pass') AS contradicting_count
             FROM claims t
-            WHERE status {op} 'active'
+            WHERE {status_clause}
             ORDER BY confidence DESC NULLS LAST, updated_at DESC
             LIMIT $1
             """,
