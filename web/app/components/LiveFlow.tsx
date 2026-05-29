@@ -120,6 +120,34 @@ function deriveNodeStatus(node: NodeDef, snap: Snapshot, power?: PowerSummary | 
     };
   }
 
+  if (node.id === "novelty") {
+    return {
+      tone: "idle",
+      badge: "planned",
+      current: "prior-art check",
+      details: [
+        "Novelty reviewer (planned, NOVELTY_LOOP=v2)",
+        "checks a claim vs prior art (arXiv + KG + corpus)",
+        "casts the novelty vote on the promotion panel",
+        "needs the Paper/pgvector index first (per scope)",
+      ],
+    };
+  }
+
+  if (node.id === "reviewer") {
+    return {
+      tone: "idle",
+      badge: "planned",
+      current: "peer-review chair",
+      details: [
+        "Area chair (planned, GATE_LOOP=v2)",
+        "runs the per-claim promotion gate",
+        "aggregates Critic + Novelty votes, records dissent",
+        "owns the single write: promote / hold / reject / merge",
+      ],
+    };
+  }
+
   const role = snap.org_roles.find((r) => r.role === (ROLE_TO_NODE[node.id] ?? ""));
 
   if (["researcher", "evaluation", "critic", "pi", "planner", "adjudicator"].includes(node.id)) {

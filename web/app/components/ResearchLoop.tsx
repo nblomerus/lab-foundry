@@ -56,7 +56,7 @@ interface Stage {
 const STAGES: Stage[] = [
   { id: "question",   label: "Question",   division: "Research & Discovery", icon: GitBranch,   roles: ["planner"],                    events: ["queue.empty", "task.created"],                                            angle: 0 },
   { id: "gather",     label: "Gather",     division: "Research & Discovery", icon: Search,      roles: ["researcher"],                 events: ["task.completed"],                                                          angle: 72 },
-  { id: "judge",      label: "Judge",      division: "Quality & Review",     icon: ShieldCheck, roles: ["evaluation", "critic"],       events: ["finding.high_signal", "audit.slop_detected", "thesis.invalidated"],         angle: 144 },
+  { id: "judge",      label: "Judge",      division: "Quality & Review",     icon: ShieldCheck, roles: ["evaluation", "critic", "novelty", "reviewer"], events: ["finding.high_signal", "audit.slop_detected", "thesis.invalidated", "claim.promotion_candidate", "claim.promoted"], angle: 144 },
   { id: "synthesise", label: "Synthesise", division: "Leadership",           icon: BrainCircuit,roles: ["pi"],                         events: ["thesis.created", "thesis.invalidated"],                                    angle: 216 },
   { id: "converge",   label: "Converge",   division: "Leadership",           icon: Layers3,     roles: ["phase_adjudicator"],          events: ["thesis.confidence_changed", "phase.transition_proposed"],                  angle: 288 },
 ];
@@ -66,7 +66,7 @@ const STAGES: Stage[] = [
 const STAGE_FOCUS: Record<string, string[]> = {
   question:   ["planner", "tasks"],
   gather:     ["ingest", "rag", "kg", "web", "researcher", "tasks", "findings"],
-  judge:      ["findings", "evaluation", "critic", "claims"],
+  judge:      ["findings", "evaluation", "critic", "novelty", "reviewer", "claims"],
   synthesise: ["findings", "pi", "claims"],
   converge:   ["claims", "adjudicator", "phase", "pi"],
 };
@@ -736,7 +736,10 @@ function StageInspector({
 
       {stage.id === "judge" && (
         <>
-          <Rows rows={[["Audit today", `${snapshot.stats.high_signal_today} high-signal · ${snapshot.stats.slop_today} slop`]]} />
+          <Rows rows={[
+            ["Audit today", `${snapshot.stats.high_signal_today} high-signal · ${snapshot.stats.slop_today} slop`],
+            ["Promotion gate", "Critic + Novelty panel · Reviewer chair (planned)"],
+          ]} />
           <SubHead label="Recent dissent" />
           <DissentList items={snapshot.dissent.slice(0, 6)} />
         </>

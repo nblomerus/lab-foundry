@@ -8,8 +8,8 @@
 
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity, BrainCircuit, Database, Eye, Globe, GitBranch, Inbox, Layers3,
-  Network, Search, ShieldCheck, Target, Telescope, TerminalSquare, Wallet,
+  Activity, BrainCircuit, Database, Eye, Gavel, Globe, GitBranch, Inbox, Layers3,
+  Network, Search, ShieldCheck, Sparkles, Target, Telescope, TerminalSquare, Wallet,
 } from "lucide-react";
 
 // =========================================================================
@@ -101,12 +101,15 @@ export const NODES: NodeDef[] = [
   { id: "researcher",  label: "Researcher",   type: "Agent",  icon: Search,         x: 29, y: 38 },
   { id: "tasks",       label: "Tasks",        type: "Queue",  icon: TerminalSquare, x: 29, y: 84 },
 
-  { id: "findings",    label: "Findings",     type: "Store",  icon: Eye,            x: 49, y: 38 },
-  { id: "evaluation",  label: "Evaluation",   type: "Critic", icon: ShieldCheck,    x: 49, y: 64 },
+  { id: "novelty",     label: "Novelty",      type: "Critic", icon: Sparkles,       x: 49, y: 14 },
+  { id: "findings",    label: "Findings",     type: "Store",  icon: Eye,            x: 49, y: 40 },
+  { id: "evaluation",  label: "Evaluation",   type: "Critic", icon: ShieldCheck,    x: 49, y: 66 },
   { id: "planner",     label: "Planner",      type: "Agent",  icon: GitBranch,      x: 49, y: 92 },
 
   { id: "critic",      label: "Critic",       type: "Critic", icon: Telescope,      x: 70, y: 16 },
   { id: "claims",      label: "Claims",       type: "Store",  icon: Target,         x: 70, y: 52 },
+  // Peer-review chair — runs the per-claim promotion gate (planned, GATE_LOOP=v2).
+  { id: "reviewer",    label: "Reviewer",     type: "Warden", icon: Gavel,          x: 70, y: 86 },
 
   { id: "pi",          label: "PI",           type: "Agent",  icon: BrainCircuit,   x: 90, y: 16 },
   { id: "adjudicator", label: "Adjudicator",  type: "Agent",  icon: Activity,       x: 90, y: 52 },
@@ -133,13 +136,21 @@ export const EDGES: EdgeDef[] = [
 
   // Critics
   { id: "find-aud",  from: "findings",    fromSide: "bottom", to: "evaluation",    toSide: "top",                     label: "audit",           event_type: "task.completed" },
-  { id: "find-adv",  from: "findings",    fromSide: "top",    to: "critic",  toSide: "left",                    label: "high signal",     event_type: "finding.high_signal" },
+  { id: "find-adv",  from: "findings",    fromSide: "right",  to: "critic",  toSide: "left",   toOffset: +0.35,   label: "high signal",     event_type: "finding.high_signal" },
 
   // Critic → Claims
   { id: "adv-thes",  from: "critic",   fromSide: "bottom", to: "claims",     toSide: "top",                     label: "kill / weaken",   event_type: "thesis.invalidated" },
 
   // Evaluation's slop circuit-breaker trips on a claim (real: audit.slop_detected).
   { id: "eval-thes", from: "evaluation",  fromSide: "right",  to: "claims",     toSide: "left",                    label: "slop breaker",    event_type: "audit.slop_detected" },
+
+  // PLANNED — per-claim novelty/quality gate + peer-review panel (GATE_LOOP=v2):
+  // findings get a novelty check; a promotion-candidate claim goes through the
+  // Reviewer chair (Critic + Novelty consulted) before it's promoted.
+  { id: "find-nov",  from: "findings",    fromSide: "top",    to: "novelty",    toSide: "bottom",                  label: "novelty check",   event_type: "_gate", planned: true },
+  { id: "claim-rev", from: "claims",      fromSide: "bottom", fromOffset: -0.3,  to: "reviewer",   toSide: "top", toOffset: -0.3, label: "promotion gate", event_type: "_gate", planned: true },
+  { id: "rev-claim", from: "reviewer",    fromSide: "top",    fromOffset: +0.3,  to: "claims",     toSide: "bottom", toOffset: +0.3, label: "promote",        event_type: "_gate", planned: true },
+  { id: "nov-rev",   from: "novelty",     fromSide: "right",  to: "reviewer",   toSide: "left",                    label: "novelty vote",    event_type: "_gate", planned: true },
 
   // PI ↔ Claims (parallel via ±0.35 offsets)
   { id: "thes-ceo",  from: "claims",      fromSide: "top",    fromOffset: -0.35, to: "pi",        toSide: "bottom", toOffset: -0.35, label: "invalidated",     event_type: "thesis.invalidated" },
