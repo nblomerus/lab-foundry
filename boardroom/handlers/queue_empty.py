@@ -71,7 +71,7 @@ created. The PI needs to spawn new claims before research can resume.
         state.get_recent_findings_for_claim(t.id, limit=5) for t in claims
     ])
 
-    days_remaining = (state_obj.deadline - datetime.now(timezone.utc)).days
+    days_since_start = (datetime.now(timezone.utc) - state_obj.bootstrap_at).days
 
     blocks: list[str] = []
     for claim, findings in zip(claims, findings_per_thesis):
@@ -88,7 +88,7 @@ created. The PI needs to spawn new claims before research can resume.
 
     content = f"""## Queue refill — research queue is empty
 
-Phase: **{state_obj.current_phase}**  |  Days remaining: {days_remaining}
+Phase: **{state_obj.current_phase}**  |  Days since start: {days_since_start}
 
 ## Active claims and recent findings
 

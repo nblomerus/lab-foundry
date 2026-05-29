@@ -14,29 +14,20 @@ const PHASE_TAGLINE: Record<string, string> = {
 
 const PHASE_OBJECTIVE: Record<string, string> = {
   exploration: "Map gaps, evidence, and the strongest candidate directions",
-  convergence: "Narrow to the few claims worth committing to",
-  commitment:  "Lock a thesis and write the charter",
-  execution:   "Ship a deliverable to a paying customer",
+  convergence: "Narrow to the few directions worth pursuing",
+  commitment:  "Lock a thesis and write the research plan",
+  execution:   "Run the work and draft the article",
 };
 
 const NEXT_MILESTONE: Record<string, string> = {
   exploration: "Thesis selection",
-  convergence: "Commitment decision",
-  commitment:  "Charter sign-off",
-  execution:   "First paying customer",
+  convergence: "Direction commitment",
+  commitment:  "Research plan sign-off",
+  execution:   "Article draft",
 };
 
-function totalPhaseDays(state: CompanyState): number {
-  // Whole run window in days, from bootstrap to deadline.
-  const start = new Date(state.bootstrap_at).getTime();
-  const end = new Date(state.deadline).getTime();
-  const days = Math.round((end - start) / 86_400_000);
-  return Number.isFinite(days) && days > 0 ? days : 30;
-}
-
 export function Header({ state }: { state: CompanyState }) {
-  const total = totalPhaseDays(state);
-  const dayN = Math.max(0, total - state.days_remaining);
+  const dayN = Math.max(0, state.days_since_start);
   const phase = state.current_phase;
 
   return (
@@ -53,7 +44,7 @@ export function Header({ state }: { state: CompanyState }) {
           <h1 className="text-3xl font-semibold tracking-tight text-slate-950 sm:text-4xl">
             {state.charter && state.thesis
               ? state.thesis
-              : "Explore, challenge, and converge on a real, fundable direction."}
+              : "Explore, challenge, and converge on a publishable research direction."}
           </h1>
 
           <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600">
@@ -67,7 +58,7 @@ export function Header({ state }: { state: CompanyState }) {
               value="Identify the strongest article-worthy direction"
             />
             <Objective label="Phase goal" value={PHASE_OBJECTIVE[phase] ?? "—"} />
-            <Objective label="Day" value={`${dayN} / ${total}`} />
+            <Objective label="Days since start" value={dayN === 1 ? "1 day" : `${dayN} days`} />
             <Objective label="Next milestone" value={NEXT_MILESTONE[phase] ?? "—"} />
           </div>
         </div>

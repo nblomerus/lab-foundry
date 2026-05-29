@@ -13,9 +13,8 @@ class CompanyStateOut(BaseModel):
     current_phase: str
     phase_started_at: datetime
     bootstrap_at: datetime
-    deadline: datetime
     days_in_phase: int
-    days_remaining: int
+    days_since_start: int
     problem_statement: str
     stance: Optional[str]
     success_criterion: Optional[str]

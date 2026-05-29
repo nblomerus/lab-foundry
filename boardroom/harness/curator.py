@@ -423,11 +423,11 @@ class Curator:
         )
         now = datetime.now(timezone.utc)
         days_in_phase = (now - s.phase_started_at).days
-        days_remaining = (s.deadline - now).days
+        days_since_start = (now - s.bootstrap_at).days
         body = (
             f"## Phase context\n"
             f"Phase: **{s.current_phase}** (day {days_in_phase})\n"
-            f"Days remaining to deadline: {days_remaining}\n"
+            f"Days since start: {days_since_start}\n"
             f"Active theses: {active}"
         )
         return PromptLayer(name="phase", content=body, priority=1)

@@ -7,9 +7,8 @@ export interface CompanyState {
   current_phase: Phase;
   phase_started_at: string;
   bootstrap_at: string;
-  deadline: string;
   days_in_phase: number;
-  days_remaining: number;
+  days_since_start: number;
   problem_statement: string;
   stance: string | null;
   success_criterion: string | null;
@@ -172,6 +171,24 @@ export interface LabFoundryEvent {
   emitted_at: string;
   consumed_at?: string | null;
   consumed_by_handler?: string | null;
+}
+
+export interface QuerySource {
+  type: "claim" | "finding" | "event" | "metric" | "agent" | "dissent";
+  id: number;
+  reference: string;
+  confidence?: number;
+}
+
+export interface QueryResponse {
+  query: string;
+  answer: string;
+  sources: QuerySource[];
+  follow_up_queries: string[];
+  confidence: number;
+  executed_at: string;
+  processing_time_ms?: number;
+  model_used?: string;
 }
 
 export type StreamMessage =

@@ -112,11 +112,11 @@ function deriveNodeStatus(node: NodeDef, snap: Snapshot): NodeStatus {
     return {
       tone: snap.state.paused ? "blocked" : snap.state.current_phase === "execution" ? "active" : "warn",
       badge: snap.state.current_phase,
-      current: `day ${snap.state.days_in_phase} · ${snap.state.days_remaining}d left`,
+      current: `day ${snap.state.days_in_phase} · ${snap.state.days_since_start}d since start`,
       details: [
         `phase: ${snap.state.current_phase}`,
-        `day ${snap.state.days_in_phase}`,
-        `${snap.state.days_remaining}d to deadline`,
+        `day ${snap.state.days_in_phase} in phase`,
+        `${snap.state.days_since_start} days since start`,
         snap.state.paused ? `PAUSED: ${snap.state.paused_reason ?? ""}` : "running",
       ],
     };

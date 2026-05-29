@@ -54,7 +54,7 @@ async def _build_assess_state(ctx: dict, state, memory) -> PromptLayer:
         state.get_recent_findings_for_thesis(t.id, limit=8) for t in theses
     ])
 
-    days_remaining = (state_obj.deadline - datetime.now(timezone.utc)).days
+    days_since_start = (datetime.now(timezone.utc) - state_obj.bootstrap_at).days
 
     blocks: list[str] = []
     for thesis, findings in zip(theses, findings_per_thesis):
@@ -72,7 +72,7 @@ async def _build_assess_state(ctx: dict, state, memory) -> PromptLayer:
 
     content = f"""## Assess the research portfolio
 
-Phase: **{state_obj.current_phase}**  |  Days remaining: {days_remaining}
+Phase: **{state_obj.current_phase}**  |  Days since start: {days_since_start}
 
 The research queue is empty. Before proposing tasks, audit the portfolio:
 where is evidence thin, where is it concentrated, what's the most
