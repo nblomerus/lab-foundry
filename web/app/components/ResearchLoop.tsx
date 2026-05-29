@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   BrainCircuit, Database, GitBranch, Layers3,
   Search, ShieldCheck, Target, Wallet, type LucideIcon,
@@ -69,6 +70,14 @@ type Selection =
   | { kind: "hub" }
   | { kind: "claim"; claim: Claim }
   | null;
+
+// Stable key per selection so AnimatePresence re-runs the reveal on change.
+function selectionKey(sel: Selection): string {
+  if (!sel) return "none";
+  if (sel.kind === "stage") return `stage:${sel.stage.id}`;
+  if (sel.kind === "claim") return `claim:${sel.claim.id}`;
+  return "hub";
+}
 
 // =========================================================================
 // Top-level
@@ -185,26 +194,41 @@ export function ResearchLoop({ snapshot, power }: { snapshot: Snapshot; power?: 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* The ring */}
         <section className="lg:col-span-8">
-          <Card className="p-2">
-            <div className="relative mx-auto aspect-square w-full max-w-[680px]">
+          <Card className="overflow-hidden p-2">
+            <div
+              className="relative mx-auto aspect-square w-full max-w-[680px] rounded-[1.75rem] bg-[radial-gradient(circle_at_50%_50%,_rgba(16,185,129,0.05),_transparent_55%),radial-gradient(circle_at_50%_50%,_#ffffff,_#f6f9fc)]"
+              onClick={() => setSel(null)}
+            >
               <Ring
                 stages={STAGES}
                 orbits={orbits}
                 activity={stageActivity}
                 totalRunning={totalRunning}
                 capped={capped}
+                sel={sel}
+                phase={snapshot.state.current_phase}
               />
               <StageCards stages={STAGES} activity={stageActivity} sel={sel} onSelect={setSel} />
-              <HubCard kg={kg} phase={snapshot.state.current_phase} onSelect={() => setSel({ kind: "hub" })} selected={sel?.kind === "hub"} />
+              <HubCard kg={kg} phase={snapshot.state.current_phase} onSelect={() => setSel({ kind: "hub" })} selected={sel?.kind === "hub"} dimmed={sel != null && sel.kind !== "hub"} />
               <OrbitDots orbits={orbits} sel={sel} onSelect={(c) => setSel({ kind: "claim", claim: c })} />
               <RimMeter cost={cost} power={power} />
             </div>
           </Card>
         </section>
 
-        {/* Inspector */}
+        {/* Inspector — animates in when the selection changes (the reveal). */}
         <aside className="lg:col-span-4">
-          <Inspector sel={sel} activity={stageActivity} kg={kg} snapshot={snapshot} power={power} events={events} />
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={selectionKey(sel)}
+              initial={{ opacity: 0, x: 12 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -12 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
+            >
+              <Inspector sel={sel} activity={stageActivity} kg={kg} snapshot={snapshot} power={power} events={events} />
+            </motion.div>
+          </AnimatePresence>
         </aside>
       </div>
     </div>
@@ -215,68 +239,89 @@ export function ResearchLoop({ snapshot, power }: { snapshot: Snapshot; power?: 
 // SVG ring: stroke circle, spokes, clockwise particles, orbit guides.
 // =========================================================================
 
+const PHASE_HUE: Record<string, [string, string]> = {
+  exploration: ["#34d399", "#60a5fa"], // emerald → blue
+  convergence: ["#60a5fa", "#a78bfa"], // blue → violet
+  commitment:  ["#a78bfa", "#f59e0b"], // violet → amber
+  execution:   ["#f59e0b", "#10b981"], // amber → emerald
+};
+
 function Ring({
-  stages, orbits, activity, totalRunning, capped,
+  stages, orbits, activity, totalRunning, capped, sel, phase,
 }: {
   stages: Stage[];
   orbits: { x: number; y: number }[];
   activity: (s: Stage) => { running: number; today: number; hot: boolean };
   totalRunning: number;
   capped: boolean;
+  sel: Selection;
+  phase: string;
 }) {
   // Ring as an SVG circle path (clockwise) for particle animateMotion.
   const ringPath = useMemo(() => {
     const top = polar(0, RING_R);
-    // Two arcs make a full circle; sweep-flag 1 = clockwise.
     return `M ${top.x} ${top.y} A ${RING_R} ${RING_R} 0 1 1 ${top.x} ${top.y - 0.01} Z`;
   }, []);
 
   const particleCount = totalRunning > 0 ? 4 : 2;
   const dur = totalRunning > 0 ? 9 : 16;
+  const [c0, c1] = PHASE_HUE[phase] ?? PHASE_HUE.exploration;
+  const selStageId = sel?.kind === "stage" ? sel.stage.id : null;
+  const focusing = sel != null;
 
   return (
     <svg viewBox="0 0 100 100" className="absolute inset-0 h-full w-full overflow-visible">
       <defs>
         <radialGradient id="hubGlow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="rgba(16,185,129,0.18)" />
+          <stop offset="0%" stopColor="rgba(16,185,129,0.22)" />
           <stop offset="100%" stopColor="rgba(16,185,129,0)" />
         </radialGradient>
+        <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor={c0} />
+          <stop offset="100%" stopColor={c1} />
+        </linearGradient>
       </defs>
 
       {/* hub glow */}
-      <circle cx={CX} cy={CY} r={HUB_R + 8} fill="url(#hubGlow)" />
+      <circle cx={CX} cy={CY} r={HUB_R + 9} fill="url(#hubGlow)" />
 
       {/* spokes hub → each stage */}
       {stages.map((s) => {
         const p = polar(s.angle, RING_R - 7);
         const h = polar(s.angle, HUB_R + 1);
         const { hot } = activity(s);
+        const isSel = selStageId === s.id;
+        const active = hot || isSel;
+        const dim = focusing && !isSel;
         return (
           <line key={s.id} x1={h.x} y1={h.y} x2={p.x} y2={p.y}
-            stroke={hot ? "#10b981" : "#cbd5e1"} strokeWidth={hot ? 0.7 : 0.4}
-            strokeDasharray="1.2 1.4" opacity={hot ? 0.9 : 0.5} />
+            stroke={active ? "#10b981" : "#cbd5e1"}
+            strokeWidth={isSel ? 0.9 : hot ? 0.7 : 0.4}
+            strokeDasharray="1.2 1.4"
+            opacity={dim ? 0.2 : active ? 0.95 : 0.5} />
         );
       })}
 
-      {/* the loop ring */}
-      <circle cx={CX} cy={CY} r={RING_R} fill="none" stroke="#94a3b8" strokeWidth={0.6} opacity={0.5} />
+      {/* the loop ring — phase-tinted gradient */}
+      <circle cx={CX} cy={CY} r={RING_R} fill="none" stroke="url(#ringGrad)" strokeWidth={1.0} opacity={0.7} />
+      <circle cx={CX} cy={CY} r={RING_R} fill="none" stroke="url(#ringGrad)" strokeWidth={3.0} opacity={0.12} />
 
       {/* outer rim (Quartermaster boundary) */}
       <circle cx={CX} cy={CY} r={RIM_R} fill="none"
         stroke={capped ? "#ef4444" : "#cbd5e1"} strokeWidth={capped ? 1.0 : 0.5}
-        strokeDasharray="0.6 1.6" opacity={capped ? 0.9 : 0.55} />
+        strokeDasharray="0.6 1.6" opacity={capped ? 0.9 : 0.5} />
 
       {/* clockwise particles riding the ring */}
       {Array.from({ length: particleCount }).map((_, i) => (
-        <circle key={i} r={0.7} fill="#10b981" opacity={0.85}
-          style={{ filter: "drop-shadow(0 0 0.8px rgba(16,185,129,0.8))" }}>
+        <circle key={i} r={i === 0 ? 0.9 : 0.65} fill="#10b981" opacity={0.9}
+          style={{ filter: "drop-shadow(0 0 1px rgba(16,185,129,0.85))" }}>
           <animateMotion dur={`${dur}s`} repeatCount="indefinite"
             begin={`${(i * dur) / particleCount}s`} path={ringPath} rotate="auto" />
         </circle>
       ))}
 
-      {/* faint orbit guide rings */}
-      <circle cx={CX} cy={CY} r={(HUB_R + RING_R) / 2} fill="none" stroke="#e2e8f0" strokeWidth={0.3} opacity={0.6} />
+      {/* faint orbit guide ring */}
+      <circle cx={CX} cy={CY} r={(HUB_R + RING_R) / 2} fill="none" stroke="#e2e8f0" strokeWidth={0.3} opacity={0.55} />
     </svg>
   );
 }
@@ -298,33 +343,49 @@ function StageCards({
   sel: Selection;
   onSelect: (s: Selection) => void;
 }) {
+  const focusing = sel != null;
   return (
     <>
-      {stages.map((s) => {
+      {stages.map((s, i) => {
         const { running, today, hot } = activity(s);
         const Icon = s.icon;
         const selected = sel?.kind === "stage" && sel.stage.id === s.id;
+        const dimmed = focusing && !selected;
+        const pos = atPct(s.angle, RING_R);
         return (
-          <button
+          <motion.button
             key={s.id}
             type="button"
-            onClick={() => onSelect({ kind: "stage", stage: s })}
+            onClick={(e) => { e.stopPropagation(); onSelect({ kind: "stage", stage: s }); }}
+            initial={{ opacity: 0, scale: 0.85 }}
+            animate={{ opacity: dimmed ? 0.4 : 1, scale: selected ? 1.08 : 1 }}
+            transition={{ type: "spring", stiffness: 260, damping: 22, delay: i * 0.04 }}
+            whileHover={{ scale: selected ? 1.08 : 1.05 }}
             className={cx(
-              "absolute z-20 flex w-[120px] -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1 rounded-2xl border bg-white p-2 text-center shadow-sm transition",
-              hot ? "border-emerald-300 ring-2 ring-emerald-400/20" : "border-slate-200",
-              selected ? "ring-4 ring-emerald-500/20 shadow-lg" : "",
+              "absolute z-20 flex w-[124px] -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1 rounded-2xl border bg-white/95 p-2 text-center shadow-sm backdrop-blur transition-colors",
+              hot ? "border-emerald-300" : "border-slate-200",
+              selected ? "shadow-xl ring-4 ring-emerald-500/25" : hot ? "ring-2 ring-emerald-400/20" : "",
             )}
-            style={atPct(s.angle, RING_R)}
+            style={{ left: pos.left, top: pos.top }}
           >
-            <div className={cx("rounded-xl p-1.5", hot ? "bg-emerald-50" : "bg-slate-50")}>
+            {hot && (
+              <motion.span
+                className="absolute -inset-1 rounded-[1.1rem] border border-emerald-300"
+                animate={{ opacity: [0.15, 0.7, 0.15] }}
+                transition={{ duration: 1.6, repeat: Infinity }}
+              />
+            )}
+            <div className={cx("relative rounded-xl p-1.5", hot ? "bg-emerald-50" : "bg-slate-50")}>
               <Icon className={cx("h-4 w-4", hot ? "text-emerald-600" : "text-slate-700")} />
             </div>
-            <div className="text-[12px] font-semibold leading-tight text-slate-950">{s.label}</div>
-            <div className="text-[9px] uppercase tracking-wide text-slate-400">{s.division}</div>
-            <Badge tone={running > 0 ? "green" : today > 0 ? "blue" : "default"}>
-              {running > 0 ? `${running} live` : today > 0 ? `${today} today` : "idle"}
-            </Badge>
-          </button>
+            <div className="relative text-[12px] font-semibold leading-tight text-slate-950">{s.label}</div>
+            <div className="relative text-[9px] uppercase tracking-wide text-slate-400">{s.division}</div>
+            <div className="relative">
+              <Badge tone={running > 0 ? "green" : today > 0 ? "blue" : "default"}>
+                {running > 0 ? `${running} live` : today > 0 ? `${today} today` : "idle"}
+              </Badge>
+            </div>
+          </motion.button>
         );
       })}
     </>
@@ -332,31 +393,38 @@ function StageCards({
 }
 
 function HubCard({
-  kg, phase, onSelect, selected,
+  kg, phase, onSelect, selected, dimmed,
 }: {
   kg: KgStats | null;
   phase: string;
   onSelect: () => void;
   selected: boolean;
+  dimmed: boolean;
 }) {
   return (
-    <button
+    <motion.button
       type="button"
-      onClick={onSelect}
+      onClick={(e) => { e.stopPropagation(); onSelect(); }}
+      animate={{ opacity: dimmed ? 0.5 : 1, scale: selected ? 1.06 : 1 }}
+      whileHover={{ scale: selected ? 1.06 : 1.04 }}
+      transition={{ type: "spring", stiffness: 240, damping: 20 }}
       className={cx(
-        "absolute left-1/2 top-1/2 z-20 flex h-[26%] w-[26%] -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center gap-0.5 rounded-full border bg-white text-center shadow-md transition",
-        selected ? "border-emerald-300 ring-4 ring-emerald-500/20" : "border-slate-200",
+        "absolute left-1/2 top-1/2 z-20 flex h-[27%] w-[27%] -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center gap-0.5 rounded-full border text-center shadow-md transition-colors",
+        "bg-[radial-gradient(circle_at_50%_35%,_#ffffff,_#ecfdf5)]",
+        selected ? "border-emerald-300 ring-4 ring-emerald-500/25" : "border-emerald-200/70",
       )}
     >
-      <Database className="h-4 w-4 text-emerald-600" />
+      <div className="rounded-xl bg-emerald-50 p-1.5">
+        <Database className="h-4 w-4 text-emerald-600" />
+      </div>
       <div className="text-[11px] font-semibold leading-tight text-slate-950">Knowledge</div>
       <div className="text-[9px] text-slate-500">
-        {kg ? `${kg.claims}c · ${kg.findings}f` : "RAG + KG"}
+        {kg ? `${kg.claims}c · ${kg.findings}f · ${kg.verdicts}v` : "RAG + KG"}
       </div>
-      <div className="mt-0.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-wide text-slate-500">
+      <div className="mt-0.5 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-wide text-emerald-700">
         {phase}
       </div>
-    </button>
+    </motion.button>
   );
 }
 
@@ -367,29 +435,35 @@ function OrbitDots({
   sel: Selection;
   onSelect: (c: Claim) => void;
 }) {
+  const focusingOther = sel != null && sel.kind !== "claim";
   return (
     <>
       {orbits.map((o) => {
         const selected = sel?.kind === "claim" && sel.claim.id === o.claim.id;
         const conf = o.claim.confidence;
         const tone = o.challenged ? "bg-amber-400 border-amber-500" : conf >= 0.5 ? "bg-emerald-400 border-emerald-500" : "bg-slate-300 border-slate-400";
+        const baseOpacity = 0.55 + conf * 0.45;
         return (
-          <button
+          <motion.button
             key={o.claim.id}
             type="button"
             title={`C${o.claim.id} · conf ${(conf * 100).toFixed(0)}% · ${o.claim.finding_count} findings`}
-            onClick={() => onSelect(o.claim)}
+            onClick={(e) => { e.stopPropagation(); onSelect(o.claim); }}
+            initial={{ opacity: 0, scale: 0.5 }}
+            animate={{ opacity: focusingOther && !selected ? 0.25 : baseOpacity, scale: selected ? 1.4 : 1 }}
+            whileHover={{ scale: 1.3, opacity: 1 }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
             className={cx(
-              "absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border shadow-sm transition hover:scale-125",
+              "absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border shadow-sm",
               tone,
-              selected ? "ring-4 ring-emerald-500/30 scale-125" : "",
+              selected ? "ring-4 ring-emerald-500/30" : "",
             )}
             style={{
               left: `${o.x}%`,
               top: `${o.y}%`,
               width: `${o.size * 6}px`,
               height: `${o.size * 6}px`,
-              opacity: 0.55 + conf * 0.45,
+              filter: selected ? "drop-shadow(0 0 3px rgba(16,185,129,0.7))" : undefined,
             }}
           />
         );
