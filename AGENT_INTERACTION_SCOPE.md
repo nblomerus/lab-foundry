@@ -62,12 +62,22 @@ stays legible and can't turn into runaway chatter. This is the agreed set
 | Evaluation → Researcher | `re-source` | "this finding is thin — re-source it" |
 | Researcher → Evaluation | `verify` | "is this finding grounded enough?" |
 | PI → Researcher | `investigate` | "explore this gap" |
-| PI → Critic | `challenge` | "stress-test C14 before I commit" |
+| PI → Critic | `challenge` | "stress-test C14 before I commit" (incl. novelty consult: `challenge {mode:'novelty'}`) |
 | Planner → PI | `prioritise` | "portfolio is stale, which directions?" |
 | Adjudicator → Critic | `verify` | "confirm before phase advance" |
+| Novelty → Critic | `challenge` | gate escape: "does this paper actually subsume the claim?" |
+| Reviewer → Researcher | `investigate` | gate escape: "degraded quorum — re-source this claim" |
 
 Anything not in the matrix is rejected and logged. New pairs are added here
 explicitly as real needs appear.
+
+**Notes (per `REAL_LAB_OPERATING_MODEL.md`):**
+- The **PI→Critic novelty consult reuses `challenge`** with `{mode:'novelty'}` — no
+  separate pair (allow-list is a union-of-intents per pair).
+- The last two rows are the **gate's internal escapes** (Plane-2 inside a
+  synchronous review stage); they exist only under `GATE_LOOP=v2`.
+- The **novelty/quality gate is per-claim at promotion** (`claim.promotion_candidate`),
+  not per-finding.
 
 ## Guardrails (non-negotiable)
 

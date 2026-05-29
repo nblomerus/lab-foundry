@@ -146,11 +146,20 @@ Drives the `claim_status` machine (migration 008:
 `proposed→tested→weakly_supported→replicated→invalidated→merged`), which nothing
 systematically drove before.
 
+**Per-claim promotion gate (Director decision §8).** The gate runs **per claim, at
+promotion candidacy** — not per high-signal finding. A new event
+`claim.promotion_candidate` fires when a `tested` claim accumulates ≥N passed
+supporting findings or crosses a confidence threshold (emitted from
+`update_finding_audit`/confidence updates, deduped per claim per day). The gate
+evaluates the claim *as a whole* (its evidence chain + prior art), which is the
+meaningful unit for novelty. The legacy per-finding `finding.high_signal` →
+single-Critic path remains when `GATE_LOOP` is off.
+
 ```
-finding.high_signal ─▶ GATE (boardroom/gate/loop.py) — SYNCHRONOUS, one Session, one DAG
-   ENTRY (precondition) │ Evaluation already passed this finding (high_signal ⇒ audit=pass & rel≥8) — NOT a vote
-   VOTE 1  CHALLENGE     ├─ Critic — emits a vote, does NOT mutate (review fix)
-   VOTE 2  NOVELTY       ├─ Novelty (boardroom/novelty/loop.py)
+claim.promotion_candidate ─▶ GATE (boardroom/gate/loop.py) — SYNCHRONOUS, one Session, one DAG
+   ENTRY (precondition) │ Claim must have ≥1 Evaluation-passed finding (audit=pass) — NOT a vote
+   VOTE 1  CHALLENGE     ├─ Critic over the claim's evidence chain — emits a vote, does NOT mutate (review fix)
+   VOTE 2  NOVELTY       ├─ Novelty (boardroom/novelty/loop.py) vs prior art, over the whole claim
                          ▼
    PANEL CHAIR           └─ Reviewer (new thin role) applies quorum + consensus → promote | hold | reject | merge
 ```
@@ -400,10 +409,13 @@ would emit invalid phases.
    degrades gracefully).
 5. **Delegation plane:** migration 010 + `handle_agent_request` + allow-list/
    guardrails; PI→Researcher/Critic, Planner→PI, `PeerReviewGate` terminators.
-6. **Novelty/quality gate + panel:** migration 012; `novelty/loop.py`
-   (+`search_arxiv`,`kg_prior_claims`), `gate/loop.py`, `reviewer` role; split
-   Critic side effects; HOLD lifecycle; per-claim gate cooldown; slow-burn sweep.
-   **Vector index (`Paper`/pgvector) before default-on.**
+6. **Novelty/quality gate + panel:** migration 012; **build the `Paper`/`PriorArt`
+   node + pgvector index FIRST (Director decision — prerequisite, not optional)**;
+   then `novelty/loop.py` (+`search_arxiv`,`kg_prior_claims`), `gate/loop.py`,
+   `reviewer` role; per-**claim** promotion gate (`claim.promotion_candidate`
+   trigger); split Critic side effects; HOLD lifecycle; per-claim gate cooldown;
+   slow-burn sweep. `GATE_LOOP=v2`/`NOVELTY_LOOP=v2` default-on only after the
+   vector index + a shadow A/B.
 7. **Adjudicator harness:** multi-step, goal-aware, `PeerReviewGate`-terminated,
    correct phase vocab.
 8. **Viz:** knowledge spokes always-on; live delegation chords; PI loop drill-in;
@@ -412,17 +424,25 @@ would emit invalid phases.
 
 ---
 
-## 8. Decisions still open (for the Director)
-- **Migration renumber** of `claim_goals` 011→009 — approve the amendment?
+## 8. Decisions
+
+**Resolved by the Director:**
+- ✅ **Migration renumber** `claim_goals` 011→009 — **approved.** 009 is the
+  canonical home; the operating-model "011" reference is superseded.
+- ✅ **Novelty granularity = per-claim, at promotion** (not per-finding). The gate
+  is a **per-claim promotion gate**: the Novelty + peer-review panel runs when a
+  claim is a promotion candidate, not on every high-signal finding. See §3 note.
+- ✅ **Vector index before the gate goes live** — the `Paper`/`PriorArt` node +
+  pgvector index is built **before** `GATE_LOOP=v2` is enabled by default
+  (phase 6 prerequisite). Lexical-only novelty is not shipped as the gate's basis.
+
+**Still open (lower stakes, resolve during build):**
 - **Mission projection** — confirm no edit path desyncs `company_state.problem_statement`
   from the `mission` root.
 - **Direction confidence rollup** — mean / max / evidence-weighted; zero-hypothesis
   direction = `stalled` or `unstarted`?
 - **Sub-question promotion threshold** (e.g. load-bearing for ≥2 hypotheses).
-- **Novelty granularity** — per-finding (cheap) vs per-claim at promotion (leaning
-  per-claim).
 - **`replicated` rule** — novelty mandatory for any publishable `replicated`?
-- **Vector index now vs later** — lexical-only ship first, pgvector before default-on?
 - **Planner convergence metric** — top-K Jaccard vs Kendall-tau; budget envelope
   source (ENV+`cost_tracking` vs a real Quartermaster service).
 - **Termination weight calibration** — shadow-log gain for a week first.
