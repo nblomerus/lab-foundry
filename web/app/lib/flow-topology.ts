@@ -9,7 +9,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity, BrainCircuit, Eye, GitBranch, Layers3, Network,
-  Search, ShieldCheck, Target, Telescope, TerminalSquare,
+  Search, ShieldCheck, Target, Telescope, TerminalSquare, Wallet,
 } from "lucide-react";
 
 // =========================================================================
@@ -60,7 +60,7 @@ export type RouteMode = "auto" | "outside-left" | "outside-right";
 export interface NodeDef {
   id: string;
   label: string;
-  type: "Source" | "Queue" | "Agent" | "Store" | "Critic" | "Phase";
+  type: "Source" | "Queue" | "Agent" | "Store" | "Critic" | "Phase" | "Warden";
   icon: LucideIcon;
   x: number;
   y: number;
@@ -90,6 +90,11 @@ export const NODES: NodeDef[] = [
 
   { id: "researcher",  label: "Researcher",   type: "Agent",  icon: Search,         x: 29, y: 38 },
   { id: "tasks",       label: "Tasks",        type: "Queue",  icon: TerminalSquare, x: 29, y: 84 },
+
+  // Resource warden — watches budget + GPU across the whole loop. Not part of
+  // the research dataflow; sits bottom-left and gates the work queue when the
+  // spend cap is hit.
+  { id: "quartermaster", label: "Quartermaster", type: "Warden", icon: Wallet,    x: 9,  y: 84 },
 
   { id: "findings",    label: "Findings",     type: "Store",  icon: Eye,            x: 49, y: 38 },
   { id: "evaluation",     label: "Evaluation",      type: "Critic", icon: ShieldCheck,    x: 49, y: 64 },
@@ -139,6 +144,10 @@ export const EDGES: EdgeDef[] = [
   // Tasks ↔ Planner (parallel via ±0.35 offsets)
   { id: "tasks-pl",  from: "tasks",       fromSide: "right",  fromOffset: -0.35, to: "planner",    toSide: "left",   toOffset: -0.35, label: "queue empty",     event_type: "queue.empty" },
   { id: "pl-tasks",  from: "planner",     fromSide: "left",   fromOffset: +0.35, to: "tasks",      toSide: "right",  toOffset: +0.35, label: "refill",          event_type: "task.created" },
+
+  // Quartermaster gates the work queue on the spend cap. Pseudo-event: status
+  // is derived from cost (cap reached / spend today), like the _source_* edges.
+  { id: "qm-tasks",  from: "quartermaster", fromSide: "right", to: "tasks",      toSide: "left",                    label: "budget · GPU",    event_type: "_quartermaster" },
 ];
 
 export const ROLE_TO_NODE: Record<string, string> = {

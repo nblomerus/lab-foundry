@@ -49,7 +49,35 @@ function ago(iso?: string | null): string {
   return `${h}h ago`;
 }
 
-function deriveNodeStatus(node: NodeDef, snap: Snapshot): NodeStatus {
+// Minimal hardware/budget summary the Quartermaster reports. Sourced from the
+// /debug/costs endpoint (optional — falls back to budget-only when absent).
+export interface PowerSummary {
+  total_watts: number;
+  gpu_count: number;
+  projected_usd_per_day: number;
+}
+
+function deriveNodeStatus(node: NodeDef, snap: Snapshot, power?: PowerSummary | null): NodeStatus {
+  if (node.id === "quartermaster") {
+    const c = snap.cost;
+    const calls = c.reasoning_calls + c.workhorse_calls + c.fast_calls + c.code_calls;
+    const tone: Tone = c.cap_reached ? "blocked" : c.total_cost_usd > 0 || calls > 0 ? "active" : "idle";
+    const current = power
+      ? `${Math.round(power.total_watts)}W · ${power.gpu_count} GPU`
+      : `$${c.total_cost_usd.toFixed(2)} today`;
+    return {
+      tone,
+      badge: c.cap_reached ? "cap reached" : `$${c.total_cost_usd.toFixed(2)}`,
+      current,
+      details: [
+        `spend today: $${c.total_cost_usd.toFixed(2)}${c.cap_reached ? " (CAP REACHED)" : ""}`,
+        `model calls: ${calls} (R${c.reasoning_calls}/W${c.workhorse_calls}/F${c.fast_calls})`,
+        power ? `GPU: ${Math.round(power.total_watts)}W across ${power.gpu_count} device(s)` : "GPU telemetry unavailable",
+        power ? `projected compute: $${power.projected_usd_per_day.toFixed(2)}/day` : "watches budget + hardware",
+      ],
+    };
+  }
+
   const role = snap.org_roles.find((r) => r.role === (ROLE_TO_NODE[node.id] ?? ""));
 
   if (["researcher", "evaluation", "critic", "pi", "planner", "adjudicator"].includes(node.id)) {
@@ -724,13 +752,15 @@ function isSourcePulse(edge: EdgeDef, snap: Snapshot): boolean {
   if (edge.event_type === "_source_hn")     return snap.stats.source_hn_in_flight > 0;
   if (edge.event_type === "_source_reddit") return snap.stats.source_reddit_in_flight > 0;
   if (edge.event_type === "_source_web")    return snap.stats.source_web_in_flight > 0;
+  // Quartermaster edge is "live" whenever the org is spending or the cap is hit.
+  if (edge.event_type === "_quartermaster") return snap.cost.total_cost_usd > 0 || snap.cost.cap_reached;
   return false;
 }
 
-export function LiveFlow({ snapshot }: { snapshot: Snapshot }) {
+export function LiveFlow({ snapshot, power }: { snapshot: Snapshot; power?: PowerSummary | null }) {
   const statuses = useMemo(
-    () => Object.fromEntries(NODES.map((n) => [n.id, deriveNodeStatus(n, snapshot)])),
-    [snapshot],
+    () => Object.fromEntries(NODES.map((n) => [n.id, deriveNodeStatus(n, snapshot, power)])),
+    [snapshot, power],
   ) as Record<string, NodeStatus>;
   const activityByEvent = useMemo(
     () => new Map(snapshot.edge_activity.map((a) => [a.event_type, a])),
@@ -768,13 +798,18 @@ export function LiveFlow({ snapshot }: { snapshot: Snapshot }) {
         m.set(e.id, snapshot.stats.source_reddit_in_flight * 4);
       } else if (e.event_type === "_source_web") {
         m.set(e.id, snapshot.stats.source_web_in_flight * 4);
+      } else if (e.event_type === "_quartermaster") {
+        // Cap reached → steady throttle pulse; otherwise scale by call volume.
+        const calls = snapshot.cost.reasoning_calls + snapshot.cost.workhorse_calls
+          + snapshot.cost.fast_calls + snapshot.cost.code_calls;
+        m.set(e.id, snapshot.cost.cap_reached ? 12 : calls > 0 ? 2 : 0);
       } else {
         const a = activityByEvent.get(e.event_type);
         m.set(e.id, a?.count_last_minute ?? 0);
       }
     }
     return m;
-  }, [snapshot.stats, activityByEvent]);
+  }, [snapshot.stats, snapshot.cost, activityByEvent]);
 
   const [selection, setSelection] = useState<Selection | null>(() => {
     const n = nodeById("researcher")!;
@@ -833,9 +868,9 @@ export function LiveFlow({ snapshot }: { snapshot: Snapshot }) {
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-slate-200 bg-white/85 p-3 shadow-sm backdrop-blur">
         <div className="flex items-center gap-2 text-xs">
           <Heartbeat active={inFlight > 0 || totalRate > 0} />
-          <span className="font-semibold text-slate-700">Live agent graph</span>
+          <span className="font-semibold text-slate-700">Research loop</span>
           <span className="text-slate-400">·</span>
-          <span className="text-slate-500">edges pulse green from port → port when an event fires</span>
+          <span className="text-slate-500">discover → gather → judge → synthesise → converge, with the Quartermaster metering spend</span>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
           <T label="In flight"      value={String(inFlight)}                        tone={inFlight > 0 ? "green" : "default"} />
@@ -843,6 +878,7 @@ export function LiveFlow({ snapshot }: { snapshot: Snapshot }) {
           <T label="Findings 24h"   value={String(snapshot.stats.findings_today)}   tone="green" />
           <T label="High signal"    value={String(snapshot.stats.high_signal_today)} tone="green" />
           <T label="Slop"           value={String(snapshot.stats.slop_today)}       tone={snapshot.stats.slop_today > 0 ? "red" : "default"} />
+          <T label="Spend"          value={`$${snapshot.cost.total_cost_usd.toFixed(2)}`} tone={snapshot.cost.cap_reached ? "red" : "default"} />
           <T label="Phase"          value={snapshot.state.current_phase}            tone="amber" />
         </div>
       </div>
@@ -853,11 +889,11 @@ export function LiveFlow({ snapshot }: { snapshot: Snapshot }) {
             <div className="absolute inset-0 bg-[radial-gradient(rgba(148,163,184,.18)_1px,_transparent_1px)] bg-[size:24px_24px]" />
 
             <div className="pointer-events-none absolute inset-x-0 top-3 z-10 grid grid-cols-5 px-3 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-              <div className="text-center">Sources</div>
-              <div className="text-center">Pipeline</div>
-              <div className="text-center">Findings &amp; critics</div>
-              <div className="text-center">Strategic</div>
-              <div className="text-center">Governance</div>
+              <div className="text-center">Discover</div>
+              <div className="text-center">Gather</div>
+              <div className="text-center">Judge</div>
+              <div className="text-center">Synthesise</div>
+              <div className="text-center">Converge</div>
             </div>
 
             <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox="0 0 160 100" preserveAspectRatio="none">

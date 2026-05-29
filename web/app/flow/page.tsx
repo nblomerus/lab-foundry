@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { LiveFlow } from "../components/LiveFlow";
+import { LiveFlow, type PowerSummary } from "../components/LiveFlow";
 import type { Snapshot } from "../lib/types";
 
 export default function FlowPage() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
+  const [power, setPower] = useState<PowerSummary | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -20,6 +21,20 @@ export default function FlowPage() {
         }
       } catch (e) {
         if (!cancelled) setErr(String(e));
+      }
+      // Hardware/budget telemetry for the Quartermaster. Non-fatal: if the
+      // debug endpoint is down, the node falls back to budget-only.
+      try {
+        const costs = await api.debugCosts();
+        if (!cancelled && costs?.power) {
+          setPower({
+            total_watts: costs.power.total_watts,
+            gpu_count: costs.power.gpus.length,
+            projected_usd_per_day: costs.power.projected_usd_per_day,
+          });
+        }
+      } catch {
+        /* leave power null — Quartermaster shows budget only */
       }
     };
     load();
@@ -43,5 +58,5 @@ export default function FlowPage() {
     return <div className="text-sm text-slate-500">Loading snapshot…</div>;
   }
 
-  return <LiveFlow snapshot={snap} />;
+  return <LiveFlow snapshot={snap} power={power} />;
 }
