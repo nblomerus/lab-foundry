@@ -360,11 +360,12 @@ for _itype, _desc, _budget, _schema, _builder in _ADVERSARY_RECIPES:
             description=_desc,
             agent="critic",
             total_budget=_budget,
-            # judge_verdict pulls dissent + theses-lifecycle for calibration,
-            # same as the legacy critic recipe.
+            # judge_verdict pulls dissent + claims-lifecycle for calibration,
+            # same as the legacy critic recipe. (Was "theses-lifecycle" — a
+            # session that is never created, so recall silently returned nothing.)
             use_cold_path=(_itype == "adversary.judge_verdict"),
             recall_sessions=(
-                ["theses-lifecycle", "dissent"]
+                ["claims-lifecycle", "dissent"]
                 if _itype == "adversary.judge_verdict" else []
             ),
             recall_k=5 if _itype == "adversary.judge_verdict" else 0,

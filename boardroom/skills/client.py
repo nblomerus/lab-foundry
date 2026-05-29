@@ -121,3 +121,82 @@ class LessonsClient:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM reconcile_lessons()")
             return [dict(r) for r in rows]
+
+    async def decay(self) -> list[dict]:
+        """Retire stale probationary lessons (14d, 0 supportive). See migration 014."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM decay_lessons()")
+            return [dict(r) for r in rows]
+
+    # -- Hinge A: write the outcome of applied lessons (the missing joint) -----
+
+    async def fetch_pending_applications(self, limit: int = 40) -> list[dict]:
+        """
+        Lessons that were applied to a now-completed run but never judged.
+        Grouped per run so a single judge call can score all of a run's lessons
+        against that run's actual outcome.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT la.agent_run_id,
+                       r.invocation_type,
+                       r.status        AS run_status,
+                       r.output_summary,
+                       r.expectation,
+                       r.outcome,
+                       la.lesson_id,
+                       l.lesson_text
+                FROM lesson_applications la
+                JOIN agent_runs r ON r.id = la.agent_run_id
+                JOIN lessons    l ON l.id = la.lesson_id
+                WHERE la.outcome IS NULL
+                  AND r.status IN ('completed', 'failed')
+                  AND r.completed_at < NOW() - INTERVAL '1 minute'
+                ORDER BY r.completed_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [dict(r) for r in rows]
+
+    async def set_application_outcome(
+        self, lesson_id: int, agent_run_id: int, outcome: str, judged_by_run_id: int | None = None,
+    ) -> None:
+        """
+        Record whether an applied lesson was supportive/contradicting/inconclusive.
+        Guarded: only fills rows still NULL (idempotent, no clobber).
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE lesson_applications
+                SET outcome = $3,
+                    outcome_judged_at = NOW(),
+                    outcome_judged_by_run_id = $4
+                WHERE lesson_id = $1 AND agent_run_id = $2 AND outcome IS NULL
+                """,
+                lesson_id, agent_run_id, outcome, judged_by_run_id,
+            )
+
+    async def find_near_duplicate(
+        self, invocation_type: str, lesson_text: str, threshold: float = 0.6,
+    ) -> Optional[int]:
+        """
+        Return the id of an existing active/probationary lesson for this
+        invocation whose text is a trigram near-duplicate (≥ threshold), so the
+        caller can credit recurrence instead of inserting spam. Uses migration
+        014's gin_trgm index.
+        """
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                SELECT id FROM lessons
+                WHERE applies_to_invocation = $1
+                  AND status IN ('probationary', 'active')
+                  AND similarity(lesson_text, $2) >= $3
+                ORDER BY similarity(lesson_text, $2) DESC
+                LIMIT 1
+                """,
+                invocation_type, lesson_text, threshold,
+            )

@@ -357,3 +357,132 @@ async def _handle_batch_reflection(event: dict, dispatcher) -> Optional[dict]:
         "run_id":        run_id,
         "reasoning":     output.reasoning,
     }
+
+
+# =========================================================================
+# Hinge A — judge applied lessons (the missing joint in the learning loop)
+#
+# The router records every lesson it injected into a prompt as a
+# lesson_applications row with outcome NULL (router.py). Nothing ever judged
+# those outcomes, so reconcile_lessons() (which needs them) could never fire.
+# This closes that joint: per completed run, judge each applied lesson against
+# what the run actually produced.
+#
+# Wired into the watchdog behind LESSON_JUDGE=on (default off) so it ships
+# inert and is enabled only after shadow validation — same discipline as the
+# *_LOOP=v2 gates.
+# =========================================================================
+
+from typing import Literal
+
+
+class LessonJudgement(BaseModel):
+    lesson_id: int
+    verdict: Literal["supportive", "contradicting", "inconclusive"] = Field(
+        ..., description="Did this lesson help (supportive), hurt/contradict (contradicting), or neither (inconclusive)?"
+    )
+
+
+class ApplicationJudgements(BaseModel):
+    judgements: list[LessonJudgement] = Field(default_factory=list)
+
+
+async def _build_judge_applications_task_data(ctx: dict, state, memory) -> PromptLayer:
+    lessons = ctx["lessons"]  # list[{id, text}]
+    lesson_block = "\n".join(f"- [{l['id']}] {l['text']}" for l in lessons)
+    content = f"""## Judge whether applied lessons helped this run
+
+A past run was given the lessons below as guidance, then produced the outcome
+shown. For EACH lesson, judge whether it was:
+
+  - `supportive`     — the run followed it and it clearly helped the outcome
+  - `contradicting`  — the run's outcome shows the lesson was wrong or harmful here
+  - `inconclusive`   — the lesson neither helped nor hurt this particular run
+
+**Default to `inconclusive`.** Most lessons are merely benign on any given run;
+only mark supportive/contradicting when the outcome gives real evidence either way.
+
+## Run
+**Invocation:** {ctx['invocation_type']}
+**Status:** {ctx['run_status']}
+**Expectation (if recorded):** {ctx.get('expectation') or '(none)'}
+**Outcome / output:** {(ctx.get('outcome') or ctx.get('output_summary') or '(no summary)')[:1500]}
+
+## Lessons that were applied
+{lesson_block}
+
+Return one judgement per lesson id above.
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
+if "reflect.judge_applications" not in RECIPES:
+    RECIPES["reflect.judge_applications"] = Recipe(
+        invocation_type="reflect.judge_applications",
+        description="Judge whether each lesson applied to a run helped, hurt, or was neutral.",
+        agent="evaluation",
+        total_budget=6_000,
+        use_cold_path=False,
+        recall_sessions=[],
+        recall_k=0,
+        output_schema="ApplicationJudgements",
+        task_data_builder=_build_judge_applications_task_data,
+    )
+
+
+async def judge_pending_lesson_applications(dispatcher, limit: int = 40) -> dict:
+    """
+    Hinge A driver. Fetch unjudged lesson applications on completed runs, judge
+    them per run, and write the outcomes. Returns a small summary.
+
+    Safe to call repeatedly; `set_application_outcome` only fills NULL rows.
+    Called from the watchdog when LESSON_JUDGE=on.
+    """
+    lessons = getattr(dispatcher, "lessons", None)
+    curator = getattr(dispatcher, "curator", None)
+    router = getattr(dispatcher, "router", None)
+    if not (lessons and curator and router):
+        return {"judged": 0, "skipped": "clients unavailable"}
+
+    rows = await lessons.fetch_pending_applications(limit)
+    if not rows:
+        return {"judged": 0}
+
+    by_run: dict[int, list[dict]] = {}
+    for r in rows:
+        by_run.setdefault(r["agent_run_id"], []).append(r)
+
+    judged = 0
+    for run_id, apps in by_run.items():
+        applied_ids = {a["lesson_id"] for a in apps}
+        run_success = apps[0]["run_status"] == "completed"
+        ctx = {
+            "invocation_type": apps[0]["invocation_type"],
+            "run_status": apps[0]["run_status"],
+            "expectation": apps[0].get("expectation"),
+            "outcome": apps[0].get("outcome"),
+            "output_summary": apps[0].get("output_summary"),
+            "lessons": [{"id": a["lesson_id"], "text": a["lesson_text"]} for a in apps],
+        }
+        try:
+            prompt = await curator.build(invocation_type="reflect.judge_applications", context=ctx)
+            out, judge_run_id = await router.invoke(
+                prompt=prompt, output_schema_class=ApplicationJudgements,
+            )
+        except Exception:
+            log.exception("judge_applications failed for run %s — skipping", run_id)
+            continue
+        for j in out.judgements:
+            if j.lesson_id not in applied_ids:
+                continue  # server-side guard: only judge lessons actually applied
+            verdict = j.verdict
+            # Only credit 'supportive' when the run actually succeeded.
+            if verdict == "supportive" and not run_success:
+                verdict = "inconclusive"
+            await lessons.set_application_outcome(
+                lesson_id=j.lesson_id, agent_run_id=run_id,
+                outcome=verdict, judged_by_run_id=judge_run_id,
+            )
+            judged += 1
+    log.info("judge_applications: judged %d lesson applications across %d runs", judged, len(by_run))
+    return {"judged": judged, "runs": len(by_run)}

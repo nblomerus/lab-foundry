@@ -63,7 +63,7 @@ router = APIRouter(prefix="/bench", tags=["bench"])
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
 # Sessions Zep expects (mirror of harness.main.ZEP_SESSIONS).
-ZEP_SESSIONS = ["theses-lifecycle", "phase-transitions", "pi-deliberations", "dissent", "charter"]
+ZEP_SESSIONS = ["claims-lifecycle", "phase-transitions", "pi-deliberations", "dissent", "charter"]
 
 # Tasks whose prompt is grounded in a specific thesis (so the UI offers a
 # thesis picker). Everything else builds from global company state.

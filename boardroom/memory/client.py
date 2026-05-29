@@ -6,7 +6,7 @@ Zep holds *how we got here*. They're joined by memory_pointers rows when a
 specific entity's story needs to be retrievable by id.
 
 Sessions used in boardroom:
-    theses-lifecycle    one message per thesis event
+    claims-lifecycle    one message per claim event
     phase-transitions   one message per phase change
     pi-deliberations   PI's working-out for non-trivial decisions
     dissent             critic verdicts + evaluation slop flags

@@ -18,6 +18,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
@@ -106,6 +107,9 @@ class Dispatcher:
         # Serializes the liveness pump so the startup pass and the watchdog's
         # first pass don't both read deficit=N and each emit N triggers.
         self._revive_lock = asyncio.Lock()
+        # Lessons reconciliation runs hourly (the watchdog ticks every 5 min);
+        # this stamps the last run so we don't reconcile on every tick.
+        self._last_lessons_tick: Optional[datetime] = None
 
     def register(self, event_type: str, handler: Handler) -> None:
         if event_type in self._handlers:
@@ -434,9 +438,57 @@ class Dispatcher:
                     await self._sweep_pending_events(conn)
                     await self._check_phase_budget(conn)
                     await self._refresh_slop_view(conn)
+                await self._reconcile_lessons_if_due()
             except Exception:
                 log.exception("watchdog sweep failed")
             await asyncio.sleep(300)
+
+    async def _reconcile_lessons_if_due(self) -> None:
+        """
+        Hinge B of the learning loop: hourly, promote/retire lessons from their
+        application outcomes and decay stale probationary ones. Both are no-ops
+        until outcomes exist (hinge A writes them), so this is always safe.
+
+        Emits `lessons.reconciled` carrying the changed ids so Bench/Debug can
+        show the lab's notebook updating.
+        """
+        lessons = getattr(self, "lessons", None)
+        if lessons is None:
+            return
+        now = datetime.now(timezone.utc)
+        if self._last_lessons_tick is not None and (now - self._last_lessons_tick).total_seconds() < 3600:
+            return
+        self._last_lessons_tick = now
+        # Hinge A (default off): judge applied-lesson outcomes so reconcile has
+        # something to act on. Inert until LESSON_JUDGE=on + shadow-validated.
+        if os.environ.get("LESSON_JUDGE") == "on" and getattr(self, "curator", None) and getattr(self, "router", None):
+            try:
+                from boardroom.handlers.reflection import judge_pending_lesson_applications
+                await judge_pending_lesson_applications(self)
+            except Exception:
+                log.exception("lesson application judging failed")
+        try:
+            reconciled = await lessons.reconcile()
+            decayed = await lessons.decay()
+        except Exception:
+            log.exception("lessons reconcile/decay failed")
+            return
+        if not reconciled and not decayed:
+            return
+        log.info("lessons: %d reconciled, %d decayed", len(reconciled), len(decayed))
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO events (event_type, target_type, payload, dedup_key)
+                VALUES ('lessons.reconciled', 'lessons', $1::jsonb, 'reconcile-' || $2)
+                ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                """,
+                json.dumps({
+                    "reconciled": [dict(r) for r in reconciled],
+                    "decayed": [dict(r) for r in decayed],
+                }, default=str),
+                now.strftime("%Y-%m-%dT%H"),
+            )
 
     async def _sweep_stale_tasks(self, conn) -> None:
         await conn.execute(
