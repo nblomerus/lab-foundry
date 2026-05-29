@@ -13,6 +13,12 @@ type to exactly **one** registered handler (`boardroom/harness/main.py`), so:
 We want agents to **interact with each other when needed** — a network, not a
 line — while keeping the system legible, bounded, and safe.
 
+> **Scope correction (see `AGENT_OPERATING_MODEL.md`).** This document governs
+> **Plane 2 — delegation only** (agent → agent requests). Reading/writing the
+> knowledge substrate (RAG corpus, Neo4j graph, memory) is **Plane 1** — a
+> universal tool every agent may use with no allow-list, depth limit, or
+> cooldown. The allow-list below is for delegation, not for knowledge access.
+
 ## Model: directed requests over the existing event bus
 
 Keep the event-bus architecture; add **two generic events** that carry a target
