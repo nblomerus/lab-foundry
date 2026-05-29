@@ -8,8 +8,8 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Boardroom — Command Center",
-  description: "Autonomous AI-native company. Watch it run.",
+  title: "LabFoundry — Research Lab Command Center",
+  description: "Autonomous AI-native research laboratory discovering, validating, and publishing.",
 };
 
 export default function RootLayout({

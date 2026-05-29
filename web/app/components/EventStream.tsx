@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
 import { useEventStream } from "../lib/ws";
 import { api } from "../lib/api";
-import type { BoardroomEvent, StreamMessage } from "../lib/types";
+import type { LabFoundryEvent, StreamMessage } from "../lib/types";
 import { Badge, Card, SectionTitle } from "./ui";
 
 const EVENT_TONE: Record<string, "red" | "amber" | "green" | "blue" | "default"> = {
@@ -35,14 +35,14 @@ export function EventStream({ keep = 60 }: { keep?: number }) {
 
   // Prefill from the REST events endpoint so the panel isn't empty when the
   // harness is idle. Live pushes from the WebSocket merge on top, deduped by id.
-  const [prefill, setPrefill] = useState<BoardroomEvent[]>([]);
+  const [prefill, setPrefill] = useState<LabFoundryEvent[]>([]);
   useEffect(() => {
     api.events(keep).then(setPrefill).catch(() => {});
   }, [keep]);
 
   const live = recent.filter(isEvent).map((m) => m.event);
   const seen = new Set<number>();
-  const merged: BoardroomEvent[] = [];
+  const merged: LabFoundryEvent[] = [];
   for (const e of [...live, ...prefill]) {
     if (seen.has(e.id)) continue;
     seen.add(e.id);

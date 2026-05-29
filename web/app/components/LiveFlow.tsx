@@ -8,7 +8,7 @@ import {
 
 import { api } from "../lib/api";
 import type {
-  BoardroomEvent, EdgeActivity, Snapshot, StreamMessage,
+  LabFoundryEvent, EdgeActivity, Snapshot, StreamMessage,
 } from "../lib/types";
 import { useEventStream } from "../lib/ws";
 import { Badge, Card, cx } from "./ui";
@@ -154,7 +154,7 @@ function portStyle(side: Side, offset = 0): React.CSSProperties {
 // Pulse tracking
 // =========================================================================
 
-function usePerEdgePulses(): { pulses: Map<string, number>; recent: BoardroomEvent[] } {
+function usePerEdgePulses(): { pulses: Map<string, number>; recent: LabFoundryEvent[] } {
   const { recent } = useEventStream(60);
   const [pulses, setPulses] = useState<Map<string, number>>(new Map());
   const seen = useRef<Set<number>>(new Set());
@@ -543,16 +543,16 @@ function Stat({ label, value }: { label: string; value: string }) {
 function EventStream({
   recent, onHover, onPick, connected,
 }: {
-  recent: BoardroomEvent[];
+  recent: LabFoundryEvent[];
   onHover: (eventType: string | null) => void;
   onPick: (eventType: string) => void;
   connected: boolean;
 }) {
-  const [prefill, setPrefill] = useState<BoardroomEvent[]>([]);
+  const [prefill, setPrefill] = useState<LabFoundryEvent[]>([]);
   useEffect(() => { api.events(40).then(setPrefill).catch(() => {}); }, []);
 
   const seen = new Set<number>();
-  const merged: BoardroomEvent[] = [];
+  const merged: LabFoundryEvent[] = [];
   for (const e of [...recent, ...prefill]) {
     if (seen.has(e.id)) continue;
     seen.add(e.id);

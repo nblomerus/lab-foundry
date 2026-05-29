@@ -96,7 +96,7 @@ async def main() -> int:
 
     age_str = "ever" if age is None else f"{int(age)}s"
     msg = (
-        f"⚠ Boardroom loop STALLED — no activity for {age_str} "
+        f"⚠ LabFoundry loop STALLED — no activity for {age_str} "
         f"(phase={row['phase']}, threshold={STALL_SECONDS}s). "
         + ("Restarting harness." if RESTART else "Restart disabled.")
     )

@@ -8,7 +8,7 @@ import { cx } from "./ui";
 const NAV = [
   { href: "/",       icon: Target,         label: "Command" },
   { href: "/flow",   icon: GitBranch,      label: "Flow" },
-  { href: "/claims", icon: Layers3,        label: "Theses" },
+  { href: "/claims", icon: Layers3,        label: "Claims" },
   { href: "/events", icon: TerminalSquare, label: "Events" },
   { href: "/org",    icon: Eye,            label: "Org" },
   { href: "/trace",  icon: Network,        label: "Trace" },
@@ -25,7 +25,7 @@ export function SiteNav() {
           <Link
             href="/"
             className="flex h-12 w-12 items-center justify-center rounded-3xl bg-slate-950 text-white shadow-sm"
-            aria-label="Boardroom"
+            aria-label="LabFoundry"
           >
             <BrainCircuit className="h-6 w-6" />
           </Link>

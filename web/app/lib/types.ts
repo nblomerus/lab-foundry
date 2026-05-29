@@ -160,7 +160,7 @@ export interface Snapshot {
   langfuse_host: string | null;
 }
 
-export interface BoardroomEvent {
+export interface LabFoundryEvent {
   id: number;
   event_type: string;
   target_type: string | null;
@@ -178,7 +178,7 @@ export type StreamMessage =
   | { type: "hello" }
   | {
       type: "event";
-      event: BoardroomEvent;
+      event: LabFoundryEvent;
       thesis?: Claim;
       task?: unknown;
       finding?: Finding;

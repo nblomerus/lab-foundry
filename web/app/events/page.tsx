@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Activity, TerminalSquare } from "lucide-react";
 import { api } from "../lib/api";
 import { useEventStream } from "../lib/ws";
-import type { BoardroomEvent, StreamMessage } from "../lib/types";
+import type { LabFoundryEvent, StreamMessage } from "../lib/types";
 import { Badge, Card, SectionTitle } from "../components/ui";
 
 const STATUS_TONE: Record<string, "green" | "amber" | "default" | "red"> = {
@@ -19,7 +19,7 @@ function isEvent(m: StreamMessage): m is Extract<StreamMessage, { type: "event" 
 }
 
 export default function EventsPage() {
-  const [events, setEvents] = useState<BoardroomEvent[]>([]);
+  const [events, setEvents] = useState<LabFoundryEvent[]>([]);
   const { recent, connected } = useEventStream(200);
 
   useEffect(() => {

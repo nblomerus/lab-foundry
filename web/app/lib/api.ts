@@ -1,4 +1,4 @@
-import type { Snapshot, BoardroomEvent, Finding } from "./types";
+import type { Snapshot, LabFoundryEvent, Finding } from "./types";
 
 const API_BASE = "/api";
 
@@ -292,7 +292,7 @@ export interface BenchJobResponse {
 
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
-  events:    (limit = 100) => jget<BoardroomEvent[]>(`/events?limit=${limit}`),
+  events:    (limit = 100) => jget<LabFoundryEvent[]>(`/events?limit=${limit}`),
   findings:  (thesisId: number) => jget<Finding[]>(`/claims/${thesisId}/findings`),
   benchOptions: () => jget<BenchOptions>("/bench/options"),
   benchRun: (body: { invocation_type: string; models: { provider: string; model_name: string }[]; claim_id?: number }) =>
