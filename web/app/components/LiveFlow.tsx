@@ -415,7 +415,10 @@ function FlowEdge({
   const port  = handlePoint(to,   edge.toSide,   edge.toOffset   ?? 0);
   const path  = buildEdgePath(start, port, edge.fromSide, edge.toSide, edge.route ?? "auto");
 
-  const warm = rate > 0;
+  // Planned wiring: dashed, dim, no particles — clearly "not built yet".
+  const planned = edge.planned === true;
+
+  const warm = rate > 0 && !planned;
   let stroke = "#94a3b8";
   let marker = "arrow-dim";
   let opacity = 0.55;
@@ -423,19 +426,17 @@ function FlowEdge({
   if (connected) { stroke = "#475569"; marker = "arrow-conn"; opacity = 0.85; weight = 0.7; }
   if (warm)      { stroke = "#10b981"; marker = "arrow-hot";  opacity = 0.9;  weight = 0.7; }
   if (selected)  { stroke = "#334155"; marker = "arrow-mid";  opacity = 1;    weight = 0.9; }
-  if (hot)       { stroke = "#10b981"; marker = "arrow-hot";  opacity = 1;    weight = 1.0; }
+  if (hot && !planned) { stroke = "#10b981"; marker = "arrow-hot"; opacity = 1; weight = 1.0; }
+  if (planned)   { stroke = "#cbd5e1"; marker = "arrow-dim";  opacity = 0.5;  weight = 0.45; }
 
-  // Particle flow: continuous when warm, bursty when hot.
-  //   rate ≥ 10 → 3 fast particles
-  //   rate ≥ 3  → 2 medium particles
-  //   rate > 0  → 1 slow particle
-  //   hot only  → 2 medium burst (was the old behavior)
+  // Particle flow: continuous when warm, bursty when hot. Planned edges never
+  // flow — there's nothing running through them.
   let particleCount = 0;
   let particleDur = 2;
   if (warm) {
     particleCount = rate >= 10 ? 3 : rate >= 3 ? 2 : 1;
     particleDur   = rate >= 10 ? 1.2 : rate >= 3 ? 2.0 : 3.2;
-  } else if (hot) {
+  } else if (hot && !planned) {
     particleCount = 2;
     particleDur   = 1.8;
   }
@@ -457,9 +458,10 @@ function FlowEdge({
         strokeWidth={weight}
         strokeLinecap="round"
         strokeLinejoin="round"
+        strokeDasharray={planned ? "1.4 1.4" : undefined}
         opacity={opacity}
         markerEnd={`url(#${marker})`}
-        style={(hot || warm) ? { filter: "drop-shadow(0 0 0.9px rgba(16,185,129,0.55))" } : undefined}
+        style={(hot || warm) && !planned ? { filter: "drop-shadow(0 0 0.9px rgba(16,185,129,0.55))" } : undefined}
       />
       <path d={path} fill="none" stroke="transparent" strokeWidth="3" />
       {particleCount > 0 && Array.from({ length: particleCount }).map((_, i) => (

@@ -77,6 +77,8 @@ export interface EdgeDef {
   label: string;
   event_type: string;
   route?: RouteMode;
+  /** Aspirational wiring not yet implemented in the harness (rendered dashed). */
+  planned?: boolean;
 }
 
 // =========================================================================
@@ -113,12 +115,14 @@ export const NODES: NodeDef[] = [
 
 export const EDGES: EdgeDef[] = [
   // Knowledge pipeline: ingest → RAG corpus → knowledge graph (vertical, col 0).
-  { id: "i-rag",     from: "ingest",      fromSide: "bottom", to: "rag",        toSide: "top",                     label: "chunk + embed",   event_type: "_ingest" },
-  { id: "rag-kg",    from: "rag",         fromSide: "bottom", to: "kg",         toSide: "top",                     label: "extract entities",event_type: "_ingest" },
+  // PLANNED — the ingest/RAG pipeline and graph-retrieval aren't wired yet.
+  { id: "i-rag",     from: "ingest",      fromSide: "bottom", to: "rag",        toSide: "top",                     label: "chunk + embed",   event_type: "_ingest",   planned: true },
+  { id: "rag-kg",    from: "rag",         fromSide: "bottom", to: "kg",         toSide: "top",                     label: "extract entities",event_type: "_ingest",   planned: true },
 
-  // Retrieval: Researcher pulls from the corpus and the graph.
-  { id: "rag-res",   from: "rag",         fromSide: "right",  to: "researcher", toSide: "left",   toOffset: -0.3,  label: "retrieve",        event_type: "_retrieve" },
-  { id: "kg-res",    from: "kg",          fromSide: "right",  to: "researcher", toSide: "left",   toOffset: +0.3,  label: "graph query",     event_type: "_retrieve" },
+  // Retrieval: Researcher pulls from the corpus and the graph. PLANNED — the
+  // researcher does not query the corpus/graph today (web search is live).
+  { id: "rag-res",   from: "rag",         fromSide: "right",  to: "researcher", toSide: "left",   toOffset: -0.3,  label: "retrieve",        event_type: "_retrieve", planned: true },
+  { id: "kg-res",    from: "kg",          fromSide: "right",  to: "researcher", toSide: "left",   toOffset: +0.3,  label: "graph query",     event_type: "_retrieve", planned: true },
 
   // Live web search stays a first-class tool feeding the Researcher.
   { id: "web-res",   from: "web",         fromSide: "bottom", to: "researcher", toSide: "top",                     label: "live search",     event_type: "_source_web" },
@@ -133,6 +137,9 @@ export const EDGES: EdgeDef[] = [
 
   // Critic → Claims
   { id: "adv-thes",  from: "critic",   fromSide: "bottom", to: "claims",     toSide: "top",                     label: "kill / weaken",   event_type: "thesis.invalidated" },
+
+  // Evaluation's slop circuit-breaker trips on a claim (real: audit.slop_detected).
+  { id: "eval-thes", from: "evaluation",  fromSide: "right",  to: "claims",     toSide: "left",                    label: "slop breaker",    event_type: "audit.slop_detected" },
 
   // PI ↔ Claims (parallel via ±0.35 offsets)
   { id: "thes-ceo",  from: "claims",      fromSide: "top",    fromOffset: -0.35, to: "pi",        toSide: "bottom", toOffset: -0.35, label: "invalidated",     event_type: "thesis.invalidated" },
@@ -154,9 +161,9 @@ export const EDGES: EdgeDef[] = [
   { id: "tasks-pl",  from: "tasks",       fromSide: "right",  fromOffset: -0.35, to: "planner",    toSide: "left",   toOffset: -0.35, label: "queue empty",     event_type: "queue.empty" },
   { id: "pl-tasks",  from: "planner",     fromSide: "left",   fromOffset: +0.35, to: "tasks",      toSide: "right",  toOffset: +0.35, label: "refill",          event_type: "task.created" },
 
-  // Quartermaster gates the work queue on the spend cap. Pseudo-event: status
-  // is derived from cost (cap reached / spend today), like the _source_* edges.
-  { id: "qm-tasks",  from: "quartermaster", fromSide: "right", to: "tasks",      toSide: "left",                    label: "budget · GPU",    event_type: "_quartermaster" },
+  // Quartermaster watches budget + GPU. The "gate" is conceptual (cap_reached
+  // can stall work) but there's no real gate event yet — render as planned.
+  { id: "qm-tasks",  from: "quartermaster", fromSide: "right", to: "tasks",      toSide: "left",                    label: "budget · GPU",    event_type: "_quartermaster", planned: true },
 ];
 
 export const ROLE_TO_NODE: Record<string, string> = {
