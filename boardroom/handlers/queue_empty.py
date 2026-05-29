@@ -63,7 +63,7 @@ The research queue is empty AND there are no active claims to plan against.
 This usually means: company is between phases, or all claims were killed.
 
 Return an empty tasks list with reasoning explaining why no tasks were
-created. The CEO needs to spawn new claims before research can resume.
+created. The PI needs to spawn new claims before research can resume.
 """
         return PromptLayer(name="task_data", content=content, priority=1)
 

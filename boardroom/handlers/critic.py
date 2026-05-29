@@ -6,11 +6,11 @@ claim and decide whether killing evidence has accumulated. Three outcomes:
 
   - watch:  no killing evidence yet; reasoning recorded in dissent session
   - weaken: real concerns; confidence lowered by proposed delta
-  - kill:   evidence sufficient; adversary_verdict created and claim killed
-            (state.invalidate_claim emits claim.invalidated → CEO handler triggers)
+  - kill:   evidence sufficient; critic_verdict created and claim killed
+            (state.invalidate_claim emits claim.invalidated → PI handler triggers)
 
 The handler installs a 4-hour per-claim cooldown on critic.kill_verdict
-so multiple high-signal findings in a window batch into one Adversary run.
+so multiple high-signal findings in a window batch into one Critic run.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ DEFAULT_WEAKEN_DELTA = -0.1
 
 
 # -------------------------------------------------------------------------
-# Adversary output schema
+# Critic output schema
 # -------------------------------------------------------------------------
 
 class AdversaryVerdictOut(BaseModel):
@@ -242,7 +242,7 @@ async def handle_finding_high_signal(event: dict, dispatcher) -> Optional[dict]:
         await dispatcher.memory.write_message(
             session_id="claims-lifecycle",
             content=(
-                f"Thesis T{claim_id} killed by Adversary verdict V{verdict_id}. "
+                f"Thesis T{claim_id} killed by Critic verdict V{verdict_id}. "
                 f"Reasoning: {verdict.reasoning} "
                 f"Cited findings: {verdict.cited_finding_ids}."
             ),

@@ -4,7 +4,7 @@ whether the criteria for a phase transition are met.
 
 Cheap F-tier model; runs every confidence change (with the per-claim
 cooldown configured in dispatch.py). Emits phase.transition_proposed when
-ready; the CEO ratifies separately.
+ready; the PI ratifies separately.
 
 Criteria (strict — bias toward "not yet"):
   exploration  → convergence: ≥3 active claims with confidence ≥ 0.55,

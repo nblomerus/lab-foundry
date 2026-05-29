@@ -1,5 +1,5 @@
 """
-Auditor loop schemas.
+Evaluation loop schemas.
 
 Two stages:
   - EvidenceCrossCheck — per-finding, the structured report of "does each of
@@ -9,7 +9,7 @@ Two stages:
     (state.update_finding_audit, slop circuit-breaker, dissent narrative)
     sees no schema change.
 
-The cross-check is the genuine multi-step lift: today's single-call auditor
+The cross-check is the genuine multi-step lift: today's single-call evaluation
 has to share its context budget across N findings — quotes get truncated
 to 240 chars per item, only 20 pages × 3 items shown. Splitting per-finding
 lets each cross-check see the FULL evidence relevant to its finding, so

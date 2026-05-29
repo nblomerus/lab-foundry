@@ -483,7 +483,7 @@ function FindingsCard({ findings }: { findings: ResearchFinding[] }) {
   return (
     <Card>
       <SectionTitle icon={FileSearch} title="Synthesized findings"
-                    subtitle="What the loop concluded — written to the findings table; the auditor scores these." />
+                    subtitle="What the loop concluded — written to the findings table; the evaluation scores these." />
       <div className="space-y-2">
         {findings.map((f) => (
           <div key={f.id} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm">

@@ -3,8 +3,8 @@ Phase budget exceeded handler — triggered by the watchdog when a phase
 overruns its budget by 1.5×.
 
 Emits a *forced* phase.transition_proposed to the next sequential phase.
-The CEO still ratifies separately, but staying past budget is now the
-non-default — the CEO must justify staying.
+The PI still ratifies separately, but staying past budget is now the
+non-default — the PI must justify staying.
 
 This is the forcing function that prevents the company from exploring
 forever. A real founder doesn't get infinite time either.
@@ -55,7 +55,7 @@ async def handle_phase_budget_exceeded(event: dict, dispatcher) -> Optional[dict
                 "to_phase":         next_phase,
                 "reasoning": (
                     f"Phase budget exceeded ({elapsed_days} days). "
-                    f"Forcing transition proposal. CEO may still reject."
+                    f"Forcing transition proposal. PI may still reject."
                 ),
                 "cited_claim_ids": [],
                 "forced":           True,
@@ -67,7 +67,7 @@ async def handle_phase_budget_exceeded(event: dict, dispatcher) -> Optional[dict
         session_id="phase-transitions",
         content=(
             f"Watchdog forced transition proposal: {current_phase} → {next_phase} "
-            f"after {elapsed_days} days. CEO will decide whether to ratify."
+            f"after {elapsed_days} days. PI will decide whether to ratify."
         ),
         role_type="system",
     )

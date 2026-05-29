@@ -50,7 +50,7 @@ export const ARROW_PENETRATION = 3.0;
 /**
  * How far an outside-U route loops past the source/target column, in SVG
  * units. Must be big enough to clear any node sitting between the endpoints
- * in adjacent columns (e.g. phase → ceo has to loop around Claims).
+ * in adjacent columns (e.g. phase → pi has to loop around Claims).
  */
 export const OUTSIDE_STUB = 22 * (SVG_W / 100);
 
@@ -92,13 +92,13 @@ export const NODES: NodeDef[] = [
   { id: "tasks",       label: "Tasks",        type: "Queue",  icon: TerminalSquare, x: 29, y: 84 },
 
   { id: "findings",    label: "Findings",     type: "Store",  icon: Eye,            x: 49, y: 38 },
-  { id: "auditor",     label: "Auditor",      type: "Critic", icon: ShieldCheck,    x: 49, y: 64 },
+  { id: "evaluation",     label: "Evaluation",      type: "Critic", icon: ShieldCheck,    x: 49, y: 64 },
   { id: "planner",     label: "Planner",      type: "Agent",  icon: GitBranch,      x: 49, y: 92 },
 
-  { id: "adversary",   label: "Critic",    type: "Critic", icon: Telescope,      x: 70, y: 16 },
+  { id: "critic",   label: "Critic",    type: "Critic", icon: Telescope,      x: 70, y: 16 },
   { id: "claims",      label: "Claims",       type: "Store",  icon: Target,         x: 70, y: 52 },
 
-  { id: "ceo",         label: "CEO",          type: "Agent",  icon: BrainCircuit,   x: 90, y: 16 },
+  { id: "pi",         label: "PI",          type: "Agent",  icon: BrainCircuit,   x: 90, y: 16 },
   { id: "adjudicator", label: "Adjudicator",  type: "Agent",  icon: Activity,       x: 90, y: 52 },
   { id: "phase",       label: "Phase",        type: "Phase",  icon: Layers3,        x: 90, y: 84 },
 ];
@@ -114,27 +114,27 @@ export const EDGES: EdgeDef[] = [
   { id: "r-find",    from: "researcher",  fromSide: "right",  to: "findings",   toSide: "left",                    label: "finding",         event_type: "task.completed" },
 
   // Critics
-  { id: "find-aud",  from: "findings",    fromSide: "bottom", to: "auditor",    toSide: "top",                     label: "audit",           event_type: "task.completed" },
-  { id: "find-adv",  from: "findings",    fromSide: "top",    to: "adversary",  toSide: "left",                    label: "high signal",     event_type: "finding.high_signal" },
+  { id: "find-aud",  from: "findings",    fromSide: "bottom", to: "evaluation",    toSide: "top",                     label: "audit",           event_type: "task.completed" },
+  { id: "find-adv",  from: "findings",    fromSide: "top",    to: "critic",  toSide: "left",                    label: "high signal",     event_type: "finding.high_signal" },
 
   // Critic → Claims
-  { id: "adv-thes",  from: "adversary",   fromSide: "bottom", to: "claims",     toSide: "top",                     label: "kill / weaken",   event_type: "thesis.invalidated" },
+  { id: "adv-thes",  from: "critic",   fromSide: "bottom", to: "claims",     toSide: "top",                     label: "kill / weaken",   event_type: "thesis.invalidated" },
 
-  // CEO ↔ Claims (parallel via ±0.35 offsets)
-  { id: "thes-ceo",  from: "claims",      fromSide: "top",    fromOffset: -0.35, to: "ceo",        toSide: "bottom", toOffset: -0.35, label: "invalidated",     event_type: "thesis.invalidated" },
-  { id: "ceo-thes",  from: "ceo",         fromSide: "bottom", fromOffset: +0.35, to: "claims",     toSide: "top",    toOffset: +0.35, label: "spawn / charter", event_type: "thesis.created" },
+  // PI ↔ Claims (parallel via ±0.35 offsets)
+  { id: "thes-ceo",  from: "claims",      fromSide: "top",    fromOffset: -0.35, to: "pi",        toSide: "bottom", toOffset: -0.35, label: "invalidated",     event_type: "thesis.invalidated" },
+  { id: "pi-thes",  from: "pi",         fromSide: "bottom", fromOffset: +0.35, to: "claims",     toSide: "top",    toOffset: +0.35, label: "spawn / charter", event_type: "thesis.created" },
 
   // Right column flow
   { id: "thes-adj",  from: "claims",      fromSide: "right",  to: "adjudicator", toSide: "left",                    label: "conf changed",    event_type: "thesis.confidence_changed" },
   { id: "adj-phase", from: "adjudicator", fromSide: "bottom", to: "phase",       toSide: "top",                     label: "proposal",        event_type: "phase.transition_proposed" },
 
-  // phase → ceo: long-range. Both nodes sit in the governance column with
+  // phase → pi: long-range. Both nodes sit in the governance column with
   // Adjudicator between them, and the strategic column to the left holds
-  // Critic + Claims stacked at the same y as CEO + Phase respectively.
+  // Critic + Claims stacked at the same y as PI + Phase respectively.
   // Outside-LEFT would have to thread past Critic on the way in; route
   // outside-RIGHT instead, looping past the right edge of the canvas where
   // nothing else lives.
-  { id: "phase-ceo", from: "phase",       fromSide: "right",  to: "ceo",         toSide: "right",  route: "outside-right", label: "ratify",     event_type: "phase.transition_proposed" },
+  { id: "phase-pi", from: "phase",       fromSide: "right",  to: "pi",         toSide: "right",  route: "outside-right", label: "ratify",     event_type: "phase.transition_proposed" },
 
   // Tasks ↔ Planner (parallel via ±0.35 offsets)
   { id: "tasks-pl",  from: "tasks",       fromSide: "right",  fromOffset: -0.35, to: "planner",    toSide: "left",   toOffset: -0.35, label: "queue empty",     event_type: "queue.empty" },
@@ -142,11 +142,11 @@ export const EDGES: EdgeDef[] = [
 ];
 
 export const ROLE_TO_NODE: Record<string, string> = {
-  ceo: "ceo",
+  pi: "pi",
   planner: "planner",
   researcher: "researcher",
-  auditor: "auditor",
-  adversary: "adversary",
+  evaluation: "evaluation",
+  critic: "critic",
   phase_adjudicator: "adjudicator",
 };
 

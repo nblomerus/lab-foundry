@@ -103,7 +103,7 @@ SYSTEM_PROMPTS: dict[str, str] = {
 
 
 # -------------------------------------------------------------------------
-# Recipe 1: ceo.thesis_kill
+# Recipe 1: pi.claim_verdict
 # -------------------------------------------------------------------------
 
 async def _build_thesis_kill_task_data(ctx: dict, state, memory) -> PromptLayer:
@@ -133,7 +133,7 @@ async def _build_thesis_kill_task_data(ctx: dict, state, memory) -> PromptLayer:
 **Status:** {thesis.status}  |  Confidence: {thesis.confidence:.2f}
 **Born:** {thesis.created_at:%Y-%m-%d}
 
-## Adversary verdict (the kill recommendation)
+## Critic verdict (the kill recommendation)
 
 **Verdict:** {verdict.verdict}  |  Confidence: {verdict.confidence:.2f}
 **Reasoning:**
@@ -152,7 +152,7 @@ async def _build_thesis_kill_task_data(ctx: dict, state, memory) -> PromptLayer:
   - `demote`       — the evidence weakens but does not kill. Propose new_confidence.
   - `reject`       — the critic missed something. Explain what.
 
-Your decision will be logged immutably. The Adversary is good but not infallible.
+Your decision will be logged immutably. The Critic is good but not infallible.
 """
     return PromptLayer(name="task_data", content=content, priority=1)
 
@@ -208,12 +208,12 @@ That is the correct answer when there is nothing — an empty list beats a vague
 
 
 # -------------------------------------------------------------------------
-# Recipe 3: ceo.exploration_kickoff  (bootstrap — day 1 only)
+# Recipe 3: pi.exploration_kickoff  (bootstrap — day 1 only)
 # -------------------------------------------------------------------------
 
 async def _build_exploration_kickoff_task_data(ctx: dict, state, memory) -> PromptLayer:
     """
-    First-ever CEO invocation. The constitution layer already carries the seed
+    First-ever PI invocation. The constitution layer already carries the seed
     (problem / stance / success criterion); this layer is the "now what" brief.
     """
     content = """## Exploration kickoff — day 1
@@ -267,10 +267,10 @@ excluded.
 # -------------------------------------------------------------------------
 
 RECIPES: dict[str, Recipe] = {
-    "ceo.exploration_kickoff": Recipe(
-        invocation_type="ceo.exploration_kickoff",
-        description="First-ever CEO invocation. Generates 4-6 candidate business categories from the seed.",
-        agent="ceo",
+    "pi.exploration_kickoff": Recipe(
+        invocation_type="pi.exploration_kickoff",
+        description="First-ever PI invocation. Generates 4-6 candidate business categories from the seed.",
+        agent="pi",
         total_budget=4_000,
         use_cold_path=False,
         recall_sessions=[],
@@ -278,10 +278,10 @@ RECIPES: dict[str, Recipe] = {
         output_schema="ExplorationKickoffOutput",
         task_data_builder=_build_exploration_kickoff_task_data,
     ),
-    "ceo.thesis_kill": Recipe(
-        invocation_type="ceo.thesis_kill",
-        description="CEO ratifies, demotes, or rejects an Adversary kill recommendation.",
-        agent="ceo",
+    "pi.claim_verdict": Recipe(
+        invocation_type="pi.claim_verdict",
+        description="PI ratifies, demotes, or rejects an Critic kill recommendation.",
+        agent="pi",
         total_budget=13_000,
         use_cold_path=True,
         recall_sessions=["claims-lifecycle", "dissent", "pi-deliberations"],
@@ -308,10 +308,10 @@ RECIPES: dict[str, Recipe] = {
 # -------------------------------------------------------------------------
 
 TOOLS_BY_AGENT: dict[str, list[str]] = {
-    "ceo":        ["boardroom-state", "boardroom-memory", "boardroom-events", "boardroom-artifacts"],
+    "pi":        ["boardroom-state", "boardroom-memory", "boardroom-events", "boardroom-artifacts"],
     "planner":    ["boardroom-state", "boardroom-events"],
     "researcher": ["boardroom-state", "boardroom-events", "boardroom-research"],
-    "auditor":    ["boardroom-state", "boardroom-memory", "boardroom-events"],
+    "evaluation":    ["boardroom-state", "boardroom-memory", "boardroom-events"],
     "adversary":  ["boardroom-state", "boardroom-memory", "boardroom-events", "boardroom-research"],
 }
 
@@ -476,15 +476,15 @@ class Curator:
         return PromptLayer(name="recall", content=body, priority=3)
 
     async def _recall_query(self, recipe: Recipe, context: dict) -> str:
-        if recipe.invocation_type == "ceo.thesis_kill":
+        if recipe.invocation_type == "pi.claim_verdict":
             thesis = await self.state.get_thesis(context["thesis_id"])
             return f"thesis kill, demotion, or rejection related to: {thesis.claim}"
-        if recipe.invocation_type == "ceo.weekly_synthesis":
+        if recipe.invocation_type == "pi.weekly_synthesis":
             return "recent thesis activity, dissent, phase progress"
-        if recipe.invocation_type == "ceo.phase_transition_proposal":
+        if recipe.invocation_type == "pi.phase_transition_ratify":
             return "phase transition reasoning and confidence patterns"
-        if recipe.invocation_type == "auditor.slop_score":
-            return "recent auditor verdicts and slop patterns"
+        if recipe.invocation_type == "evaluation.slop_score":
+            return "recent evaluation verdicts and slop patterns"
         return ""
 
     # ---- Budget enforcement ----------------------------------------

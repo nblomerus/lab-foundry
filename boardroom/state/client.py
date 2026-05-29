@@ -231,7 +231,7 @@ class PostgresClient:
         run_id: Optional[int] = None,
     ) -> None:
         """
-        Persist auditor verdict on a finding. If verdict=pass and relevance>=8,
+        Persist evaluation verdict on a finding. If verdict=pass and relevance>=8,
         emit finding.high_signal so the PI knows there's signal to reconsider.
         """
         async with self.pool.acquire() as conn:
@@ -660,7 +660,7 @@ class PostgresClient:
         )
 
     async def get_evidence_for_task(self, task_id: int) -> list[dict]:
-        """All evidence rows for a task, in id order. Used by the auditor to
+        """All evidence rows for a task, in id order. Used by the evaluation to
         check finding groundedness."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -674,7 +674,7 @@ class PostgresClient:
 
     async def get_experiment_runs_for_task(self, task_id: int) -> list[dict]:
         """All experiment runs for a task with their results + interpretation.
-        Used by the auditor so findings derived from experiments can be judged
+        Used by the evaluation so findings derived from experiments can be judged
         as grounded against the experiment output, not only against evidence
         quote rows."""
         async with self.pool.acquire() as conn:

@@ -1,5 +1,5 @@
 """
-Auditor loop — two-step audit replacing the single-shot `auditor.slop_score`.
+Evaluation loop — two-step audit replacing the single-shot `evaluation.slop_score`.
 
 Pipeline per task.completed event:
 
@@ -12,7 +12,7 @@ Pipeline per task.completed event:
 
 Why two steps instead of one:
 
-The legacy single-call auditor has to share its context budget across N
+The legacy single-call evaluation has to share its context budget across N
 findings, so per-finding evidence is truncated to ~3 items × 240 chars.
 Per-finding cross_check sees the full evidence relevant to ONE finding
 without that cap — groundedness judgments stop being constrained by
@@ -219,7 +219,7 @@ specific claim, which match status, which substance issue).
 
 _AUDITOR_RECIPES: list[tuple[str, str, int, str, callable]] = [
     (
-        "auditor.cross_check_finding",
+        "evaluation.cross_check_finding",
         "Cross-check one finding's claims against its evidence trail.",
         # Per-finding evidence can be sizeable when a thesis has many cached
         # pages; 10k leaves room for the full quotes of ~30 items.
@@ -228,7 +228,7 @@ _AUDITOR_RECIPES: list[tuple[str, str, int, str, callable]] = [
         _build_cross_check_finding,
     ),
     (
-        "auditor.batch_score",
+        "evaluation.batch_score",
         "Aggregate per-finding cross-check reports into final pass/slop scores.",
         # Cross-check reports are structured + compact. 8k is plenty for ~12
         # findings × ~600 chars/report.
@@ -243,7 +243,7 @@ for _itype, _desc, _budget, _schema, _builder in _AUDITOR_RECIPES:
         RECIPES[_itype] = Recipe(
             invocation_type=_itype,
             description=_desc,
-            agent="auditor",
+            agent="evaluation",
             total_budget=_budget,
             use_cold_path=False,
             # Both stages benefit from a quick glance at recent dissent for
@@ -291,7 +291,7 @@ async def run_audit_loop(
     async def _check_one(f) -> Optional[EvidenceCrossCheck]:
         async with sem:
             prompt = await curator.build(
-                invocation_type="auditor.cross_check_finding",
+                invocation_type="evaluation.cross_check_finding",
                 context={
                     "task": task,
                     "finding": f,
@@ -331,7 +331,7 @@ async def run_audit_loop(
 
     # ---- 2. batch_score ----------------------------------------------
     batch_prompt = await curator.build(
-        invocation_type="auditor.batch_score",
+        invocation_type="evaluation.batch_score",
         context={
             "task": task,
             "findings": findings,

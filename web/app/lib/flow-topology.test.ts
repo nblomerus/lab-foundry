@@ -472,9 +472,9 @@ describe("edgeLabelPoint", () => {
 // --------------------------------------------------------------------------
 
 describe("bidirectional edge offsets", () => {
-  it("CEO ↔ Claims pair uses ±0.35 offsets", () => {
+  it("PI ↔ Claims pair uses ±0.35 offsets", () => {
     const a = EDGES.find((e) => e.id === "thes-ceo")!;
-    const b = EDGES.find((e) => e.id === "ceo-thes")!;
+    const b = EDGES.find((e) => e.id === "pi-thes")!;
     expect(Math.abs((a.fromOffset ?? 0) - (b.toOffset ?? 0))).toBeGreaterThanOrEqual(0.3);
   });
 

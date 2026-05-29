@@ -14,7 +14,7 @@ export function DissentPanel({ items }: { items: DissentItem[] }) {
       <SectionTitle
         icon={ShieldCheck}
         title="Recent dissent"
-        subtitle="Critic verdicts + Auditor slop flags. The loop's brakes."
+        subtitle="Critic verdicts + Evaluation slop flags. The loop's brakes."
       />
 
       {items.length === 0 ? (
@@ -24,7 +24,7 @@ export function DissentPanel({ items }: { items: DissentItem[] }) {
             <Clock3 className="h-4 w-4 text-emerald-700" />
           </div>
           <p className="mt-3 text-sm text-slate-600">
-            Auditor and Critic are running but haven't flagged anything significant. Watch this space — Zechner's warning lives here.
+            Evaluation and Critic are running but haven't flagged anything significant. Watch this space — Zechner's warning lives here.
           </p>
         </div>
       ) : (

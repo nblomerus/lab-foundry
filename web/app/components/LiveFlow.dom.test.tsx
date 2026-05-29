@@ -60,7 +60,7 @@ const fakeSnapshot: Snapshot = {
     invalidated_claim_count: 0,
   },
   active_claims: [],
-  killed_claims: [],
+  invalidated_claims: [],
   recent_findings: [],
   recent_runs: [],
   dissent: [],

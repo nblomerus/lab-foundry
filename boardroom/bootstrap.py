@@ -66,7 +66,7 @@ needs the watcher's judgment, the company has failed.
 
 
 # =========================================================================
-# Output schema for ceo.exploration_kickoff
+# Output schema for pi.exploration_kickoff
 # =========================================================================
 
 class CandidateCategory(BaseModel):
@@ -137,7 +137,7 @@ async def bootstrap() -> None:
             )
         print(f"✓ Seeded company_state. Deadline: {deadline.isoformat()}")
 
-        # ---------- 2. CEO exploration kickoff ----------
+        # ---------- 2. PI exploration kickoff ----------
         # Wire up clients. In a fuller setup these come from a DI container.
         from boardroom.state.client import PostgresClient
         from boardroom.memory.client import ZepClient
@@ -151,13 +151,13 @@ async def bootstrap() -> None:
         gpu_lock = GPULock()
         router = Router(pool=pool, gpu_lock=gpu_lock, ollama_url=ollama_url)
 
-        print("→ Invoking CEO for exploration kickoff (workhorse tier)...")
-        prompt = await curator.build("ceo.exploration_kickoff", context={})
+        print("→ Invoking PI for exploration kickoff (workhorse tier)...")
+        prompt = await curator.build("pi.exploration_kickoff", context={})
         output, run_id = await router.invoke(
             prompt=prompt,
             output_schema_class=ExplorationKickoffOutput,
         )
-        print(f"✓ CEO returned {len(output.categories)} categories (run #{run_id}).")
+        print(f"✓ PI returned {len(output.categories)} categories (run #{run_id}).")
 
         # ---------- 3. Insert categories as theses ----------
         async with pool.acquire() as conn:
@@ -215,7 +215,7 @@ async def bootstrap() -> None:
         print(f"  Research tasks queued: {len(output.categories) * 3}")
         print(f"  Deadline: {deadline.isoformat()}")
         print()
-        print("  Selection reasoning from CEO:")
+        print("  Selection reasoning from PI:")
         print(f"    {output.selection_reasoning}")
         print()
         print("Start the harness now:")

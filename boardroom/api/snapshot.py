@@ -24,21 +24,18 @@ router = APIRouter()
 
 # Map invocation_type prefix → org role
 ROLE_OF = {
-    "ceo":                "ceo",
     "pi":                 "pi",
     "planner":            "planner",
     "researcher":         "researcher",
     "knowledge_scout":    "knowledge_scout",
-    "auditor":            "auditor",
     "evaluation":         "evaluation",
     "critic":             "critic",
-    "adversary":          "adversary",
     "phase_adjudicator":  "phase_adjudicator",
     "reflect":            "reflection",
     "curator":            "curator",
 }
 
-ALL_ROLES = ["pi", "planner", "knowledge_scout", "evaluation", "critic", "ceo", "researcher", "auditor",
+ALL_ROLES = ["pi", "planner", "knowledge_scout", "evaluation", "critic", "researcher",
              "phase_adjudicator", "reflection", "curator"]
 
 
@@ -71,8 +68,8 @@ async def _state(pool: asyncpg.Pool) -> CompanyStateOut:
         charter=s["charter"],
         paused=s["paused"],
         paused_reason=s["paused_reason"],
-        active_thesis_count=active or 0,
-        killed_thesis_count=killed or 0,
+        active_claims_count=active or 0,
+        invalidated_claims_count=killed or 0,
     )
 
 
@@ -107,7 +104,7 @@ async def _theses_with_counts(pool: asyncpg.Pool, status_filter: str, limit: int
             confidence_prev=float(r["confidence_prev"]) if r["confidence_prev"] is not None else None,
             parent_id=r["parent_id"],
             created_at=r["created_at"], updated_at=r["updated_at"],
-            killed_at=r["invalidated_at"], kill_reason=r["invalidation_reason"],
+            invalidated_at=r["invalidated_at"], kill_reason=r["invalidation_reason"],
             finding_count=r["finding_count"] or 0,
             supporting_count=r["supporting_count"] or 0,
             contradicting_count=r["contradicting_count"] or 0,

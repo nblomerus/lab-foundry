@@ -267,7 +267,7 @@ async def invalidate_claim(
                 """
                 UPDATE theses
                 SET status = 'killed',
-                    killed_at = NOW(),
+                    invalidated_at = NOW(),
                     killed_by_verdict_id = $1,
                     kill_reason = $2,
                     updated_at = NOW()
@@ -342,7 +342,7 @@ async def claim_task(worker_id: str, department: str) -> Optional[Task]:
 async def complete_task(task_id: int, result: dict) -> None:
     """
     Mark a task completed with its result payload. Emits `task.completed`,
-    which downstream wakes Auditor + Critic handlers.
+    which downstream wakes Evaluation + Critic handlers.
     """
     pool = await _pool_handle()
     async with pool.acquire() as conn:
@@ -403,8 +403,8 @@ async def record_finding(
     """
     Record a research finding. Returns its id.
 
-    The Researcher's relevance_score is provisional. The Auditor will score it
-    independently before the CEO sees it; until audited, audit_verdict is NULL
+    The Researcher's relevance_score is provisional. The Evaluation will score it
+    independently before the PI sees it; until audited, audit_verdict is NULL
     and the curator filters it from high-signal recall.
     """
     if not 1 <= relevance_score <= 10:

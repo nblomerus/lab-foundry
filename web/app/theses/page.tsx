@@ -23,29 +23,29 @@ export default function ClaimsPage() {
       <Card>
         <SectionTitle
           icon={Layers3}
-          title={`Claims (${snap.active_claims.length} active, ${snap.killed_claims.length} archived)`}
+          title={`Claims (${snap.active_claims.length} active, ${snap.invalidated_claims.length} archived)`}
           subtitle="Born, evolved, killed, or merged. The full history of the company's strategic candidates."
         />
       </Card>
 
       <ClaimsPanel claims={snap.active_claims} />
 
-      {snap.killed_claims.length > 0 && (
+      {snap.invalidated_claims.length > 0 && (
         <Card>
           <SectionTitle
             icon={Layers3}
-            title={`Killed / merged (${snap.killed_claims.length})`}
-            subtitle="Preserved with their kill reason so the CEO doesn't re-litigate."
+            title={`Killed / merged (${snap.invalidated_claims.length})`}
+            subtitle="Preserved with their invalidation reason so the PI doesn't re-litigate."
           />
           <div className="space-y-2">
-            {snap.killed_claims.map((t) => (
+            {snap.invalidated_claims.map((t) => (
               <div key={t.id} className="rounded-3xl border border-slate-200 bg-slate-50 p-4 opacity-80">
                 <div className="flex items-baseline justify-between">
                   <span className="text-xs font-semibold text-slate-400">T{t.id}</span>
                   <div className="flex items-center gap-2">
                     <Badge tone={t.status === "merged" ? "blue" : "red"}>{t.status}</Badge>
                     <span className="text-xs text-slate-500">
-                      {t.killed_at && new Date(t.killed_at).toLocaleDateString()}
+                      {t.invalidated_at && new Date(t.invalidated_at).toLocaleDateString()}
                     </span>
                   </div>
                 </div>

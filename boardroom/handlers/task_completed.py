@@ -3,7 +3,7 @@ Handler for task.completed events.
 
 Flow:
   1. Read the completed task + its unaudited findings.
-  2. Invoke the Auditor (FAST tier) to score every finding for slop.
+  2. Invoke the Evaluation (FAST tier) to score every finding for slop.
   3. Persist verdicts (update_finding_audit emits finding.high_signal as needed).
   4. Check the slop circuit-breaker per affected claim.
   5. Write an entry to the Zep 'dissent' session if any slop was found.
@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 
 # -------------------------------------------------------------------------
-# Auditor output schema
+# Evaluation output schema
 # -------------------------------------------------------------------------
 
 class AuditScore(BaseModel):
@@ -46,7 +46,7 @@ class AuditBatch(BaseModel):
 def _verdict_from_score(score: float) -> str:
     """Derive the verdict deterministically from the (well-calibrated) audit_score
     rather than trusting the model's separately-emitted `verdict` field, which is
-    noisy on weak auditors (~18% mislabel — e.g. a 0.85 score tagged "slop"),
+    noisy on weak evaluations (~18% mislabel — e.g. a 0.85 score tagged "slop"),
     inflating the slop rate and tripping the circuit-breaker on healthy claims.
     Rubric: slop 0.0-0.3 · unclear 0.3-0.7 · pass 0.7-1.0."""
     if score < 0.3:
@@ -57,20 +57,20 @@ def _verdict_from_score(score: float) -> str:
 
 
 # -------------------------------------------------------------------------
-# Auditor recipe (registered at import time)
+# Evaluation recipe (registered at import time)
 # -------------------------------------------------------------------------
 
-async def _build_auditor_task_data(ctx: dict, state, memory) -> PromptLayer:
+async def _build_evaluation_task_data(ctx: dict, state, memory) -> PromptLayer:
     findings = ctx["findings"]
     task = ctx["task"]
     # Evidence is the per-page quote/claim trail the researcher built up before
-    # synthesizing findings. Passing it to the auditor lets it judge whether
+    # synthesizing findings. Passing it to the evaluation lets it judge whether
     # each finding is grounded in what the source pages actually said, not
     # just whether the finding *sounds* substantive in isolation.
     evidence: list[dict] = ctx.get("evidence") or []
     # Experiments contribute concrete numbers (counts, ratios, star counts) that
     # findings may legitimately cite even without a quote-row backing them.
-    # Without this section the auditor flags experiment-derived findings as
+    # Without this section the evaluation flags experiment-derived findings as
     # ungrounded (a false negative).
     experiments: list[dict] = ctx.get("experiments") or []
 
@@ -87,7 +87,7 @@ async def _build_auditor_task_data(ctx: dict, state, memory) -> PromptLayer:
             f"- Supports claim: {f.supports_thesis}"
         )
 
-    # Group evidence by URL so the auditor can see which pages backed which
+    # Group evidence by URL so the evaluation can see which pages backed which
     # claims at a glance. Cap each page to its top 3 evidence items and the
     # whole block to 40 lines so the prompt stays bounded.
     by_url: dict[str, list[dict]] = {}
@@ -192,9 +192,9 @@ Return one entry per finding. Use the same finding_id you saw.
 if "evaluation.slop_score" not in RECIPES:
     RECIPES["evaluation.slop_score"] = Recipe(
         invocation_type="evaluation.slop_score",
-        description="Auditor scores findings for substance AND groundedness against the evidence trail.",
+        description="Evaluation scores findings for substance AND groundedness against the evidence trail.",
         agent="evaluation",
-        # Bumped from 8k to 14k after the auditor was given the per-evidence
+        # Bumped from 8k to 14k after the evaluation was given the per-evidence
         # trail (quotes + claims grouped by URL) so it can score groundedness
         # in addition to substance. The evidence section is the largest growth
         # — up to ~20 pages × 3 items × ~300 chars ≈ 4500 tokens — and the
@@ -205,7 +205,7 @@ if "evaluation.slop_score" not in RECIPES:
         recall_sessions=["dissent"],  # see recent dissent for calibration
         recall_k=5,
         output_schema="AuditBatch",
-        task_data_builder=_build_auditor_task_data,
+        task_data_builder=_build_evaluation_task_data,
     )
 
 
@@ -230,7 +230,7 @@ async def handle_task_completed(event: dict, dispatcher) -> Optional[dict]:
     if not findings:
         return {"skipped": True, "reason": "no unaudited findings"}
 
-    # Pull the evidence trail AND the experiment runs too, so the auditor can
+    # Pull the evidence trail AND the experiment runs too, so the evaluation can
     # score groundedness against both. For legacy single-shot researcher tasks
     # both lists return empty.
     evidence    = await dispatcher.state.get_evidence_for_task(task_id)
@@ -313,7 +313,7 @@ async def handle_task_completed(event: dict, dispatcher) -> Optional[dict]:
         if await dispatcher.state.detect_slop_breaker(claim_id):
             breakers_tripped.append(claim_id)
 
-    # Upward force on confidence. The adversary and slop-breaker only push
+    # Upward force on confidence. The critic and slop-breaker only push
     # confidence DOWN — without a counterweight every claim decays to 0 and
     # nothing can ever be validated. A pass + high-relevance + supporting
     # finding is genuine positive signal, so reinforce its claim.
@@ -341,7 +341,7 @@ async def handle_task_completed(event: dict, dispatcher) -> Optional[dict]:
         await dispatcher.memory.write_message(
             session_id="dissent",
             content=(
-                f"Auditor reviewed task T{task_id} "
+                f"Evaluation reviewed task T{task_id} "
                 f"('{task.description[:80]}...' if longer than 80 else task.description). "
                 f"{slop_count} of {len(audit_batch.scores)} findings flagged as slop. "
                 f"Theses affected: {sorted(claims_seen)}. "

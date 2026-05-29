@@ -25,8 +25,8 @@ class CompanyStateOut(BaseModel):
     charter: Optional[str]
     paused: bool
     paused_reason: Optional[str]
-    active_thesis_count: int
-    killed_thesis_count: int
+    active_claims_count: int
+    invalidated_claims_count: int
 
 
 class ThesisOut(BaseModel):
@@ -38,8 +38,8 @@ class ThesisOut(BaseModel):
     parent_id: Optional[int]
     created_at: datetime
     updated_at: datetime
-    killed_at: Optional[datetime]
-    kill_reason: Optional[str]
+    invalidated_at: Optional[datetime]  # Maps from invalidated_at column
+    kill_reason: Optional[str]     # Maps from invalidation_reason column
     finding_count: int
     supporting_count: int
     contradicting_count: int
@@ -78,7 +78,7 @@ class AgentRunOut(BaseModel):
 
 
 class DissentItem(BaseModel):
-    kind: str                   # 'adversary' | 'audit-slop'
+    kind: str                   # 'critic' | 'audit-slop'
     id: int
     claim_id: int
     detail: str                 # verdict or audit_verdict
@@ -132,7 +132,7 @@ class CostTrackingOut(BaseModel):
 
 class OrgRoleOut(BaseModel):
     """One node in the org chart."""
-    role: str                   # 'ceo' | 'planner' | 'researcher' | 'auditor' | 'adversary' | 'phase_adjudicator' | 'reflection'
+    role: str                   # 'pi' | 'planner' | 'researcher' | 'evaluation' | 'critic' | 'phase_adjudicator' | 'reflection' | 'knowledge_scout' | 'curator'
     running_count: int          # how many invocations currently in flight
     last_run_at: Optional[datetime]
     runs_today: int

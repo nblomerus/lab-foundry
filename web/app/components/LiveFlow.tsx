@@ -52,7 +52,7 @@ function ago(iso?: string | null): string {
 function deriveNodeStatus(node: NodeDef, snap: Snapshot): NodeStatus {
   const role = snap.org_roles.find((r) => r.role === (ROLE_TO_NODE[node.id] ?? ""));
 
-  if (["researcher", "auditor", "adversary", "ceo", "planner", "adjudicator"].includes(node.id)) {
+  if (["researcher", "evaluation", "critic", "pi", "planner", "adjudicator"].includes(node.id)) {
     const running = (role?.running_count ?? 0) > 0;
     const today = role?.runs_today ?? 0;
     return {

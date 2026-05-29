@@ -2,7 +2,7 @@
 Reflection handler — triggered by 'reflection.requested' events.
 
 The 002_skills.sql trigger fires reflection.requested whenever an agent run
-completes that was associated with dissent (audit slop, adversary kill, or
+completes that was associated with dissent (audit slop, critic kill, or
 the run itself being a critic that produced a non-pass verdict).
 
 This handler decides whether the run yields a generalizable lesson. Most
@@ -67,7 +67,7 @@ async def _build_reflection_task_data(ctx: dict, state, memory) -> PromptLayer:
 
     content = f"""## Reflection on a dissenting run
 
-A run just completed that involved dissent (audit slop, adversary kill, or
+A run just completed that involved dissent (audit slop, critic kill, or
 critic non-pass). Decide whether a generalizable lesson can be drawn.
 
 ## The run
@@ -103,7 +103,7 @@ if "reflect.lesson_propose" not in RECIPES:
     RECIPES["reflect.lesson_propose"] = Recipe(
         invocation_type="reflect.lesson_propose",
         description="Decide whether a dissenting run yields a generalizable lesson.",
-        agent="auditor",   # reuse: same skeptical mindset as slop detection
+        agent="evaluation",   # reuse: same skeptical mindset as slop detection
         total_budget=5_000,
         use_cold_path=False,
         recall_sessions=[],
@@ -130,7 +130,7 @@ async def _build_batch_reflection_task_data(ctx: dict, state, memory) -> PromptL
     content = f"""## Reflection across recent dissenting runs
 
 You see {len(runs)} runs from the last batch window. Each is a run that
-involved dissent (audit slop, adversary kill, critic non-pass).
+involved dissent (audit slop, critic kill, critic non-pass).
 
 {body}
 
@@ -144,7 +144,7 @@ Find **recurring** patterns. A lesson is only worth proposing when:
 
 For each lesson, set:
   - `applies_to_invocation`: the invocation_type the lesson targets
-    (e.g. `researcher.synthesize`, `adversary.judge_verdict`).
+    (e.g. `researcher.synthesize`, `critic.judge_verdict`).
   - `applies_when`: a small predicate dict, or {{}} for always.
   - `lesson_text`: the heuristic. Imperative voice. ≤ 1 sentence.
   - `rationale`: which 2+ runs above show the pattern, briefly.
@@ -165,7 +165,7 @@ if "reflect.batch_propose_lessons" not in RECIPES:
     RECIPES["reflect.batch_propose_lessons"] = Recipe(
         invocation_type="reflect.batch_propose_lessons",
         description="Find lessons that recur across a batch of recent dissents.",
-        agent="auditor",
+        agent="evaluation",
         # Larger budget: batch of ~10-20 dissents × 1200 chars each
         total_budget=12_000,
         use_cold_path=False,
@@ -295,11 +295,11 @@ async def _handle_batch_reflection(event: dict, dispatcher) -> Optional[dict]:
               AND started_at > NOW() - INTERVAL '{_BATCH_HOURS} hours'
               -- focus on invocation types where dissent is informative
               AND invocation_type IN (
-                  'adversary.kill_verdict',
+                  'critic.kill_verdict',
                   'adversary.judge_verdict',
-                  'auditor.slop_score',
-                  'auditor.batch_score',
-                  'ceo.thesis_kill'
+                  'evaluation.slop_score',
+                  'evaluation.batch_score',
+                  'pi.claim_verdict'
               )
             ORDER BY started_at DESC LIMIT $1
             """,

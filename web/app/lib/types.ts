@@ -19,8 +19,8 @@ export interface CompanyState {
   charter: string | null;
   paused: boolean;
   paused_reason: string | null;
-  active_claim_count: number;
-  invalidated_claim_count: number;
+  active_claims_count: number;
+  invalidated_claims_count: number;
 }
 
 export interface Claim {
@@ -32,7 +32,7 @@ export interface Claim {
   parent_id: number | null;
   created_at: string;
   updated_at: string;
-  killed_at: string | null;
+  invalidated_at: string | null;
   invalidation_reason: string | null;
   finding_count: number;
   supporting_count: number;
@@ -72,7 +72,7 @@ export interface AgentRun {
 }
 
 export interface DissentItem {
-  kind: "adversary" | "audit-slop";
+  kind: "critic" | "audit-slop";
   id: number;
   claim_id: number;
   detail: string;
@@ -145,7 +145,7 @@ export interface EdgeActivity {
 export interface Snapshot {
   state: CompanyState;
   active_claims: Claim[];
-  killed_claims: Claim[];
+  invalidated_claims: Claim[];
   recent_findings: Finding[];
   recent_runs: AgentRun[];
   dissent: DissentItem[];

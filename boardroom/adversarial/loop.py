@@ -1,6 +1,6 @@
 """
-Adversary loop — four-step refutation hunt replacing the single-shot
-`adversary.kill_verdict`.
+Critic loop — four-step refutation hunt replacing the single-shot
+`critic.kill_verdict`.
 
 Pipeline per finding.high_signal event:
 
@@ -17,12 +17,12 @@ Pipeline per finding.high_signal event:
 
 Why four steps:
 
-The legacy single-shot adversary argues from priors — the prompt at
+The legacy single-shot critic argues from priors — the prompt at
 boardroom/handlers/adversary.py:91-123 hands the model the thesis +
 recent findings and asks "watch / weaken / kill?". There's no actual
 evidence gathering. Multi-step here lets the critic *do its own
 research pass* targeted at the thesis it's attacking, which is the whole
-point of an adversary that isn't just a gut check.
+point of an critic that isn't just a gut check.
 
 Behind `ADVERSARY_LOOP=v2`. Legacy single-call path stays default until
 the loop is validated on real theses.
@@ -42,7 +42,7 @@ from boardroom.mcp_servers.boardroom_research.tools import (
     SearchResult, search_hacker_news, search_reddit, search_web,
 )
 from boardroom.research.fetcher import web_fetch_many
-# Reuse the verdict schema defined alongside the legacy adversary so the
+# Reuse the verdict schema defined alongside the legacy critic so the
 # rest of the handler (state.create_adversary_verdict, kill_thesis,
 # memory.write_message) is unchanged.
 from boardroom.handlers.critic import AdversaryVerdictOut
@@ -57,7 +57,7 @@ _SOURCE_TOOLS = {
 }
 
 
-# Caps. Adversary search budget is intentionally smaller than the researcher's
+# Caps. Critic search budget is intentionally smaller than the researcher's
 # — the goal is a targeted refutation pass, not a deep investigation.
 MAX_PAGES_PER_WEAKPOINT = 3
 MAX_PARALLEL_EXTRACTS = 4
@@ -299,7 +299,7 @@ async def _build_judge_verdict(ctx: dict, state, memory) -> PromptLayer:
 
 Now decide: `watch`, `weaken`, or `kill`.
 
-The bar is higher than the legacy adversary because you actually
+The bar is higher than the legacy critic because you actually
 *looked* — counter-evidence above is what you found, not what you
 inferred. Calibration:
 
@@ -358,10 +358,10 @@ for _itype, _desc, _budget, _schema, _builder in _ADVERSARY_RECIPES:
         RECIPES[_itype] = Recipe(
             invocation_type=_itype,
             description=_desc,
-            agent="adversary",
+            agent="critic",
             total_budget=_budget,
             # judge_verdict pulls dissent + theses-lifecycle for calibration,
-            # same as the legacy adversary recipe.
+            # same as the legacy critic recipe.
             use_cold_path=(_itype == "adversary.judge_verdict"),
             recall_sessions=(
                 ["theses-lifecycle", "dissent"]
@@ -405,7 +405,7 @@ async def run_adversary_loop(
     triggered_by_event_id: Optional[int] = None,
 ) -> tuple[AdversaryVerdictOut, int, list[dict]]:
     """
-    Drive the four-step adversary loop for one thesis.
+    Drive the four-step critic loop for one thesis.
 
     Returns (verdict, judge_run_id, counter_evidence_summary). The caller
     persists the verdict and applies kill/weaken side effects exactly as

@@ -200,7 +200,7 @@ def build_cloud_chain(env: dict) -> list[CloudProvider]:
 
 # Tiers that lead with the premium chain (DeepSeek → OpenAI → GitHub) before the
 # free chain. REASONING = the company's highest-stakes calls. WORKHORSE = the
-# strategy/planning brain (planner.generate_tasks, CEO synthesis/rescore/spawn,
+# strategy/planning brain (planner.generate_tasks, PI synthesis/rescore/spawn,
 # contradiction-hunt) — high-leverage and quality-sensitive, and cheap enough on
 # DeepSeek (~$0.0006/call) to be worth it. FAST/CODE stay free-local (volume).
 PREMIUM_TIERS = {Tier.REASONING, Tier.WORKHORSE}
@@ -257,22 +257,22 @@ def build_premium_chain(env: dict) -> list[CloudProvider]:
 
 ROUTE: dict[str, Tier] = {
     # Reasoning — high-stakes; capped at 50/day (cheap + reliable via DeepSeek)
-    "ceo.thesis_kill":               Tier.REASONING,
-    "ceo.phase_transition_proposal": Tier.REASONING,
-    "ceo.charter_write":             Tier.REASONING,
-    "adversary.kill_verdict":        Tier.REASONING,
+    "pi.claim_verdict":               Tier.REASONING,
+    "pi.phase_transition_ratify": Tier.REASONING,
+    "pi.charter_write":             Tier.REASONING,
+    "critic.kill_verdict":        Tier.REASONING,
 
     # Workhorse — standard strategic / tactical
-    "ceo.exploration_kickoff":       Tier.WORKHORSE,
-    "ceo.weekly_synthesis":          Tier.WORKHORSE,
-    "ceo.thesis_rescore":            Tier.WORKHORSE,
-    "ceo.spawn_replacement":         Tier.WORKHORSE,
+    "pi.exploration_kickoff":       Tier.WORKHORSE,
+    "pi.weekly_synthesis":          Tier.WORKHORSE,
+    "pi.rescore_claims":            Tier.WORKHORSE,
+    "pi.spawn_claim":         Tier.WORKHORSE,
     "planner.generate_tasks":        Tier.WORKHORSE,
-    "adversary.contradiction_hunt":  Tier.WORKHORSE,
+    "critic.contradiction_hunt":  Tier.WORKHORSE,
 
     # Fast — verifiers and high-volume classifiers
-    "auditor.slop_score":            Tier.WORKHORSE,  # upgraded: slop gate needs a reliable, accurate model (DeepSeek), not 429→mistral:7b
-    "auditor.relevance_verify":      Tier.FAST,
+    "evaluation.slop_score":            Tier.WORKHORSE,  # upgraded: slop gate needs a reliable, accurate model (DeepSeek), not 429→mistral:7b
+    "evaluation.relevance_verify":      Tier.FAST,
     "phase_adjudicator.check":       Tier.FAST,
     "curator.compact_recall":        Tier.FAST,
     "reflect.lesson_propose":        Tier.FAST,
@@ -296,15 +296,15 @@ ROUTE: dict[str, Tier] = {
     "researcher.interpret_experiment": Tier.WORKHORSE,
     "researcher.parse_pricing":        Tier.CODE,
 
-    # Auditor v2 loop (AUDITOR_LOOP=v2). cross_check is per-finding and
+    # Evaluation v2 loop (AUDITOR_LOOP=v2). cross_check is per-finding and
     # fans out wide, so it lands on the same WORKHORSE tier as slop_score
     # to inherit the DeepSeek-led premium chain (calibration + groundedness
     # judgments need the reliable model). batch_score is pure aggregation
     # over compact structured input — FAST is enough.
-    "auditor.cross_check_finding":     Tier.WORKHORSE,
-    "auditor.batch_score":             Tier.FAST,
+    "evaluation.cross_check_finding":     Tier.WORKHORSE,
+    "evaluation.batch_score":             Tier.FAST,
 
-    # Adversary v2 loop (ADVERSARY_LOOP=v2). judge_verdict inherits the
+    # Critic v2 loop (ADVERSARY_LOOP=v2). judge_verdict inherits the
     # legacy REASONING tier — the final kill/weaken decision is the
     # highest-stakes call in the loop. plan_attack is strategy + needs
     # reliable JSON, WORKHORSE. extract_counter is per-page like the
@@ -331,7 +331,7 @@ DAILY_CAPS: dict[Tier, int] = {
     # Bumped 800 → 4000 (2026-05-28). Two compounding pressures: (1) every
     # researcher loop hits WORKHORSE 4-5× (plan_inquiry, interpret_experiment,
     # synthesize, gap_check), (2) the v2 reworks add more WORKHORSE calls per
-    # invocation (adversary plan_attack + judge_verdict, auditor cross_check
+    # invocation (adversary plan_attack + judge_verdict, evaluation cross_check
     # per-finding, planner assess+propose+critique). At 800 we capped daily
     # and degraded everything to local qwen3:14b — 30-60s per call — which
     # starved the dispatcher's 4 concurrent slots. DeepSeek is ~$0.0006/call,

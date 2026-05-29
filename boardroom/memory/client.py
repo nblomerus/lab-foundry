@@ -8,8 +8,8 @@ specific entity's story needs to be retrievable by id.
 Sessions used in boardroom:
     theses-lifecycle    one message per thesis event
     phase-transitions   one message per phase change
-    ceo-deliberations   CEO's working-out for non-trivial decisions
-    dissent             adversary verdicts + auditor slop flags
+    pi-deliberations   PI's working-out for non-trivial decisions
+    dissent             critic verdicts + evaluation slop flags
     charter             written at commitment, immutable
 
 The Graphiti graph extracts entities and relationships automatically;
@@ -165,7 +165,7 @@ class ZepClient:
         Returns the Zep message uuid (or '' if unavailable / failure).
 
         v3 messages carry a constrained `role` enum plus a free-form `name`;
-        boardroom's logical role ("ceo", "adversary", …) goes in `name`, and
+        boardroom's logical role ("pi", "adversary", …) goes in `name`, and
         everything the company writes is assistant-authored.
 
         Best-effort: a Zep 429 / network blip / API drift must not blow up the

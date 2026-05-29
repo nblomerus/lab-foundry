@@ -27,10 +27,10 @@ interface AgentSpec {
 
 const PRIMARY_FLOW: AgentSpec[] = [
   {
-    key: "ceo",
-    name: "CEO",
+    key: "pi",
+    name: "PI",
     cadence: "Strategic · R-tier",
-    reads: "Findings, killed claims",
+    reads: "Findings, invalidated claims",
     writes: "Claims, charter, kill verdicts",
     icon: BrainCircuit,
   },
@@ -54,15 +54,15 @@ const PRIMARY_FLOW: AgentSpec[] = [
 
 const CRITICS: AgentSpec[] = [
   {
-    key: "auditor",
-    name: "Auditor",
-    cadence: "Every finding · F-tier",
+    key: "evaluation",
+    name: "Evaluation",
+    cadence: "Every finding · W-tier",
     reads: "Findings",
     writes: "Pass / slop / unclear",
     icon: ShieldCheck,
   },
   {
-    key: "adversary",
+    key: "critic",
     name: "Critic",
     cadence: "High-signal · W/R-tier",
     reads: "Claims + findings",
@@ -261,7 +261,7 @@ export function WorkflowLoop({
             <p className="mt-1 max-w-2xl text-sm text-slate-300">
               {live.state === "stalled"
                 ? "The autonomous loop isn't producing events. The harness may be down or wedged — restart it (make harness) to re-ignite."
-                : "Findings get audited, kills get reviewed, phases transition on data. The Adjudicator decides; the CEO ratifies; you watch."}
+                : "Findings get audited, kills get reviewed, phases transition on data. The Adjudicator decides; the PI ratifies; you watch."}
             </p>
           </div>
           <a

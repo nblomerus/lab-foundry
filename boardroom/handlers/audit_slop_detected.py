@@ -1,7 +1,7 @@
 """
 Audit slop circuit-breaker handler — triggered by 'audit.slop_detected'.
 
-When the Auditor's slop rate on a claim exceeds 40% over 5+ findings, this
+When the Evaluation's slop rate on a claim exceeds 40% over 5+ findings, this
 handler:
 
   1. Halts all pending research tasks for that claim.

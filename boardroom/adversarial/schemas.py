@@ -1,5 +1,5 @@
 """
-Adversary loop schemas.
+Critic loop schemas.
 
 Four stages:
   - AttackPlan          (plan_attack)  — name the weak assumptions worth attacking

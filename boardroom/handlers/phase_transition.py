@@ -1,8 +1,8 @@
 """
-CEO phase-transition ratification handler — 'phase.transition_proposed'.
+PI phase-transition ratification handler — 'phase.transition_proposed'.
 
 The Adjudicator (or the watchdog forcing function) emits transition
-proposals. The CEO ratifies, rejects, or defers. R-tier (highest stakes).
+proposals. The PI ratifies, rejects, or defers. R-tier (highest stakes).
 
 Special case: when ratifying a move to commitment OR execution, the SAME
 invocation writes the full charter and transitions straight to execution
@@ -113,14 +113,14 @@ Actions:
     return PromptLayer(name="task_data", content=content, priority=1)
 
 
-if "ceo.phase_transition_proposal" not in RECIPES:
-    RECIPES["ceo.phase_transition_proposal"] = Recipe(
-        invocation_type="ceo.phase_transition_proposal",
-        description="CEO ratifies, rejects, or defers a phase transition; writes charter on commit.",
-        agent="ceo",
+if "pi.phase_transition_ratify" not in RECIPES:
+    RECIPES["pi.phase_transition_ratify"] = Recipe(
+        invocation_type="pi.phase_transition_ratify",
+        description="PI ratifies, rejects, or defers a phase transition; writes charter on commit.",
+        agent="pi",
         total_budget=15_000,
         use_cold_path=True,
-        recall_sessions=["claims-lifecycle", "ceo-deliberations", "phase-transitions"],
+        recall_sessions=["claims-lifecycle", "pi-deliberations", "phase-transitions"],
         recall_k=10,
         output_schema="PhaseTransitionDecision",
         task_data_builder=_build_phase_transition_task_data,
@@ -133,7 +133,7 @@ if "ceo.phase_transition_proposal" not in RECIPES:
 
 async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[dict]:
     """
-    Triggered by phase.transition_proposed. CEO ratifies, rejects, or defers.
+    Triggered by phase.transition_proposed. PI ratifies, rejects, or defers.
     On ratify → commitment/execution: writes charter, marks losing claims
     'merged', transitions company_state straight to execution.
     """
@@ -149,7 +149,7 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
         }
 
     prompt = await dispatcher.curator.build(
-        invocation_type="ceo.phase_transition_proposal",
+        invocation_type="pi.phase_transition_ratify",
         context={
             "from_phase":            from_phase,
             "target_phase":          target_phase,
@@ -181,8 +181,8 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
     if decision.action == "reject":
         await dispatcher.memory.write_message(
             session_id="phase-transitions",
-            content=f"CEO REJECTED {from_phase} → {target_phase}. {decision.reasoning}",
-            role_type="ceo",
+            content=f"PI REJECTED {from_phase} → {target_phase}. {decision.reasoning}",
+            role_type="pi",
             metadata={"run_id": run_id},
         )
         return result
@@ -197,8 +197,8 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
         )
         await dispatcher.memory.write_message(
             session_id="phase-transitions",
-            content=f"CEO DEFERRED {from_phase} → {target_phase}. {decision.reasoning}",
-            role_type="ceo",
+            content=f"PI DEFERRED {from_phase} → {target_phase}. {decision.reasoning}",
+            role_type="pi",
             metadata={"run_id": run_id},
         )
         return result
@@ -297,7 +297,7 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
     await dispatcher.memory.write_message(
         session_id="phase-transitions",
         content=narrative,
-        role_type="ceo",
+        role_type="pi",
         metadata={
             "run_id": run_id,
             "from_phase": from_phase,
@@ -308,7 +308,7 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> Optional[
         await dispatcher.memory.write_message(
             session_id="charter",
             content=decision.charter.model_dump_json(indent=2),
-            role_type="ceo",
+            role_type="pi",
             metadata={"run_id": run_id},
         )
 

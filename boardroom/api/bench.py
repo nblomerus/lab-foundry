@@ -50,9 +50,9 @@ from boardroom.handlers import (  # noqa: F401
 import boardroom.research.loop          # noqa: F401  (registers researcher.* recipes)
 import boardroom.research.experiments   # noqa: F401  (registers researcher.parse_pricing)
 from boardroom.research import schemas as research_schemas  # noqa: F401
-import boardroom.audit.loop             # noqa: F401  (registers auditor.cross_check_finding / batch_score)
+import boardroom.audit.loop             # noqa: F401  (registers evaluation.cross_check_finding / batch_score)
 from boardroom.audit import schemas as audit_schemas  # noqa: F401
-import boardroom.adversarial.loop       # noqa: F401  (registers adversary.plan_attack / extract_counter / …)
+import boardroom.adversarial.loop       # noqa: F401  (registers critic.plan_attack / extract_counter / …)
 from boardroom.adversarial import schemas as adversarial_schemas  # noqa: F401
 import boardroom.planner.loop           # noqa: F401  (registers planner.assess_state / propose_tasks / critique)
 from boardroom.planner import schemas as planner_schemas  # noqa: F401
@@ -63,12 +63,12 @@ router = APIRouter(prefix="/bench", tags=["bench"])
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
 # Sessions Zep expects (mirror of harness.main.ZEP_SESSIONS).
-ZEP_SESSIONS = ["theses-lifecycle", "phase-transitions", "ceo-deliberations", "dissent", "charter"]
+ZEP_SESSIONS = ["theses-lifecycle", "phase-transitions", "pi-deliberations", "dissent", "charter"]
 
 # Tasks whose prompt is grounded in a specific thesis (so the UI offers a
 # thesis picker). Everything else builds from global company state.
 THESIS_SCOPED = {
-    "adversary.kill_verdict", "ceo.thesis_kill",
+    "critic.kill_verdict", "pi.claim_verdict",
     "researcher.execute_task", "researcher.summarize_source",
     # The new loop's invocation types pick from real recorded inquiries /
     # evidence; benching is scoped by which task we replay.
@@ -158,7 +158,7 @@ def _build_schema_registry() -> dict[str, type[BaseModel]]:
     from boardroom.adversarial import schemas as adversarial_schemas_mod
     from boardroom.planner import schemas as planner_schemas_mod
     mods = [
-        bootstrap, curator_mod, researcher, adversary, thesis_invalidated,
+        bootstrap, curator_mod, researcher, critic, thesis_invalidated,
         queue_empty, phase_adjudicator, phase_transition, reflection, task_completed,
         research_schemas_mod, fp_mod, audit_schemas_mod, adversarial_schemas_mod,
         planner_schemas_mod,
@@ -196,10 +196,10 @@ async def _any_active_claim_id(state) -> Optional[int]:
 async def build_context(engine: BenchEngine, invocation_type: str, claim_id: Optional[int]):
     state, pool = engine.state, engine.pool
 
-    if invocation_type in ("ceo.exploration_kickoff", "planner.generate_tasks"):
+    if invocation_type in ("pi.exploration_kickoff", "planner.generate_tasks"):
         return {}, "Built from global company state — no extra context."
 
-    if invocation_type == "adversary.kill_verdict":
+    if invocation_type == "critic.kill_verdict":
         tid = claim_id or await _any_active_claim_id(state)
         if tid is None:
             raise BenchContextError("No active thesis to evaluate.")
@@ -210,7 +210,7 @@ async def build_context(engine: BenchEngine, invocation_type: str, claim_id: Opt
             ctx["triggering_finding_id"] = fid
         return ctx, f"Thesis T{tid}" + (f", triggered by finding F{fid}" if fid else "")
 
-    if invocation_type == "ceo.thesis_kill":
+    if invocation_type == "pi.claim_verdict":
         tid = claim_id or await _any_active_claim_id(state)
         if tid is None:
             raise BenchContextError("No active thesis.")
@@ -219,8 +219,8 @@ async def build_context(engine: BenchEngine, invocation_type: str, claim_id: Opt
         if vid is None:
             vid = await pool.fetchval("SELECT id FROM critic_verdicts ORDER BY created_at DESC LIMIT 1")
         if vid is None:
-            raise BenchContextError("No adversary verdict exists yet to act on.")
-        return {"claim_id": tid, "adversary_verdict_id": vid}, f"Thesis T{tid}, verdict #{vid}"
+            raise BenchContextError("No critic verdict exists yet to act on.")
+        return {"claim_id": tid, "critic_verdict_id": vid}, f"Thesis T{tid}, verdict #{vid}"
 
     if invocation_type in ("researcher.execute_task", "researcher.summarize_source"):
         task_id = await pool.fetchval(
@@ -239,7 +239,7 @@ async def build_context(engine: BenchEngine, invocation_type: str, claim_id: Opt
             ctx["raw_material"] = "\n\n".join(f"{r['title']}\n{r['summary']}" for r in rows)
         return ctx, f"Task #{task_id}" + (f" + {len(rows)} findings as raw material" if rows else "")
 
-    if invocation_type == "auditor.slop_score":
+    if invocation_type == "evaluation.slop_score":
         task_id = await pool.fetchval(
             "SELECT task_id FROM findings GROUP BY task_id ORDER BY MAX(created_at) DESC LIMIT 1")
         if task_id is None:
@@ -259,7 +259,7 @@ async def build_context(engine: BenchEngine, invocation_type: str, claim_id: Opt
         return ({"invocation_type": row["invocation_type"], "run_summary": row["output_summary"]},
                 f"Reflecting on a {row['invocation_type']} run")
 
-    if invocation_type == "ceo.phase_transition_proposal":
+    if invocation_type == "pi.phase_transition_ratify":
         s = await state.get_company_state()
         nxt = {"exploration": "convergence", "convergence": "commitment",
                "commitment": "execution"}.get(s.current_phase, "convergence")
@@ -277,12 +277,12 @@ async def build_context(engine: BenchEngine, invocation_type: str, claim_id: Opt
         return ({"current_phase": s.current_phase, "days_in_phase": days, "theses_summary": summary},
                 f"Phase {s.current_phase}, day {days}, {len(theses)} theses")
 
-    if invocation_type == "ceo.spawn_replacement":
+    if invocation_type == "pi.spawn_claim":
         kid = await pool.fetchval(
-            "SELECT id FROM claims WHERE status IN ('invalidated','merged') ORDER BY killed_at DESC NULLS LAST LIMIT 1")
+            "SELECT id FROM claims WHERE status IN ('invalidated','merged') ORDER BY invalidated_at DESC NULLS LAST LIMIT 1")
         if kid is None:
             raise BenchContextError("No killed thesis to replace.")
-        return {"killed_claim_id": kid}, f"Replacing killed thesis T{kid}"
+        return {"invalidated_claim_id": kid}, f"Replacing killed thesis T{kid}"
 
     # -- New agentic researcher loop bench contexts -----------------------
 

@@ -11,7 +11,7 @@ investigation:
 Each step is its own LLM invocation type so the Debug research-tree view can
 dissect them independently. The orchestrator persists `research_inquiries` and
 `evidence` along the way, and emits final `findings` in the legacy shape so
-the auditor / adversary / CEO paths see no schema change.
+the evaluation / critic / PI paths see no schema change.
 
 The four curator recipes for the new invocation types are registered at
 module load (mirroring `boardroom/handlers/task_completed.py:105-116`).

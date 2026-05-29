@@ -3,8 +3,8 @@ Schemas for the agentic researcher loop.
 
 Each step of the loop has its own output schema so the LLM call is bounded
 and the structured output stays JSON-disciplined. The final `Synthesis`
-emits the legacy `FindingOut` shape so the downstream auditor / adversary /
-CEO paths see no change.
+emits the legacy `FindingOut` shape so the downstream evaluation / critic /
+PI paths see no change.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class EvidenceBatch(BaseModel):
 class FindingOut(BaseModel):
     """The synthesized finding written to the `findings` table.
 
-    Matches the legacy researcher.execute_task output so the auditor and
+    Matches the legacy researcher.execute_task output so the evaluation and
     downstream consumers don't change.
     """
     source: Literal["hacker_news", "arxiv", "reddit", "web", "other"]

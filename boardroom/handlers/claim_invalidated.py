@@ -1,7 +1,7 @@
 """
-CEO handler — triggered by 'claim.invalidated' events.
+PI handler — triggered by 'claim.invalidated' events.
 
-When the Adversary kills a claim, the CEO decides what to do next:
+When the Critic kills a claim, the PI decides what to do next:
 
   - spawn:     1-2 new replacement categories with disambiguating tasks
   - no_action: the loss is fine; existing siblings cover the space
@@ -56,10 +56,10 @@ class SpawnReplacementDecision(BaseModel):
 # -------------------------------------------------------------------------
 
 async def _build_spawn_replacement_task_data(ctx: dict, state, memory) -> PromptLayer:
-    killed_claim_id = ctx["killed_claim_id"]
+    invalidated_claim_id = ctx["invalidated_claim_id"]
 
-    killed_thesis, siblings = await asyncio.gather(
-        state.get_claim(killed_claim_id),
+    invalidated_thesis, siblings = await asyncio.gather(
+        state.get_claim(invalidated_claim_id),
         state.get_active_claims(limit=20),
     )
 
@@ -71,10 +71,10 @@ async def _build_spawn_replacement_task_data(ctx: dict, state, memory) -> Prompt
     content = f"""## A claim was just killed — what's next?
 
 ## The killed claim
-**Claim:** {killed_thesis.claim}
-**Born:** {killed_thesis.created_at:%Y-%m-%d}
-**Final confidence:** {killed_thesis.confidence:.2f}
-**Kill reason:** {killed_thesis.kill_reason or '(none recorded)'}
+**Claim:** {invalidated_thesis.claim}
+**Born:** {invalidated_thesis.created_at:%Y-%m-%d}
+**Final confidence:** {invalidated_thesis.confidence:.2f}
+**Kill reason:** {invalidated_thesis.kill_reason or '(none recorded)'}
 
 ## Currently active siblings
 {sibling_lines}
@@ -102,11 +102,11 @@ Padding the slate is worse than fewer-but-real categories.
 if "pi.spawn_claim" not in RECIPES:
     RECIPES["pi.spawn_claim"] = Recipe(
         invocation_type="pi.spawn_claim",
-        description="CEO decides whether to spawn replacements after a claim is killed.",
+        description="PI decides whether to spawn replacements after a claim is killed.",
         agent="pi",
         total_budget=8_000,
         use_cold_path=True,
-        recall_sessions=["claims-lifecycle", "ceo-deliberations"],
+        recall_sessions=["claims-lifecycle", "pi-deliberations"],
         recall_k=8,
         output_schema="SpawnReplacementDecision",
         task_data_builder=_build_spawn_replacement_task_data,
@@ -119,13 +119,13 @@ if "pi.spawn_claim" not in RECIPES:
 
 async def handle_claim_invalidated(event: dict, dispatcher) -> Optional[dict]:
     """
-    Triggered by claim.invalidated. CEO decides how to respond.
+    Triggered by claim.invalidated. PI decides how to respond.
     """
-    killed_claim_id = event["target_id"]
+    invalidated_claim_id = event["target_id"]
 
     prompt = await dispatcher.curator.build(
         invocation_type="pi.spawn_claim",
-        context={"killed_claim_id": killed_claim_id},
+        context={"invalidated_claim_id": invalidated_claim_id},
     )
 
     decision, run_id = await dispatcher.router.invoke(
@@ -135,7 +135,7 @@ async def handle_claim_invalidated(event: dict, dispatcher) -> Optional[dict]:
     )
 
     result: dict = {
-        "killed_claim_id": killed_claim_id,
+        "invalidated_claim_id": invalidated_claim_id,
         "action": decision.action,
         "run_id": run_id,
     }
@@ -146,7 +146,7 @@ async def handle_claim_invalidated(event: dict, dispatcher) -> Optional[dict]:
             claim = await dispatcher.state.create_claim(
                 claim=cat.claim,
                 initial_confidence=0.40,
-                parent_id=killed_claim_id,
+                parent_id=invalidated_claim_id,
                 created_by_run_id=run_id,
             )
             new_claim_ids.append(claim.id)
@@ -180,14 +180,14 @@ async def handle_claim_invalidated(event: dict, dispatcher) -> Optional[dict]:
         result["pivoted_claim_id"] = decision.pivot_claim_id
 
     await dispatcher.memory.write_message(
-        session_id="ceo-deliberations",
+        session_id="pi-deliberations",
         content=(
-            f"On the kill of T{killed_claim_id}: action={decision.action}. "
+            f"On the kill of T{invalidated_claim_id}: action={decision.action}. "
             f"Reasoning: {decision.reasoning}"
         ),
         role_type="pi",
         metadata={
-            "killed_claim_id": killed_claim_id,
+            "invalidated_claim_id": invalidated_claim_id,
             "run_id": run_id,
             "action": decision.action,
         },
