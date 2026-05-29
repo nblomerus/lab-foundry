@@ -1,7 +1,7 @@
 "use client";
 
 import { Target } from "lucide-react";
-import type { Thesis } from "../lib/types";
+import type { Claim } from "../lib/types";
 import { Badge, Card, SectionTitle, Progress } from "./ui";
 
 function deltaPill(t: Claim): { label: string; tone: "green" | "red" | "default" } {
@@ -18,11 +18,11 @@ export function ClaimsPanel({ claims }: { claims: Claim[] }) {
       <SectionTitle
         icon={Target}
         title="Active claims"
-        subtitle="Candidate businesses. Ranked by confidence."
+        subtitle="Candidate claims grounded in evidence. Ranked by confidence."
       />
       {claims.length === 0 ? (
         <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
-          No active claims. CEO needs to spawn replacements.
+          No active claims. PI needs to spawn fresh hypotheses.
         </div>
       ) : (
         <div className="space-y-3">
@@ -38,7 +38,7 @@ export function ClaimsPanel({ claims }: { claims: Claim[] }) {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-semibold text-slate-400">T{t.id}</span>
+                      <span className="text-xs font-semibold text-slate-400">C{t.id}</span>
                       <Badge tone={t.confidence >= 0.7 ? "green" : "default"}>
                         {t.status}
                       </Badge>
