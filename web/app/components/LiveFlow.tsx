@@ -78,6 +78,48 @@ function deriveNodeStatus(node: NodeDef, snap: Snapshot, power?: PowerSummary | 
     };
   }
 
+  if (node.id === "ingest") {
+    return {
+      tone: "idle",
+      badge: "planned",
+      current: "arXiv · web · repos · datasets",
+      details: [
+        "Pulls papers, media, datasets + research material",
+        "chunk + embed → RAG corpus",
+        "extract entities → knowledge graph",
+        "ingest pipeline: to build (see knowledge-layer scope)",
+      ],
+    };
+  }
+
+  if (node.id === "rag") {
+    return {
+      tone: "idle",
+      badge: "planned",
+      current: "papers · media · datasets",
+      details: [
+        "Vector corpus the Researcher retrieves from",
+        "stores embedded research material + chunks",
+        "complements live web search (kept)",
+        "backend: pgvector + embed pipeline (to build)",
+      ],
+    };
+  }
+
+  if (node.id === "kg") {
+    return {
+      tone: "active",
+      badge: "Neo4j",
+      current: "claims · findings · verdicts",
+      details: [
+        "Evidence graph (Neo4j) — already live",
+        "Claim ← Finding (grounds), CriticVerdict challenges",
+        "to add: Paper / Dataset / Source / Author nodes",
+        "queried for provenance + multi-hop evidence",
+      ],
+    };
+  }
+
   const role = snap.org_roles.find((r) => r.role === (ROLE_TO_NODE[node.id] ?? ""));
 
   if (["researcher", "evaluation", "critic", "pi", "planner", "adjudicator"].includes(node.id)) {
@@ -150,17 +192,18 @@ function deriveNodeStatus(node: NodeDef, snap: Snapshot, power?: PowerSummary | 
     };
   }
 
-  const inFlight = node.id === "hn"     ? snap.stats.source_hn_in_flight
-                 : node.id === "reddit" ? snap.stats.source_reddit_in_flight
-                 :                        snap.stats.source_web_in_flight;
-  const endpoint = node.id === "hn"     ? "hn.algolia.com"
-                 : node.id === "reddit" ? "reddit.com"
-                 :                        "duckduckgo.com";
+  // Live web search (the remaining source node). In-flight fetch count drives
+  // the live/idle state; the Researcher uses this alongside corpus retrieval.
+  const inFlight = snap.stats.source_web_in_flight;
   return {
     tone: inFlight > 0 ? "running" : "idle",
     badge: inFlight > 0 ? `${inFlight} live` : "idle",
-    current: inFlight > 0 ? "polling now" : "no live calls",
-    details: [`endpoint: ${endpoint}`, `${inFlight} tasks fetching now`, inFlight > 0 ? "live" : "waiting"],
+    current: inFlight > 0 ? "searching now" : "no live calls",
+    details: [
+      "live web search (SearXNG / DuckDuckGo)",
+      `${inFlight} fetches in flight`,
+      "kept alongside RAG retrieval for fresh material",
+    ],
   };
 }
 
@@ -889,7 +932,7 @@ export function LiveFlow({ snapshot, power }: { snapshot: Snapshot; power?: Powe
             <div className="absolute inset-0 bg-[radial-gradient(rgba(148,163,184,.18)_1px,_transparent_1px)] bg-[size:24px_24px]" />
 
             <div className="pointer-events-none absolute inset-x-0 top-3 z-10 grid grid-cols-5 px-3 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-              <div className="text-center">Discover</div>
+              <div className="text-center">Knowledge</div>
               <div className="text-center">Gather</div>
               <div className="text-center">Judge</div>
               <div className="text-center">Synthesise</div>

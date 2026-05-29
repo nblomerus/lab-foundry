@@ -8,8 +8,8 @@
 
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity, BrainCircuit, Eye, GitBranch, Layers3, Network,
-  Search, ShieldCheck, Target, Telescope, TerminalSquare, Wallet,
+  Activity, BrainCircuit, Database, Eye, Globe, GitBranch, Inbox, Layers3,
+  Network, Search, ShieldCheck, Target, Telescope, TerminalSquare, Wallet,
 } from "lucide-react";
 
 // =========================================================================
@@ -84,35 +84,44 @@ export interface EdgeDef {
 // =========================================================================
 
 export const NODES: NodeDef[] = [
-  { id: "hn",          label: "Hacker News",  type: "Source", icon: Search,         x: 9,  y: 16 },
-  { id: "reddit",      label: "Reddit",       type: "Source", icon: Network,        x: 9,  y: 38 },
-  { id: "web",         label: "Web (DDG)",    type: "Source", icon: Network,        x: 9,  y: 60 },
+  // Knowledge layer — the lab's durable substrate. Material is ingested into a
+  // RAG corpus (papers, media, datasets) and an evidence knowledge graph; the
+  // Researcher retrieves from both.
+  { id: "ingest",      label: "Ingestion",      type: "Source", icon: Inbox,    x: 9,  y: 16 },
+  { id: "rag",         label: "RAG Corpus",     type: "Store",  icon: Database, x: 9,  y: 38 },
+  { id: "kg",          label: "Knowledge Graph", type: "Store", icon: Network,  x: 9,  y: 60 },
 
+  // Resource warden — watches budget + GPU; gates the queue on the spend cap.
+  { id: "quartermaster", label: "Quartermaster", type: "Warden", icon: Wallet,  x: 9,  y: 84 },
+
+  // Gather — live web search stays a first-class tool alongside corpus retrieval.
+  { id: "web",         label: "Web search",   type: "Source", icon: Globe,          x: 29, y: 14 },
   { id: "researcher",  label: "Researcher",   type: "Agent",  icon: Search,         x: 29, y: 38 },
   { id: "tasks",       label: "Tasks",        type: "Queue",  icon: TerminalSquare, x: 29, y: 84 },
 
-  // Resource warden — watches budget + GPU across the whole loop. Not part of
-  // the research dataflow; sits bottom-left and gates the work queue when the
-  // spend cap is hit.
-  { id: "quartermaster", label: "Quartermaster", type: "Warden", icon: Wallet,    x: 9,  y: 84 },
-
   { id: "findings",    label: "Findings",     type: "Store",  icon: Eye,            x: 49, y: 38 },
-  { id: "evaluation",     label: "Evaluation",      type: "Critic", icon: ShieldCheck,    x: 49, y: 64 },
+  { id: "evaluation",  label: "Evaluation",   type: "Critic", icon: ShieldCheck,    x: 49, y: 64 },
   { id: "planner",     label: "Planner",      type: "Agent",  icon: GitBranch,      x: 49, y: 92 },
 
-  { id: "critic",   label: "Critic",    type: "Critic", icon: Telescope,      x: 70, y: 16 },
+  { id: "critic",      label: "Critic",       type: "Critic", icon: Telescope,      x: 70, y: 16 },
   { id: "claims",      label: "Claims",       type: "Store",  icon: Target,         x: 70, y: 52 },
 
-  { id: "pi",         label: "PI",          type: "Agent",  icon: BrainCircuit,   x: 90, y: 16 },
+  { id: "pi",          label: "PI",           type: "Agent",  icon: BrainCircuit,   x: 90, y: 16 },
   { id: "adjudicator", label: "Adjudicator",  type: "Agent",  icon: Activity,       x: 90, y: 52 },
   { id: "phase",       label: "Phase",        type: "Phase",  icon: Layers3,        x: 90, y: 84 },
 ];
 
 export const EDGES: EdgeDef[] = [
-  // Sources fan into Researcher.left at three vertical offsets
-  { id: "hn-r",      from: "hn",          fromSide: "right",  to: "researcher", toSide: "left",   toOffset: -0.35, label: "stories",         event_type: "_source_hn" },
-  { id: "reddit-r",  from: "reddit",      fromSide: "right",  to: "researcher", toSide: "left",                    label: "threads",         event_type: "_source_reddit" },
-  { id: "web-r",     from: "web",         fromSide: "right",  to: "researcher", toSide: "left",   toOffset: +0.35, label: "pages",           event_type: "_source_web" },
+  // Knowledge pipeline: ingest → RAG corpus → knowledge graph (vertical, col 0).
+  { id: "i-rag",     from: "ingest",      fromSide: "bottom", to: "rag",        toSide: "top",                     label: "chunk + embed",   event_type: "_ingest" },
+  { id: "rag-kg",    from: "rag",         fromSide: "bottom", to: "kg",         toSide: "top",                     label: "extract entities",event_type: "_ingest" },
+
+  // Retrieval: Researcher pulls from the corpus and the graph.
+  { id: "rag-res",   from: "rag",         fromSide: "right",  to: "researcher", toSide: "left",   toOffset: -0.3,  label: "retrieve",        event_type: "_retrieve" },
+  { id: "kg-res",    from: "kg",          fromSide: "right",  to: "researcher", toSide: "left",   toOffset: +0.3,  label: "graph query",     event_type: "_retrieve" },
+
+  // Live web search stays a first-class tool feeding the Researcher.
+  { id: "web-res",   from: "web",         fromSide: "bottom", to: "researcher", toSide: "top",                     label: "live search",     event_type: "_source_web" },
 
   // Pipeline
   { id: "tasks-r",   from: "tasks",       fromSide: "top",    to: "researcher", toSide: "bottom",                  label: "claim",           event_type: "task.created" },
