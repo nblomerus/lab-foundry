@@ -50,21 +50,24 @@ One new handler, `handle_agent_request`, registered for `agent.request`. It:
 This reuses the dispatcher's single-handler-per-event rule — the *fan-out by
 target* happens inside the one handler, not by registering many handlers.
 
-### Allow-list (who may call whom)
+### Allow-list (who may call whom) — peer-to-peer, agreed
 
-Not a free-for-all — a small, explicit matrix keeps it legible and prevents
-runaway chatter:
+Delegation is **peer-to-peer** (not PI-only), but still an explicit matrix so it
+stays legible and can't turn into runaway chatter. This is the agreed set
+(mirrors the per-agent spec in `AGENT_OPERATING_MODEL.md`):
 
 | From → To | intent | why |
 |---|---|---|
 | Critic → Researcher | `investigate` | "I need evidence on X to settle a challenge" |
-| PI → Critic | `challenge` | "stress-test C14 before I commit" |
+| Evaluation → Researcher | `re-source` | "this finding is thin — re-source it" |
+| Researcher → Evaluation | `verify` | "is this finding grounded enough?" |
 | PI → Researcher | `investigate` | "explore this gap" |
-| Evaluation → Researcher | `verify` | "this finding is thin — re-source it" |
+| PI → Critic | `challenge` | "stress-test C14 before I commit" |
 | Planner → PI | `prioritise` | "portfolio is stale, which directions?" |
 | Adjudicator → Critic | `verify` | "confirm before phase advance" |
 
-Anything not in the matrix is rejected and logged.
+Anything not in the matrix is rejected and logged. New pairs are added here
+explicitly as real needs appear.
 
 ## Guardrails (non-negotiable)
 
