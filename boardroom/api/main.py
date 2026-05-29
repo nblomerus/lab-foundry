@@ -32,7 +32,7 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from boardroom.api import snapshot, stream, bench, debug, trace
+from boardroom.api import snapshot, stream, bench, debug, trace, knowledge
 
 
 async def _init_conn(conn: asyncpg.Connection) -> None:
@@ -91,6 +91,7 @@ app.include_router(stream.router)
 app.include_router(bench.router)
 app.include_router(debug.router)
 app.include_router(trace.router)
+app.include_router(knowledge.router)
 
 
 @app.get("/health")

@@ -1,5 +1,6 @@
 # Runtime
 asyncpg
+pgvector  # asyncpg vector codec (pgvector.asyncpg.register_vector) for labfoundry_corpus
 neo4j>=5.0,<6
 httpx
 pydantic
