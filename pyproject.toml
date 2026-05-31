@@ -53,4 +53,7 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
-# fail_under is intentionally NOT set yet — ratchet up as coverage grows.
+# Coverage floor enforced by CI (pytest-cov reads this). DB-backed tests skip
+# without DATABASE_URL, so this is the unit-level floor — ratchet up as the
+# suite grows / a pgvector service is added to CI.
+fail_under = 22

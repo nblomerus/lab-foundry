@@ -13,6 +13,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  BADGE_GIST_ID: ab1796b050ea71cedf5f34a92544aa82
+
 jobs:
   lint:
     name: Lint & Format
@@ -82,3 +85,74 @@ jobs:
           name: coverage-report
           path: coverage.xml
           retention-days: 14
+
+  badges:
+    name: Update Badges
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+
+      - name: Extract coverage percentage
+        id: coverage
+        run: |
+          COV=$(python3 -c "
+          import xml.etree.ElementTree as ET
+          rate = float(ET.parse('coverage.xml').getroot().attrib['line-rate'])
+          print(int(rate * 100))
+          ")
+          echo "pct=$COV" >> "$GITHUB_OUTPUT"
+          if   [ "$COV" -ge 90 ]; then echo "color=brightgreen" >> "$GITHUB_OUTPUT"
+          elif [ "$COV" -ge 75 ]; then echo "color=green"       >> "$GITHUB_OUTPUT"
+          elif [ "$COV" -ge 60 ]; then echo "color=yellow"      >> "$GITHUB_OUTPUT"
+          else                         echo "color=red"         >> "$GITHUB_OUTPUT"; fi
+
+      - name: Read version
+        id: version
+        run: echo "ver=$(cat version)" >> "$GITHUB_OUTPUT"
+
+      - name: Read Python version
+        id: python
+        run: echo "ver=$(grep 'PYTHON_VERSION' Makefile | head -1 | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Update coverage badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ env.BADGE_GIST_ID }}
+          filename: coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.pct }}%
+          color: ${{ steps.coverage.outputs.color }}
+
+      - name: Update version badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ env.BADGE_GIST_ID }}
+          filename: version.json
+          label: version
+          message: ${{ steps.version.outputs.ver }}
+          color: blue
+
+      - name: Update Python badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ env.BADGE_GIST_ID }}
+          filename: python.json
+          label: python
+          message: ${{ steps.python.outputs.ver }}
+          color: blue

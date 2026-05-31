@@ -1,5 +1,10 @@
 # LabFoundry
 
+[![CI](https://github.com/nblomerus/lab-foundry/actions/workflows/ci.yml/badge.svg)](https://github.com/nblomerus/lab-foundry/actions/workflows/ci.yml)
+![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/nblomerus/ab1796b050ea71cedf5f34a92544aa82/raw/coverage.json)
+![Python](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/nblomerus/ab1796b050ea71cedf5f34a92544aa82/raw/python.json)
+![Version](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/nblomerus/ab1796b050ea71cedf5f34a92544aa82/raw/version.json)
+
 An **autonomous AI research lab**. Given a seed problem, it runs itself like a lab:
 a Principal Investigator decomposes the mission into directions and hypotheses
 (**claims**); researchers gather grounded evidence; a novelty/quality gate and a
