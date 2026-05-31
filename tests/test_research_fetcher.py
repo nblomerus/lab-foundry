@@ -1,5 +1,5 @@
 """
-Tests for labfoundry.research.fetcher.
+Tests for library.ingest.fetcher.
 
 No real DB and no real network: a fake state client supplies the cache, and
 the httpx call is patched to return canned responses. The point is to prove
@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from labfoundry.research import fetcher
-from labfoundry.research.fetcher import (
+from library.ingest import fetcher
+from library.ingest.fetcher import (
     ttl_for,
     web_fetch,
 )
@@ -349,7 +349,7 @@ async def test_legacy_cached_challenge_pages_cleaned_on_hit():
 
 
 def test_meaningful_terms_drops_stopwords():
-    from labfoundry.mcp_servers.labfoundry_research.tools import _meaningful_terms
+    from agents.researcher.tools import _meaningful_terms
 
     assert _meaningful_terms("What is the current adoption rate of MCP tools among developers?") == [
         "current",
@@ -377,7 +377,7 @@ def test_meaningful_terms_drops_stopwords():
 
 
 def test_reddit_relevant_filters_cats_out():
-    from labfoundry.mcp_servers.labfoundry_research.tools import (
+    from agents.researcher.tools import (
         _meaningful_terms,
         _reddit_relevant,
     )
@@ -406,7 +406,7 @@ def test_reddit_relevant_filters_cats_out():
 def test_reddit_relevant_empty_terms_passes_everything():
     """If the query has no meaningful terms (extreme edge case),
     don't drop anything — let the LLM filter."""
-    from labfoundry.mcp_servers.labfoundry_research.tools import _reddit_relevant
+    from agents.researcher.tools import _reddit_relevant
 
     assert _reddit_relevant("anything", "", []) is True
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from labfoundry.harness.router import (
+from harness.router import (
     CloudProvider,
     GPULock,
     Provider,

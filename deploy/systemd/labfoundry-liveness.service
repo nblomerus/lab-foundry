@@ -7,4 +7,4 @@ WorkingDirectory=/home/nicholas/workspace/lab-foundry
 EnvironmentFile=/home/nicholas/workspace/lab-foundry/.env
 # Restarts labfoundry-harness if the loop has gone quiet past the threshold.
 # Set ALERT_WEBHOOK_URL in .env to also get pushed (e.g. an ntfy.sh topic).
-ExecStart=/home/nicholas/.pyenv/versions/labfoundry/bin/python -m labfoundry.ops.liveness_check
+ExecStart=/home/nicholas/.pyenv/versions/labfoundry/bin/python -m ops.liveness_check

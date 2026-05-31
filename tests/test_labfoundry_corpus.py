@@ -83,7 +83,7 @@ async def _seed(pool, title, tier, status, state, queryable, vec) -> int:
 @pytest.mark.asyncio
 async def test_corpus_search_respects_trust_floor_and_gate():
     await _dsn_or_skip()
-    from labfoundry.mcp_servers.labfoundry_corpus import tools
+    from library.corpus import tools
 
     pool = await tools._get_pool()
     async with pool.acquire() as conn:  # clean any leftovers from a prior run

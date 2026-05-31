@@ -13,7 +13,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from labfoundry.research.experiments import (
+from agents.researcher.experiments import (
     REGISTRY,
     UnknownExperiment,
     dispatch,
@@ -51,8 +51,8 @@ async def test_dispatch_unknown_raises():
 
 @pytest.mark.asyncio
 async def test_count_demand_signal_aggregates(monkeypatch):
-    from labfoundry.mcp_servers.labfoundry_research.tools import SearchResult
-    from labfoundry.research.experiments import count_demand_signal as cds
+    from agents.researcher.experiments import count_demand_signal as cds
+    from agents.researcher.tools import SearchResult
 
     async def _fake_reddit(query, limit, **_):
         # Return a different shape per query so counts are distinct.
@@ -169,21 +169,21 @@ async def test_compare_repo_growth_requires_repos():
 def test_fetch_pricing_coerces_plural_companies():
     """Planner sometimes sends {"companies": [...]} instead of singular form;
     the runner accepts both."""
-    from labfoundry.research.experiments.fetch_pricing import _coerce_targets
+    from agents.researcher.experiments.fetch_pricing import _coerce_targets
 
     targets = _coerce_targets({"companies": ["OpenAI", "Brave"]})
     assert targets == [{"company": "OpenAI"}, {"company": "Brave"}]
 
 
 def test_fetch_pricing_coerces_plural_urls():
-    from labfoundry.research.experiments.fetch_pricing import _coerce_targets
+    from agents.researcher.experiments.fetch_pricing import _coerce_targets
 
     targets = _coerce_targets({"urls": ["https://a/", "https://b/"]})
     assert targets == [{"url": "https://a/"}, {"url": "https://b/"}]
 
 
 def test_fetch_pricing_singular_still_works():
-    from labfoundry.research.experiments.fetch_pricing import _coerce_targets
+    from agents.researcher.experiments.fetch_pricing import _coerce_targets
 
     assert _coerce_targets({"url": "https://x/"}) == [{"url": "https://x/"}]
     assert _coerce_targets({"company": "X"}) == [{"company": "X"}]
@@ -192,7 +192,7 @@ def test_fetch_pricing_singular_still_works():
 
 def test_count_demand_signal_aliases_hn():
     """The planner sometimes uses "hn" instead of "hacker_news"."""
-    from labfoundry.research.experiments.count_demand_signal import _canonicalize_sources
+    from agents.researcher.experiments.count_demand_signal import _canonicalize_sources
 
     assert _canonicalize_sources(["reddit", "hn"]) == ["reddit", "hacker_news"]
     assert _canonicalize_sources(["HackerNews"]) == ["hacker_news"]

@@ -15,9 +15,9 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from labfoundry.research import fetcher
-from labfoundry.research.fetcher import ArxivResult, search_arxiv
-from labfoundry.research.librarian.scouts import SourceDescriptor, scout_arxiv
+from library.ingest import fetcher
+from library.ingest.fetcher import ArxivResult, search_arxiv
+from library.ingest.scouts import SourceDescriptor, scout_arxiv
 
 # A trimmed-but-faithful arXiv Atom feed with two entries. Namespaces and
 # element shapes match what export.arxiv.org actually returns.

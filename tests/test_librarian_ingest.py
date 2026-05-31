@@ -129,9 +129,9 @@ async def _dsn_or_skip() -> str:
 async def test_librarian_ingest_phase_a_then_b(monkeypatch):
     dsn = await _dsn_or_skip()
 
-    from labfoundry.mcp_servers.labfoundry_corpus import tools as corpus_tools
-    from labfoundry.research.librarian import loop as librarian_loop
-    from labfoundry.state.client import PostgresClient
+    from agents.librarian import loop as librarian_loop
+    from library.corpus import tools as corpus_tools
+    from state.client import PostgresClient
 
     fetched_url = "https://example.test/librarian/paper-1"
 

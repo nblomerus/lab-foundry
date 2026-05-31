@@ -9,7 +9,7 @@ StartLimitIntervalSec=0
 Type=simple
 WorkingDirectory=/home/nicholas/workspace/lab-foundry
 EnvironmentFile=/home/nicholas/workspace/lab-foundry/.env
-ExecStart=/home/nicholas/.pyenv/versions/labfoundry/bin/python -m labfoundry.harness.main
+ExecStart=/home/nicholas/.pyenv/versions/labfoundry/bin/python -m harness.main
 # Restart on crash AND on clean exit (the preflight exits non-zero when a
 # hard dependency is down — we want to keep retrying until it recovers).
 Restart=always
