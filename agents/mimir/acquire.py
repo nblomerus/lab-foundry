@@ -166,7 +166,13 @@ async def handle_acquire_requested(event: dict, dispatcher) -> dict | None:
         return await _reply(state, req, status="already_have", reason="already in the corpus")
 
     # (4) trust-gated ingest (stage → classify → certify/finalize, or block).
-    result = await ingest_source(desc.model_dump(), state)
+    result = await ingest_source(
+        desc.model_dump(),
+        state,
+        router=getattr(dispatcher, "router", None),
+        curator=getattr(dispatcher, "curator", None),
+        session=getattr(dispatcher, "session", None),
+    )
     if result.get("decision") == "approve":
         return await _reply(
             state,

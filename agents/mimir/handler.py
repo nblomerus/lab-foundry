@@ -10,13 +10,12 @@ separate Librarian agent and no `mimir.ingest_approved` event handshake:
         | (cheap: fetch/parse/chunk/stage)  +-- approve -> embed_and_finalize  (document.ingested)
         |                                   +-- block   -> quarantine          (mimir.ingest_blocked)
 
-classify_trust is ~95% zero-token deterministic, so Mimir rarely needs the model.
-Gated on MIMIR_LOOP (env, default OFF), mirroring the other *_LOOP gates.
+classify_trust is ~95% zero-token deterministic; the lone LLM step (the
+web_reputable/web_unknown tie-breaker, mimir.certify) runs only when needs_llm
+fires AND a router/curator are wired. Gated on MIMIR_LOOP (env, default OFF).
 
-FOLLOW-UPS (deferred, all safe to add later): the LLM tie-breaker for the
-web_reputable/web_unknown boundary (needs_llm); DOI/GitHub signal resolution
-(so peer_reviewed/official_repo can be reached); license capture at stage time
-(so the license hard-gate can fire); and the acquire/pull path.
+Remaining deferred: license capture at stage time — the license hard-gate is
+built, but no source exposes a license to feed it yet.
 """
 
 from __future__ import annotations
@@ -24,12 +23,25 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
+from pydantic import BaseModel, Field
 
 from library.ingest.pipeline import embed_and_finalize, stage_source
 from library.trust import DocMeta, classify_trust
+
+
+class MimirVerdict(BaseModel):
+    """Mimir's LLM verdict — used ONLY for the ambiguous web_unknown boundary.
+    The LLM may not mint a tier above web_reputable (top tiers need a verifiable
+    identifier, settled deterministically)."""
+
+    decision: Literal["approve", "block"]
+    tier: Literal["user_asserted", "web_unknown", "web_reputable"]
+    reasons: str = Field(..., min_length=20)
+
 
 log = logging.getLogger(__name__)
 
@@ -104,13 +116,62 @@ async def _resolve_signals(meta: DocMeta) -> None:
         meta.github_has_release, meta.github_days_since_push = await _github_repo_signals(meta.source_url)
 
 
-async def ingest_source(source, state) -> dict:
+async def _block(state, doc_id: int, *, signals: dict, reason: str, used_llm: bool) -> dict:
+    """Quarantine a document (never delete) + append the block certification +
+    emit mimir.ingest_blocked. Shared by the license gate and the LLM verdict."""
+    await state.set_document_trust(doc_id, tier="quarantined", trust_state="quarantined", status="blocked")
+    await state.append_certification(
+        doc_id,
+        decision="block",
+        to_tier="quarantined",
+        to_state="quarantined",
+        signals=signals,
+        used_llm=used_llm,
+        reasons=reason,
+    )
+    await state.emit_corpus_event(
+        "mimir.ingest_blocked",
+        target_type="document",
+        target_id=doc_id,
+        payload={"reasons": reason},
+        dedup_key=f"blocked-{doc_id}",
+    )
+    log.info("mimir: BLOCKED doc %s — %s", doc_id, reason)
+    return {"document_id": doc_id, "decision": "block", "reason": reason}
+
+
+async def _certify_llm(doc: dict, curator, router, session) -> MimirVerdict | None:
+    """The lone LLM step: judge an ambiguous web source. Best-effort — returns
+    None on any failure so ingest falls back to the deterministic floor."""
+    try:
+        prompt = await curator.build(
+            "mimir.certify",
+            context={
+                "title": doc.get("title"),
+                "source_url": doc.get("source_url"),
+                "host": (urlparse(doc.get("source_url") or "").hostname or ""),
+            },
+        )
+        verdict, _run_id = await router.invoke(
+            prompt=prompt,
+            output_schema_class=MimirVerdict,
+            session=session,
+            step_name="mimir.certify",
+        )
+        return verdict
+    except Exception:  # noqa: BLE001 — best-effort; fall back to the deterministic floor
+        log.exception("mimir: certify LLM call failed; using deterministic floor")
+        return None
+
+
+async def ingest_source(source, state, *, router=None, curator=None, session=None) -> dict:
     """The shared trust-gated ingest core used by BOTH discovery and acquire.
 
-    Stage the source (cheap: fetch/parse/chunk, no vectors), classify its trust,
-    write the verdict + an immutable certification, then finalize (approve →
-    embed + queryable) or quarantine (block). Returns a result dict with a
-    `decision` of "approve"/"block" (or a stage skip/dedupe/failure dict)."""
+    Stage the source (cheap), classify its trust, write the verdict + an immutable
+    certification, then finalize (approve → embed + queryable) or quarantine
+    (block). When `tc.needs_llm` and a router/curator are supplied, one LLM call
+    breaks the ambiguous web_reputable/web_unknown tie (capped at web_reputable);
+    otherwise we admit at the deterministic floor (the safe under-credit)."""
     try:
         staged = await stage_source(source, state)
     except Exception as e:  # noqa: BLE001 — one source failure is non-fatal to the harness
@@ -127,42 +188,33 @@ async def ingest_source(source, state) -> dict:
     tc = classify_trust(meta)
 
     if tc.blocked:
-        await state.set_document_trust(doc_id, tier="quarantined", trust_state="quarantined", status="blocked")
-        await state.append_certification(
-            doc_id,
-            decision="block",
-            to_tier="quarantined",
-            to_state="quarantined",
-            signals=tc.signals,
-            used_llm=False,
-            reasons=tc.reason,
-        )
-        await state.emit_corpus_event(
-            "mimir.ingest_blocked",
-            target_type="document",
-            target_id=doc_id,
-            payload={"tier": tc.tier, "reasons": tc.reason},
-            dedup_key=f"blocked-{doc_id}",
-        )
-        log.info("mimir: BLOCKED doc %s — %s", doc_id, tc.reason)
-        return {"document_id": doc_id, "decision": "block", "reason": tc.reason}
+        return await _block(state, doc_id, signals=tc.signals, reason=tc.reason, used_llm=False)
 
-    # APPROVE — deterministic. (The needs_llm tie-breaker that could bump an
-    # ambiguous web_unknown to web_reputable is a follow-up; until then we admit
-    # at the deterministic floor, which is the safe under-credit.)
-    await state.set_document_trust(doc_id, tier=tc.tier, trust_state="provisional", status="certified")
+    tier, reason, used_llm = tc.tier, tc.reason, False
+
+    # The lone LLM tie-breaker — only for the ambiguous web_unknown boundary, and
+    # only when wired (router/curator present). Capped at web_reputable.
+    if tc.needs_llm and router is not None and curator is not None:
+        verdict = await _certify_llm(doc, curator, router, session)
+        if verdict is not None:
+            used_llm = True
+            if verdict.decision == "block":
+                return await _block(state, doc_id, signals=tc.signals, reason=verdict.reasons, used_llm=True)
+            tier, reason = verdict.tier, verdict.reasons
+
+    await state.set_document_trust(doc_id, tier=tier, trust_state="provisional", status="certified")
     await state.append_certification(
         doc_id,
         decision="approve",
-        to_tier=tc.tier,
+        to_tier=tier,
         to_state="provisional",
         signals=tc.signals,
-        used_llm=False,
-        reasons=tc.reason,
+        used_llm=used_llm,
+        reasons=reason,
     )
     result = await embed_and_finalize(doc_id, state)
-    log.info("mimir: APPROVED doc %s at tier=%s — %s", doc_id, tc.tier, tc.reason)
-    return {"document_id": doc_id, "decision": "approve", "tier": tc.tier, **result}
+    log.info("mimir: APPROVED doc %s at tier=%s (llm=%s) — %s", doc_id, tier, used_llm, reason)
+    return {"document_id": doc_id, "decision": "approve", "tier": tier, **result}
 
 
 async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
@@ -176,7 +228,13 @@ async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
         log.warning("mimir: source.discovered event %s has no payload.source", event.get("id"))
         return {"skipped": True, "reason": "no source in payload"}
 
-    return await ingest_source(source, dispatcher.state)
+    return await ingest_source(
+        source,
+        dispatcher.state,
+        router=getattr(dispatcher, "router", None),
+        curator=getattr(dispatcher, "curator", None),
+        session=getattr(dispatcher, "session", None),
+    )
 
 
 async def handle_sweep_requested(event: dict, dispatcher) -> dict | None:
