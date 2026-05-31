@@ -1,17 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
-import type { LabFoundryEvent, Snapshot, StreamMessage } from "../lib/types";
+import { AnimatePresence, motion } from "framer-motion";
+import { api, type KnowledgeStats } from "../lib/api";
 import { useEventStream } from "../lib/ws";
+import type { LabFoundryEvent, Snapshot, StreamMessage } from "../lib/types";
 
 // =========================================================================
 // LabFoundry floorplan — the lab as an architectural blueprint. Each room is
 // an agent/subsystem; solid rooms are LIVE, dashed rooms are PLANNED. The
 // arrows between rooms animate (particles flowing) — the same live inter-agent
-// flow language as the old /flow graph, kept here. Active flows always show a
-// slow baseline particle so the lab reads as alive even when the harness is
-// between sweeps; a matching live event speeds them up.
+// flow language as the old /flow graph. Click any room to open an inspector
+// showing what that agent is doing right now (live events + corpus stats).
 // =========================================================================
 
 const VW = 1440;
@@ -32,26 +32,20 @@ interface Room {
   door?: { side: "bottom" | "left" | "right"; at: number };
 }
 
-// Layout faithful to the reference blueprint; status reflects what is LIVE now.
 const ROOMS: Room[] = [
-  // --- COLLECTORS (top-left band) ---
   { id: "web",    x: 66,  y: 96,  w: 188, h: 210, title: "Web Scout",    sub: "Web monitoring & discovery",   active: true,  door: { side: "bottom", at: 0.62 } },
   { id: "arxiv",  x: 258, y: 96,  w: 180, h: 210, title: "arXiv Scout",  sub: "Scientific papers monitoring", active: true,  door: { side: "bottom", at: 0.62 } },
   { id: "github", x: 442, y: 96,  w: 182, h: 210, title: "GitHub Scout", sub: "Code repositories monitoring", active: true,  door: { side: "bottom", at: 0.62 } },
   { id: "openml", x: 628, y: 96,  w: 176, h: 210, title: "OpenML Scout", sub: "ML datasets & benchmarks",     active: false, door: { side: "bottom", at: 0.62 } },
-  // --- RESEARCH & DISCOVERY (top-right band) ---
   { id: "ariadne",     x: 808,  y: 96, w: 178, h: 210, title: "Ariadne",     sub: "Principal investigator / scientific direction", active: false, door: { side: "bottom", at: 0.6 } },
   { id: "planner",     x: 990,  y: 96, w: 142, h: 210, title: "Planner",     sub: "Schedules & goals planning",                    active: false, door: { side: "bottom", at: 0.6 } },
   { id: "researchers", x: 1136, y: 96, w: 238, h: 210, title: "Researchers", sub: "Investigate directions & gather findings",      active: false, door: { side: "bottom", at: 0.55 } },
-  // --- KNOWLEDGE CORE (centre-left) ---
   { id: "dataset", x: 66,  y: 404, w: 188, h: 164, title: "Dataset Scout", sub: "External data monitoring", active: false, door: { side: "bottom", at: 0.78 } },
   { id: "mimir",   x: 356, y: 384, w: 288, h: 196, title: "Mimir",   sub: "AI Curator of Knowledge",   active: true },
   { id: "library", x: 320, y: 604, w: 348, h: 224, title: "Library", sub: "Queryable research memory", active: true },
-  // --- RESEARCH WORKFLOW (right column) ---
   { id: "critic", x: 1190, y: 348, w: 188, h: 150, title: "Critic", sub: "Challenges claims & tests weaknesses", active: false, door: { side: "left", at: 0.4 } },
   { id: "gate",   x: 1190, y: 512, w: 188, h: 150, title: "Gate",   sub: "Promotion review & claim approval",    active: false, door: { side: "left", at: 0.4 } },
   { id: "ops",    x: 1190, y: 700, w: 188, h: 188, title: "Ops",    sub: "Infrastructure, budget & monitoring",  active: false },
-  // --- EVALUATION & OUTPUT (bottom-centre) ---
   { id: "experiments", x: 726, y: 700, w: 208, h: 188, title: "Experiments", sub: "Run benchmarks & evaluations", active: false },
   { id: "publication", x: 948, y: 700, w: 222, h: 188, title: "Publication", sub: "Write, assemble & publish",     active: false },
 ];
@@ -65,14 +59,29 @@ function anchor(id: RoomId, side: "top" | "bottom" | "left" | "right", t = 0.5):
   return { x: r.x + r.w, y: r.y + r.h * t };
 }
 
+// Per-room briefing: what it does, which live events touch it, and (for planned
+// rooms) what gates it. Drives the inspector.
+interface RoomInfo { what: string; events: string[]; sourceKind?: string; role?: string; gate?: string }
+const ROOM_INFO: Record<RoomId, RoomInfo> = {
+  web:    { what: "Monitors the open web (via SearXNG) for relevant material and hands new sources to Mimir.", events: ["source.discovered"], sourceKind: "web" },
+  arxiv:  { what: "Watches arXiv for new scientific papers and hands them to Mimir to ingest.", events: ["source.discovered"], sourceKind: "arxiv" },
+  github: { what: "Tracks code repositories on GitHub and surfaces them to Mimir, capturing each repo's license.", events: ["source.discovered"], sourceKind: "github" },
+  openml: { what: "Will monitor OpenML for ML datasets & benchmarks and feed them to Mimir.", events: [], gate: "scout not built yet" },
+  ariadne:     { what: "The Principal Investigator — frames research directions and decides what to pursue or kill.", events: [], role: "pi", gate: "research workflow (KNOWLEDGE_CORE_ONLY)" },
+  planner:     { what: "Turns research directions into concrete, falsifiable tasks.", events: [], role: "planner", gate: "research workflow" },
+  researchers: { what: "Investigate directions, gather evidence from the Library, and produce findings.", events: [], role: "researcher", gate: "research workflow" },
+  dataset: { what: "Will monitor external dataset sources and feed Mimir.", events: [], gate: "scout not built yet" },
+  mimir:   { what: "The Warden — one agent ingests every source and gates its trust (deterministic ladder + an LLM tie-breaker), then certifies it into the Library or quarantines it.", events: ["source.discovered", "document.parsed", "document.ingested", "mimir.ingest_blocked", "library.sweep_requested", "library.trends", "acquire.requested", "acquire.fulfilled", "acquire.rejected"] },
+  library: { what: "The queryable research memory — certified documents in a pgvector (768-d) corpus plus a Neo4j knowledge graph.", events: ["document.ingested"] },
+  critic:  { what: "Will challenge claims and probe their weaknesses before they advance.", events: [], role: "critic", gate: "research workflow" },
+  gate:    { what: "Will run the promotion gate — approve, hold, reject, or merge a claim.", events: [], gate: "research workflow" },
+  ops:     { what: "Will watch infrastructure, budget and spend.", events: [], gate: "planned" },
+  experiments: { what: "Will run benchmarks and evaluations against the corpus.", events: [], gate: "planned" },
+  publication: { what: "Will assemble and publish the lab's findings.", events: [], gate: "planned" },
+};
+
 // --- Flows (the animated arrows between agents) -------------------------
-interface Flow {
-  id: string;
-  d: string;
-  active: boolean;
-  kind: "intake" | "knowledge" | "seed" | "workflow";
-  hotEvents: string[];
-}
+interface Flow { id: string; d: string; active: boolean; kind: "intake" | "knowledge" | "seed" | "workflow"; hotEvents: string[] }
 
 const MIMIR = roomById("mimir");
 function intake(fromId: RoomId, toX: number): string {
@@ -83,7 +92,6 @@ function intake(fromId: RoomId, toX: number): string {
 
 const SCOUT_EVENTS = ["source.discovered", "library.sweep_requested", "library.trends", "document.parsed"];
 const LIB_EVENTS = ["document.ingested", "document.parsed"];
-
 const datasetAnchor = anchor("dataset", "right", 0.5);
 const mimirBottom = anchor("mimir", "bottom", 0.5);
 const libraryTop = anchor("library", "top", 0.5);
@@ -102,12 +110,12 @@ const FLOWS: Flow[] = [
 ];
 
 // =========================================================================
-// Live pulse tracking — which flows are "hot" right now (ported from
-// LiveFlow's usePerEdgePulses): a matching event keeps a flow hot for 6s.
+// Live data — event stream (hot flows + recent events) + a periodic poll of
+// the corpus/graph knowledge stats.
 // =========================================================================
 
-function useHotFlows(): { hot: Set<string>; connected: boolean } {
-  const { recent, connected } = useEventStream(60);
+function useFloorplanLive(): { hot: Set<string>; connected: boolean; events: LabFoundryEvent[] } {
+  const { recent, connected } = useEventStream(80);
   const [hot, setHot] = useState<Set<string>>(new Set());
   const expiry = useRef<Map<string, number>>(new Map());
   const seen = useRef<Set<number>>(new Set());
@@ -126,9 +134,7 @@ function useHotFlows(): { hot: Set<string>; connected: boolean } {
     for (const e of events) {
       if (seen.current.has(e.id)) continue;
       seen.current.add(e.id);
-      for (const f of FLOWS) {
-        if (f.hotEvents.includes(e.event_type)) { expiry.current.set(f.id, now + 6000); changed = true; }
-      }
+      for (const f of FLOWS) if (f.hotEvents.includes(e.event_type)) { expiry.current.set(f.id, now + 6000); changed = true; }
     }
     if (changed) setHot(new Set(expiry.current.keys()));
   }, [events]);
@@ -143,7 +149,25 @@ function useHotFlows(): { hot: Set<string>; connected: boolean } {
     return () => clearInterval(t);
   }, []);
 
-  return { hot, connected };
+  return { hot, connected, events };
+}
+
+function fmtTime(iso: string): string {
+  try { return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+  catch { return "—"; }
+}
+function ago(iso?: string | null): string {
+  if (!iso) return "never";
+  const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+function sourceKindOf(e: LabFoundryEvent): string | null {
+  const src = (e.payload as { source?: { source_kind?: unknown } } | null | undefined)?.source;
+  const k = src?.source_kind;
+  return typeof k === "string" ? k : null;
 }
 
 // =========================================================================
@@ -151,15 +175,8 @@ function useHotFlows(): { hot: Set<string>; connected: boolean } {
 // =========================================================================
 
 const C = {
-  wall: "#3f4753",
-  active: "#10b981",
-  activeFill: "rgba(16,185,129,0.06)",
-  plan: "#9aa3ad",
-  seed: "#7c5cd6",
-  ink: "#1f2d3d",
-  muted: "#5b6b7b",
-  faint: "#9aa3ad",
-  intake: "#2c5fb8",
+  wall: "#3f4753", active: "#10b981", activeFill: "rgba(16,185,129,0.06)",
+  plan: "#9aa3ad", seed: "#7c5cd6", ink: "#1f2d3d", muted: "#5b6b7b", faint: "#9aa3ad", intake: "#2c5fb8",
 };
 
 function DoorArc({ room }: { room: Room }) {
@@ -176,19 +193,24 @@ function DoorArc({ room }: { room: Room }) {
   return <path d={`M ${x} ${y - r} A ${r} ${r} 0 0 0 ${x + dir * r} ${y + r}`} fill="none" stroke={C.wall} strokeWidth={2} opacity={0.5} />;
 }
 
-function RoomBox({ room, phase, activeClaims }: { room: Room; phase: string | null; activeClaims: number | null }) {
+function RoomBox({ room, phase, activeClaims, selected, onSelect }: {
+  room: Room; phase: string | null; activeClaims: number | null; selected: boolean; onSelect: () => void;
+}) {
   const stroke = room.active ? C.active : C.plan;
   const big = room.id === "mimir" || room.id === "library";
   return (
-    <g>
+    <g style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
       {room.active && (
         <motion.rect
           x={room.x - 3} y={room.y - 3} width={room.w + 6} height={room.h + 6} rx={16}
           fill="none" stroke={C.active} strokeWidth={2}
-          initial={{ opacity: 0.1 }}
-          animate={{ opacity: [0.08, 0.3, 0.08] }}
+          initial={{ opacity: 0.1 }} animate={{ opacity: [0.08, 0.3, 0.08] }}
           transition={{ duration: 2.6, repeat: Infinity, ease: "easeInOut" }}
         />
+      )}
+      {selected && (
+        <rect x={room.x - 7} y={room.y - 7} width={room.w + 14} height={room.h + 14} rx={18}
+          fill="none" stroke={room.active ? C.active : C.intake} strokeWidth={3} opacity={0.9} />
       )}
       <rect
         x={room.x} y={room.y} width={room.w} height={room.h} rx={13}
@@ -198,12 +220,8 @@ function RoomBox({ room, phase, activeClaims }: { room: Room; phase: string | nu
       />
       <DoorArc room={room} />
       <text x={room.x + room.w / 2} y={room.y + (big ? room.h / 2 - 6 : 52)} textAnchor="middle"
-        fontSize={big ? 26 : 21} fontWeight={700} fill={room.active ? C.ink : C.muted}>
-        {room.title}
-      </text>
-      <text x={room.x + room.w / 2} y={room.y + (big ? room.h / 2 + 22 : 78)} textAnchor="middle" fontSize={13.5} fill={C.faint}>
-        {room.sub}
-      </text>
+        fontSize={big ? 26 : 21} fontWeight={700} fill={room.active ? C.ink : C.muted}>{room.title}</text>
+      <text x={room.x + room.w / 2} y={room.y + (big ? room.h / 2 + 22 : 78)} textAnchor="middle" fontSize={13.5} fill={C.faint}>{room.sub}</text>
       {room.id === "mimir" && phase && (
         <g>
           <rect x={room.x + room.w / 2 - 56} y={room.y + room.h - 44} width={112} height={24} rx={12} fill="rgba(16,185,129,0.1)" stroke={C.active} strokeWidth={1} />
@@ -221,6 +239,8 @@ function RoomBox({ room, phase, activeClaims }: { room: Room; phase: string | nu
           <text x={room.x + room.w / 2} y={room.y + room.h - 28} textAnchor="middle" fontSize={11.5} fill={C.faint}>Coming soon</text>
         </g>
       )}
+      {/* a click affordance dot in the corner */}
+      <circle cx={room.x + room.w - 16} cy={room.y + 16} r={4} fill={room.active ? C.active : C.faint} opacity={0.6} />
     </g>
   );
 }
@@ -233,18 +253,12 @@ function FlowPath({ flow, hot }: { flow: Flow; hot: boolean }) {
   const markerId = flow.kind === "seed" ? "seed" : flow.active ? "active" : "plan";
   return (
     <g>
-      <path
-        d={flow.d} fill="none" stroke={color}
-        strokeWidth={flow.active ? 2.4 : 1.6}
-        strokeDasharray={flow.active ? undefined : "6 5"}
-        strokeLinecap="round"
-        opacity={flow.active ? (hot ? 1 : 0.85) : 0.5}
-        markerEnd={`url(#fp-arrow-${markerId})`}
-        style={flow.active && hot ? { filter: "drop-shadow(0 0 1.4px rgba(16,185,129,0.55))" } : undefined}
-      />
+      <path d={flow.d} fill="none" stroke={color}
+        strokeWidth={flow.active ? 2.4 : 1.6} strokeDasharray={flow.active ? undefined : "6 5"} strokeLinecap="round"
+        opacity={flow.active ? (hot ? 1 : 0.85) : 0.5} markerEnd={`url(#fp-arrow-${markerId})`}
+        style={flow.active && hot ? { filter: "drop-shadow(0 0 1.4px rgba(16,185,129,0.55))" } : undefined} />
       {Array.from({ length: count }).map((_, i) => (
-        <circle key={i} r={i === 0 ? 4.2 : 3} fill={particleColor} opacity={i === 0 ? 1 : 0.7}
-          style={{ filter: `drop-shadow(0 0 2px ${particleColor})` }}>
+        <circle key={i} r={i === 0 ? 4.2 : 3} fill={particleColor} opacity={i === 0 ? 1 : 0.7} style={{ filter: `drop-shadow(0 0 2px ${particleColor})` }}>
           <animateMotion dur={`${dur}s`} repeatCount="indefinite" begin={`${(i * dur) / Math.max(count, 1)}s`} path={flow.d} />
         </circle>
       ))}
@@ -266,11 +280,193 @@ function ZoneBracket({ x1, x2, y, label }: { x1: number; x2: number; y: number; 
 }
 
 // =========================================================================
+// Inspector — "what's happening" for the clicked room
+// =========================================================================
+
+function StatTile({ label, value, tone = "slate" }: { label: string; value: string | number; tone?: "slate" | "emerald" | "blue" | "violet" | "red" | "amber" }) {
+  const tones: Record<string, string> = {
+    slate: "bg-slate-50 text-slate-800", emerald: "bg-emerald-50 text-emerald-700", blue: "bg-blue-50 text-blue-700",
+    violet: "bg-violet-50 text-violet-700", red: "bg-red-50 text-red-700", amber: "bg-amber-50 text-amber-700",
+  };
+  return (
+    <div className={`rounded-2xl px-3 py-2 ${tones[tone]}`}>
+      <div className="text-[10px] font-semibold uppercase tracking-wide opacity-70">{label}</div>
+      <div className="mt-0.5 text-lg font-semibold tabular-nums">{typeof value === "number" ? value.toLocaleString() : value}</div>
+    </div>
+  );
+}
+
+function TierBars({ tiers }: { tiers: Record<string, number> }) {
+  const order = ["peer_reviewed", "preprint", "official_repo", "web_reputable", "web_unknown", "user_asserted", "quarantined"];
+  const colors: Record<string, string> = {
+    peer_reviewed: "bg-emerald-500", preprint: "bg-emerald-400", official_repo: "bg-teal-400",
+    web_reputable: "bg-blue-400", web_unknown: "bg-slate-300", user_asserted: "bg-violet-300", quarantined: "bg-red-300",
+  };
+  const total = Object.values(tiers).reduce((a, b) => a + b, 0) || 1;
+  const present = order.filter((t) => tiers[t]);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+        {present.map((t) => <div key={t} className={colors[t] ?? "bg-slate-300"} style={{ width: `${(tiers[t] / total) * 100}%` }} title={`${t}: ${tiers[t]}`} />)}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+        {present.map((t) => (
+          <span key={t} className="flex items-center gap-1">
+            <span className={`inline-block h-2 w-2 rounded-full ${colors[t] ?? "bg-slate-300"}`} />
+            {t.replace(/_/g, " ")} · {tiers[t].toLocaleString()}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EventRows({ events, empty }: { events: LabFoundryEvent[]; empty: string }) {
+  if (events.length === 0) return <p className="text-sm text-slate-400">{empty}</p>;
+  return (
+    <ul className="space-y-1">
+      {events.map((e) => (
+        <li key={e.id} className="flex items-center gap-2 rounded-xl bg-slate-50 px-2.5 py-1.5 text-xs">
+          <span className="w-14 shrink-0 font-mono text-slate-400">{fmtTime(e.emitted_at)}</span>
+          <span className="min-w-0 flex-1 truncate font-mono font-semibold text-slate-700">{e.event_type}</span>
+          {e.target_id != null && <span className="font-mono text-[10px] text-slate-400">{e.target_type}#{e.target_id}</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
+  roomId: RoomId; snapshot: Snapshot | null; knowledge: KnowledgeStats | null; events: LabFoundryEvent[]; onClose: () => void;
+}) {
+  const room = roomById(roomId);
+  const info = ROOM_INFO[roomId];
+  const roomEvents = useMemo(() => {
+    let es = events.filter((e) => info.events.includes(e.event_type));
+    if (info.sourceKind) es = es.filter((e) => { const k = sourceKindOf(e); return k == null || k === info.sourceKind; });
+    return es.slice(0, 8);
+  }, [events, info]);
+  const role = info.role ? snapshot?.org_roles?.find((r) => r.role === info.role) : undefined;
+  const corpus = knowledge?.corpus;
+  const graph = knowledge?.graph;
+
+  return (
+    <div>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold tracking-tight text-slate-950">{room.title}</h3>
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${room.active ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
+              {room.active ? "Live" : "Planned"}
+            </span>
+          </div>
+          <div className="mt-0.5 text-xs text-slate-500">{room.sub}</div>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50">Close</button>
+      </div>
+
+      <p className="mb-4 text-sm leading-snug text-slate-700">{info.what}</p>
+
+      {/* Mimir — ingest + trust gate */}
+      {roomId === "mimir" && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="Certified" value={corpus?.by_status?.certified ?? 0} tone="emerald" />
+            <StatTile label="Quarantined" value={corpus?.by_status?.quarantined ?? 0} tone="red" />
+          </div>
+          {corpus && Object.keys(corpus.docs_by_trust_tier).length > 0 && (
+            <div>
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Trust ladder</div>
+              <TierBars tiers={corpus.docs_by_trust_tier} />
+            </div>
+          )}
+          <div>
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Recent ingest activity</div>
+            <EventRows events={roomEvents} empty="Quiet right now — Mimir sweeps on a schedule." />
+          </div>
+        </div>
+      )}
+
+      {/* Library — corpus + graph */}
+      {roomId === "library" && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="Documents" value={corpus ? Object.values(corpus.documents_by_kind).reduce((a, b) => a + b, 0) : 0} tone="emerald" />
+            <StatTile label="Chunks embedded" value={corpus?.chunks_embedded ?? 0} tone="blue" />
+          </div>
+          {corpus && Object.keys(corpus.documents_by_kind).length > 0 && (
+            <div className="flex flex-wrap gap-1.5 text-[11px]">
+              {Object.entries(corpus.documents_by_kind).map(([k, v]) => (
+                <span key={k} className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">{k} · {v.toLocaleString()}</span>
+              ))}
+            </div>
+          )}
+          {corpus && Object.keys(corpus.docs_by_trust_tier).length > 0 && (
+            <div>
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">By trust tier</div>
+              <TierBars tiers={corpus.docs_by_trust_tier} />
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="KG papers" value={graph?.status === "ok" ? (graph.papers ?? 0) : "—"} tone="violet" />
+            <StatTile label="Datasets" value={corpus?.datasets ?? 0} tone="slate" />
+          </div>
+          <p className="text-[11px] text-slate-400">
+            Base corpus seeded from rag-bench (~21.8k arXiv papers); embeddings via nomic-embed-text.
+          </p>
+        </div>
+      )}
+
+      {/* Scouts — recent discoveries */}
+      {(roomId === "web" || roomId === "arxiv" || roomId === "github") && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="Discovered (live feed)" value={roomEvents.length} tone="emerald" />
+            <StatTile label="Last activity" value={roomEvents[0] ? ago(roomEvents[0].emitted_at) : "—"} tone="slate" />
+          </div>
+          <div>
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Recently surfaced → Mimir</div>
+            <EventRows events={roomEvents} empty="No new sources in the live window. Scouts sweep periodically." />
+          </div>
+        </div>
+      )}
+
+      {/* Planned rooms */}
+      {!room.active && (
+        <div className="space-y-3">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Status</div>
+            <div className="mt-0.5">Planned — {info.gate ? `dormant until the ${info.gate} is enabled.` : "not built yet."}</div>
+          </div>
+          {role && (
+            <div className="grid grid-cols-2 gap-2">
+              <StatTile label="Runs today" value={role.runs_today} tone="blue" />
+              <StatTile label="Last run" value={ago(role.last_run_at)} tone="slate" />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =========================================================================
 // Component
 // =========================================================================
 
 export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
-  const { hot, connected } = useHotFlows();
+  const { hot, connected, events } = useFloorplanLive();
+  const [selected, setSelected] = useState<RoomId | null>(null);
+  const [knowledge, setKnowledge] = useState<KnowledgeStats | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.knowledge().then((k) => { if (!cancelled) setKnowledge(k); }).catch(() => {});
+    load();
+    const id = setInterval(load, 8_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
   const phase = snapshot?.state?.current_phase ?? null;
   const activeClaims = snapshot?.state?.active_claims_count ?? null;
   const liveRooms = ROOMS.filter((r) => r.active).length;
@@ -280,16 +476,13 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-slate-200 bg-white/85 p-3 shadow-sm backdrop-blur">
         <div className="flex items-center gap-2 text-xs">
           <span className="relative inline-flex h-3 w-3 items-center justify-center">
-            <motion.span
-              className={connected ? "absolute inline-flex h-full w-full rounded-full bg-emerald-400" : "absolute inline-flex h-full w-full rounded-full bg-slate-300"}
-              animate={{ opacity: [0.25, 0.7, 0.25], scale: [1, 1.45, 1] }}
-              transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
-            />
+            <motion.span className={connected ? "absolute inline-flex h-full w-full rounded-full bg-emerald-400" : "absolute inline-flex h-full w-full rounded-full bg-slate-300"}
+              animate={{ opacity: [0.25, 0.7, 0.25], scale: [1, 1.45, 1] }} transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }} />
             <span className={connected ? "relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" : "relative inline-flex h-1.5 w-1.5 rounded-full bg-slate-400"} />
           </span>
           <span className="font-semibold text-slate-700">Lab floorplan</span>
           <span className="text-slate-400">·</span>
-          <span className="text-slate-500">Mimir + the collectors are live; the research workflow is planned · {connected ? "live" : "reconnecting"}</span>
+          <span className="text-slate-500">Click any room to see what it&apos;s doing · {connected ? "live" : "reconnecting"}</span>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
           <span className="rounded-2xl bg-emerald-50 px-3 py-1.5 font-medium text-emerald-700">{liveRooms} rooms live</span>
@@ -298,8 +491,8 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white/85 p-3 shadow-sm backdrop-blur">
-        <svg viewBox={`0 0 ${VW} ${VH}`} className="h-auto w-full">
+      <div className="relative overflow-hidden rounded-3xl border border-slate-200 bg-white/85 p-3 shadow-sm backdrop-blur">
+        <svg viewBox={`0 0 ${VW} ${VH}`} className="h-auto w-full" onClick={() => setSelected(null)}>
           <defs>
             {([["active", C.active], ["plan", C.plan], ["seed", C.seed]] as const).map(([id, col]) => (
               <marker key={id} id={`fp-arrow-${id}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -308,12 +501,10 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
             ))}
           </defs>
 
-          {/* building shell + main entrance */}
           <rect x={48} y={78} width={VW - 96} height={812} rx={10} fill="none" stroke={C.wall} strokeWidth={5} />
           <path d="M 470 890 A 30 30 0 0 1 530 890" fill="none" stroke={C.wall} strokeWidth={2.5} />
           <path d="M 530 890 A 30 30 0 0 1 590 890" fill="none" stroke={C.wall} strokeWidth={2.5} />
           <text x={620} y={886} fontSize={12} letterSpacing="1.2" fill={C.faint}>MAIN ENTRANCE</text>
-
           <text x={905} y={470} textAnchor="middle" fontSize={17} fontWeight={700} letterSpacing="1.6" fill="#aab2bd">RESEARCH WORKFLOW</text>
 
           <ZoneBracket x1={66} x2={804} y={70} label="COLLECTORS" />
@@ -321,20 +512,15 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
           <ZoneBracket x1={726} x2={1170} y={672} label="EVALUATION & OUTPUT" />
           <ZoneBracket x1={300} x2={690} y={848} label="KNOWLEDGE CORE" />
 
-          {/* flows behind rooms */}
           {FLOWS.map((f) => <FlowPath key={f.id} flow={f} hot={hot.has(f.id)} />)}
+          {ROOMS.map((r) => <RoomBox key={r.id} room={r} phase={phase} activeClaims={activeClaims} selected={selected === r.id} onSelect={() => setSelected(r.id)} />)}
 
-          {/* rooms */}
-          {ROOMS.map((r) => <RoomBox key={r.id} room={r} phase={phase} activeClaims={activeClaims} />)}
-
-          {/* rag-bench base seed chip */}
           <g>
             <rect x={70} y={838} width={188} height={52} rx={12} fill="rgba(124,92,214,0.07)" stroke={C.seed} strokeWidth={1.6} />
             <text x={164} y={860} textAnchor="middle" fontSize={13.5} fontWeight={700} fill="#5a3fa0">rag-bench base</text>
             <text x={164} y={878} textAnchor="middle" fontSize={11.5} fill={C.muted}>21,800 arXiv papers · seed</text>
           </g>
 
-          {/* DATA INTAKE explainer */}
           <g>
             <rect x={66} y={596} width={210} height={96} rx={12} fill="rgba(255,255,255,0.75)" stroke="#e2e8ef" strokeWidth={1} />
             <text x={82} y={622} fontSize={13} fontWeight={700} letterSpacing="0.6" fill={C.intake}>DATA INTAKE</text>
@@ -343,7 +529,6 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
             <text x={82} y={680} fontSize={12.5} fill={C.muted}>them to Mimir → Library.</text>
           </g>
 
-          {/* bottom legend */}
           <g>
             <rect x={VW / 2 - 290} y={948} width={580} height={64} rx={14} fill="rgba(255,255,255,0.85)" stroke="#e2e8ef" strokeWidth={1} />
             <rect x={VW / 2 - 262} y={966} width={30} height={28} rx={7} fill={C.activeFill} stroke={C.active} strokeWidth={2.2} />
@@ -354,6 +539,22 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
             <text x={VW / 2 + 70} y={996} fontSize={12} fill={C.muted}>Coming soon / under development</text>
           </g>
         </svg>
+
+        {/* slide-in inspector */}
+        <AnimatePresence>
+          {selected && (
+            <motion.aside
+              key="inspector"
+              initial={{ x: "100%", opacity: 0.6 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: "100%", opacity: 0.4 }}
+              transition={{ type: "spring", stiffness: 280, damping: 32 }}
+              className="absolute right-0 top-0 z-20 h-full w-full max-w-[400px] overflow-y-auto border-l border-slate-200 bg-white/95 p-4 shadow-2xl backdrop-blur"
+            >
+              <RoomInspector roomId={selected} snapshot={snapshot} knowledge={knowledge} events={events} onClose={() => setSelected(null)} />
+            </motion.aside>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );
