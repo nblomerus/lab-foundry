@@ -223,48 +223,44 @@ async def _build_exploration_kickoff_task_data(ctx: dict, state, memory) -> Prom
     First-ever PI invocation. The constitution layer already carries the seed
     (problem / stance / success criterion); this layer is the "now what" brief.
     """
-    content = """## Exploration kickoff — day 1
+    content = """## Exploration kickoff — framing the research agenda
 
-You are bootstrapping the company from the seed above.
+You are bootstrapping the lab from the seed above. There is no deadline; the
+lab is judged on the rigour and novelty of what it eventually establishes, not
+on speed. Do not impose or assume a timeline.
 
-You have 30 days. The phases are:
-  - Exploration (~days 1-10):  cast wide; map plausible money-making categories
-  - Convergence (~days 11-17): narrow to the top 3; hunt contradictions
-  - Commitment  (~days 18-20): pick the winning thesis; write the charter
-  - Execution   (~days 21-30): ship to a paying customer
+Right now your ONLY job is to propose 4-6 candidate **research directions** in
+machine learning / AI worth investigating against the Library (a large corpus of
+arXiv papers). A direction is NOT a single experiment — it is a line of inquiry
+the lab could pursue, framed so that evidence could move it. Examples
+(illustrative only — do not use these):
+  - "Retrieval quality is bottlenecked more by chunking/representation than by
+    the reranker, across long-document QA"
+  - "Small models with tool use match larger models on agentic benchmarks once
+    the scaffold is held fixed"
+  - "A specific, under-tested failure mode in mixture-of-experts routing"
 
-Right now your ONLY job is to propose 4-6 candidate **categories** of business
-worth exploring. A category is NOT a specific business idea — it is a class
-of business the company could pursue. Examples (illustrative only — do not
-use these):
-  - "Premium research/intelligence newsletter in an emerging-tech sub-niche"
-  - "Done-for-you service for an admin task most companies hate"
-  - "Hosted open-source tool for a specific developer workflow"
-  - "Productized consulting in a high-friction domain"
-  - "Marketplace/aggregator for a fragmented professional niche"
-
-For each category:
-  - `claim`: one sentence stating the category
-  - `rationale`: 2-3 sentences. Why is this worth exploring? Rough economic
-    logic? Where might differentiation come from?
-  - `risks`: 1-2 sentences. What would kill this category fast?
+For each direction:
+  - `claim`: one sentence stating the direction as a falsifiable thesis
+  - `rationale`: 2-3 sentences. Why does this matter, and why is it
+    under-explored or contested? Where is the leverage?
+  - `risks`: 1-2 sentences. What would make this a dead end — already settled,
+    not measurable, or confounded?
   - `disambiguating_questions`: exactly 3 questions whose answers tell us
-    whether this category is real. These become the first research tasks.
+    whether the direction is real and tractable. These become the first
+    research tasks.
 
 Hard requirements:
-  - **Distinct.** No two categories should compete for the same audience or
-    product shape.
-  - **Stance-compatible.** No arbitrage, slop, MLM patterns, or AI-content
-    businesses. Reread the stance.
-  - **Timeline-compatible.** A business needing 12 months to validate is not
-    viable here.
-  - **Autonomy-compatible.** A category that requires the watcher to make
-    decisions, write content, or evaluate quality is forbidden.
+  - **Distinct.** No two directions should be the same inquiry in different words.
+  - **Evidence-grounded.** Each must be answerable from the literature and/or a
+    runnable experiment — not a matter of opinion or a survey.
+  - **Stance-compatible.** No hype, no incremental deltas dressed as
+    breakthroughs, no survey-only directions. Reread the stance.
+  - **Falsifiable.** A clear result (either way) must be conceivable.
 
-Return 4-6 categories. Five is the right number unless you have a specific
+Return 4-6 directions. Five is the right number unless you have a specific
 reason for more or fewer. Also return a 2-3 sentence `selection_reasoning`
-explaining what space these categories cover and what you deliberately
-excluded.
+explaining what space these directions cover and what you deliberately excluded.
 """
     return PromptLayer(name="task_data", content=content, priority=1)
 
@@ -297,7 +293,7 @@ in the research corpus.
 RECIPES: dict[str, Recipe] = {
     "pi.exploration_kickoff": Recipe(
         invocation_type="pi.exploration_kickoff",
-        description="First-ever PI invocation. Generates 4-6 candidate business categories from the seed.",
+        description="First-ever PI invocation. Generates 4-6 candidate research directions from the seed.",
         agent="pi",
         total_budget=4_000,
         use_cold_path=False,

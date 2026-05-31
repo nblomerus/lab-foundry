@@ -234,17 +234,28 @@ async def main() -> int:
     dispatcher.curator = curator
     dispatcher.router = router
 
+    # KNOWLEDGE_CORE_ONLY: run just Mimir + the collectors (the Library's intake
+    # side), leaving the research workflow dormant. The research handlers fire
+    # only on their trigger events (task.created etc.), so NOT registering them
+    # means a bootstrapped agenda's tasks sit idle and only Mimir acts — the
+    # cleanest "first living agent" start. The claim.created KG sink stays (it
+    # just projects seeded claims into Neo4j; harmless + useful in both modes).
+    knowledge_core_only = os.environ.get("KNOWLEDGE_CORE_ONLY", "").lower() in {"1", "true", "on", "yes"}
+
     # Register handlers — covers the full frame → submit loop
-    dispatcher.register("task.created", handle_task_created)
-    dispatcher.register("task.completed", handle_task_completed)
-    dispatcher.register("finding.high_signal", handle_finding_high_signal)
-    dispatcher.register("claim.invalidated", handle_claim_invalidated)
-    dispatcher.register("queue.empty", handle_queue_empty)
-    dispatcher.register("claim.confidence_changed", handle_claim_confidence_changed)
-    dispatcher.register("phase.transition_proposed", handle_phase_transition_proposed)
-    dispatcher.register("reflection.requested", handle_reflection_requested)
-    dispatcher.register("audit.slop_detected", handle_audit_slop_detected)
-    dispatcher.register("phase.budget_exceeded", handle_phase_budget_exceeded)
+    if not knowledge_core_only:
+        dispatcher.register("task.created", handle_task_created)
+        dispatcher.register("task.completed", handle_task_completed)
+        dispatcher.register("finding.high_signal", handle_finding_high_signal)
+        dispatcher.register("claim.invalidated", handle_claim_invalidated)
+        dispatcher.register("queue.empty", handle_queue_empty)
+        dispatcher.register("claim.confidence_changed", handle_claim_confidence_changed)
+        dispatcher.register("phase.transition_proposed", handle_phase_transition_proposed)
+        dispatcher.register("reflection.requested", handle_reflection_requested)
+        dispatcher.register("audit.slop_detected", handle_audit_slop_detected)
+        dispatcher.register("phase.budget_exceeded", handle_phase_budget_exceeded)
+    else:
+        log.info("KNOWLEDGE_CORE_ONLY — research-workflow handlers NOT registered (Mimir + collectors only)")
     dispatcher.register("claim.created", handle_graph_sink_claim_created)
 
     # Mimir — Warden of the Library. ONE agent owns ingest + trust: on a

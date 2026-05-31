@@ -29,38 +29,37 @@ import asyncpg
 from pydantic import BaseModel, Field
 
 from harness.curator import Curator
-from harness.router import GPULock, Router
+from harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
 
 # =========================================================================
 # THE SEED — the only thing the watcher provides
 # =========================================================================
 
 SEED_PROBLEM = """\
-Discover and execute a business that produces real revenue within 30 days,
-starting from zero — no audience, no product, no domain commitment, no
-hand-holding from the watcher. The output of the first weeks is a thesis
-to commit to; by day 30 you must have shipped a deliverable to at least
-one paying customer who is a stranger to the watcher.
+Discover and rigorously investigate a promising, under-explored direction in
+machine learning / AI research, using the Library (a large corpus of arXiv
+papers) as the evidence base. There is no predetermined topic and no deadline:
+self-discover where the leverage is, frame falsifiable claims, and establish
+novel, well-supported findings — not a survey. The output is defensible
+knowledge, earned against adversarial scrutiny.
 """
 
 SEED_STANCE = """\
-Pragmatist. Allergic to hype, MLM patterns, AI-generated SEO content,
-dropshipping, affiliate-without-substance, and anything that would be
-embarrassing to be publicly associated with. Pursue: real tools, real
-intelligence, or real services that real people would actually pay for.
-Prefer durable, compounding businesses over fast money. Quality is
-non-negotiable; one mediocre product is worse than nothing.
+Demanding about rigour and evidence. Allergic to hype, hand-wavy claims,
+p-hacking, cherry-picked benchmarks, and incremental deltas dressed as
+breakthroughs. Pursue questions where a clear, falsifiable answer would
+actually change how practitioners build systems. Quality of evidence over
+volume of output; one well-supported finding is worth more than ten shallow
+ones. A claim that cannot be tested is not worth making.
 """
 
 SEED_SUCCESS = """\
-By day 30, at least one stranger (not the watcher) has committed to pay
-for and received delivery of something the company produced. Commitment
-is one of: paid invoice, charged payment, or signed contract with a
-delivery date that fell within the 30-day window. The watcher provides
-only infrastructure access (domain, payment processor account, hosting,
-LLC paperwork if needed). The watcher does NOT make decisions, write
-content, evaluate quality, or participate in the work. If the company
-needs the watcher's judgment, the company has failed.
+A claim that survives adversarial scrutiny: reproducible evidence, a quantified
+effect, honestly-stated limitations, and citations into the Library. Success is
+a defensible finding — not a deadline met. There is no timeline; the lab is
+judged on the rigour and novelty of what it establishes. The watcher provides
+only infrastructure (compute, corpus, services) and does NOT make research
+decisions, judge quality, or participate in the work.
 """
 
 
@@ -72,23 +71,23 @@ needs the watcher's judgment, the company has failed.
 class CandidateCategory(BaseModel):
     claim: str = Field(
         ...,
-        description="One sentence stating the category of business (not a specific product).",
+        description="One sentence stating the research direction as a falsifiable thesis.",
     )
     rationale: str = Field(
         ...,
-        description="2-3 sentences on why this is worth exploring, the rough economic logic, "
-        "and where differentiation might come from.",
+        description="2-3 sentences on why this matters and why it is under-explored or contested, "
+        "and where the leverage is.",
     )
     risks: str = Field(
         ...,
-        description="1-2 sentences on what would kill this category fast.",
+        description="1-2 sentences on what would make this a dead end — already settled, not measurable, or confounded.",
     )
     disambiguating_questions: list[str] = Field(
         ...,
         min_length=3,
         max_length=3,
-        description="Three specific questions whose answers tell us whether this category is real. "
-        "These become the first research tasks.",
+        description="Three specific questions whose answers tell us whether the direction is real "
+        "and tractable. These become the first research tasks.",
     )
 
 
@@ -97,7 +96,7 @@ class ExplorationKickoffOutput(BaseModel):
         ...,
         min_length=4,
         max_length=6,
-        description="4-6 distinct, stance-compatible, timeline-compatible categories.",
+        description="4-6 distinct, stance-compatible, falsifiable research directions.",
     )
     selection_reasoning: str = Field(
         ...,
@@ -111,6 +110,9 @@ class ExplorationKickoffOutput(BaseModel):
 
 
 async def bootstrap() -> None:
+    from ops.mimir_firstlight import _load_dotenv
+
+    _load_dotenv()  # so DATABASE_URL + the cloud keys load when run bare
     db_url = os.environ["DATABASE_URL"]
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
@@ -118,7 +120,10 @@ async def bootstrap() -> None:
 
     try:
         # ---------- 1. seed company_state ----------
-        deadline = datetime.now(UTC) + timedelta(days=30)
+        # No timeline: this is a research lab judged on rigour, not speed. The
+        # deadline column is NOT NULL, so use a far-future placeholder — nothing
+        # should apply deadline pressure.
+        deadline = datetime.now(UTC) + timedelta(days=3650)
 
         async with pool.acquire() as conn:
             existing = await conn.fetchval("SELECT 1 FROM company_state WHERE id = 1")
@@ -137,7 +142,7 @@ async def bootstrap() -> None:
                 SEED_SUCCESS.strip(),
                 deadline,
             )
-        print(f"✓ Seeded company_state. Deadline: {deadline.isoformat()}")
+        print("✓ Seeded company_state (research mandate, no timeline).")
 
         # ---------- 2. PI exploration kickoff ----------
         # Wire up clients. In a fuller setup these come from a DI container.
@@ -151,7 +156,16 @@ async def bootstrap() -> None:
 
         curator = Curator(state=state, memory=memory, lessons=lessons)
         gpu_lock = GPULock()
-        router = Router(pool=pool, gpu_lock=gpu_lock, ollama_url=ollama_url)
+        # Wire the cloud/premium chains so the WORKHORSE-tier kickoff uses DeepSeek
+        # (cheap, reliable, and no contention with local Ollama) rather than the
+        # local fallback.
+        router = Router(
+            pool=pool,
+            gpu_lock=gpu_lock,
+            ollama_url=ollama_url,
+            cloud_chain=build_cloud_chain(os.environ),
+            premium_chain=build_premium_chain(os.environ),
+        )
 
         print("→ Invoking PI for exploration kickoff (workhorse tier)...")
         prompt = await curator.build("pi.exploration_kickoff", context={})
@@ -215,7 +229,7 @@ async def bootstrap() -> None:
         print("✓ Bootstrap complete.")
         print(f"  Claims seeded: {len(output.categories)}")
         print(f"  Research tasks queued: {len(output.categories) * 3}")
-        print(f"  Deadline: {deadline.isoformat()}")
+        print("  Timeline: none (research lab)")
         print()
         print("  Selection reasoning from PI:")
         print(f"    {output.selection_reasoning}")
