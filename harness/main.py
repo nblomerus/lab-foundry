@@ -253,9 +253,15 @@ async def main() -> int:
     # handshake). Gated on MIMIR_LOOP (env, default OFF), mirroring the other
     # *_LOOP gates.
     if os.environ.get("MIMIR_LOOP", "").lower() in {"v1", "on"}:
-        from agents.mimir.handler import handle_source_discovered as handle_mimir_source_discovered
+        from agents.mimir.handler import (
+            handle_source_discovered as handle_mimir_source_discovered,
+        )
+        from agents.mimir.handler import (
+            handle_sweep_requested as handle_mimir_sweep_requested,
+        )
 
         dispatcher.register("source.discovered", handle_mimir_source_discovered)
+        dispatcher.register("library.sweep_requested", handle_mimir_sweep_requested)
         log.info("mimir ingest loop ENABLED (MIMIR_LOOP)")
 
     # Graceful shutdown

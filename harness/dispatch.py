@@ -115,6 +115,9 @@ class Dispatcher:
         # Lessons reconciliation runs hourly (the watchdog ticks every 5 min);
         # this stamps the last run so we don't reconcile on every tick.
         self._last_lessons_tick: datetime | None = None
+        # Library discovery sweep runs every LIBRARIAN_SWEEP_HOURS (default 6h);
+        # stamped here so the 5-min watchdog doesn't kick a sweep every tick.
+        self._last_sweep_tick: datetime | None = None
 
     def register(self, event_type: str, handler: Handler) -> None:
         if event_type in self._handlers:
@@ -444,9 +447,36 @@ class Dispatcher:
                     await self._check_phase_budget(conn)
                     await self._refresh_slop_view(conn)
                 await self._reconcile_lessons_if_due()
+                await self._sweep_library_if_due()
             except Exception:
                 log.exception("watchdog sweep failed")
             await asyncio.sleep(300)
+
+    async def _sweep_library_if_due(self) -> None:
+        """Kick Mimir's data collectors periodically by emitting
+        `library.sweep_requested`. Gated on MIMIR_LOOP; throttled to
+        LIBRARIAN_SWEEP_HOURS (default 6h) so the 5-min watchdog doesn't spam it.
+        The Mimir handler turns the event into scout runs -> source.discovered."""
+        if os.environ.get("MIMIR_LOOP", "").lower() not in {"v1", "on"}:
+            return
+        now = datetime.now(UTC)
+        try:
+            hours = float(os.environ.get("LIBRARIAN_SWEEP_HOURS", "6"))
+        except ValueError:
+            hours = 6.0
+        if self._last_sweep_tick is not None and (now - self._last_sweep_tick).total_seconds() < hours * 3600:
+            return
+        self._last_sweep_tick = now
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO events (event_type, target_type, payload, dedup_key)
+                VALUES ('library.sweep_requested', 'ingest_source', '{}'::jsonb, 'sweep-' || $1)
+                ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                """,
+                now.strftime("%Y-%m-%d-%H"),
+            )
+        log.info("library: emitted library.sweep_requested (every %sh)", hours)
 
     async def _reconcile_lessons_if_due(self) -> None:
         """

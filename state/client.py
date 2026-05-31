@@ -1292,3 +1292,14 @@ class PostgresClient:
                 decided_by_run_id,
                 requested_by,
             )
+
+    async def document_exists(self, source_kind: str, canonical_key: str) -> bool:
+        """True if a document with this (source_kind, canonical_key) is already in
+        the corpus. The discovery sweep uses this to skip re-emitting (and thus
+        re-fetching) sources it has already ingested."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM documents WHERE source_kind = $1 AND canonical_key = $2)",
+                source_kind,
+                canonical_key,
+            )
