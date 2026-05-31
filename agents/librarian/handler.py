@@ -50,7 +50,7 @@ async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
     if not _loop_enabled():
         return None
 
-    from agents.librarian.loop import run_ingest_phase_a
+    from library.ingest.pipeline import stage_source
 
     source = (event.get("payload") or {}).get("source")
     if not source:
@@ -59,7 +59,7 @@ async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
 
     state = dispatcher.state
     try:
-        result = await run_ingest_phase_a(source, state, dispatcher=dispatcher)
+        result = await stage_source(source, state, dispatcher=dispatcher)
     except Exception as e:  # noqa: BLE001 — one source failure is non-fatal to the harness
         log.exception("librarian phase A failed for source %r", source)
         return {"failed": True, "reason": str(e)[:200]}
@@ -91,7 +91,7 @@ async def handle_ingest_approved(event: dict, dispatcher) -> dict | None:
     if not _loop_enabled():
         return None
 
-    from agents.librarian.loop import run_ingest_phase_b
+    from library.ingest.pipeline import embed_and_finalize
 
     document_id = event.get("target_id")
     if document_id is None:
@@ -100,7 +100,7 @@ async def handle_ingest_approved(event: dict, dispatcher) -> dict | None:
 
     state = dispatcher.state
     try:
-        return await run_ingest_phase_b(document_id, state)
+        return await embed_and_finalize(document_id, state)
     except Exception as e:  # noqa: BLE001 — one document failure is non-fatal to the harness
         log.exception("librarian phase B failed for doc %s", document_id)
         return {"document_id": document_id, "failed": True, "reason": str(e)[:200]}

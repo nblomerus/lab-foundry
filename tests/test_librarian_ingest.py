@@ -129,8 +129,8 @@ async def _dsn_or_skip() -> str:
 async def test_librarian_ingest_phase_a_then_b(monkeypatch):
     dsn = await _dsn_or_skip()
 
-    from agents.librarian import loop as librarian_loop
     from library.corpus import tools as corpus_tools
+    from library.ingest import pipeline as ingest_pipeline
     from state.client import PostgresClient
 
     fetched_url = "https://example.test/librarian/paper-1"
@@ -139,7 +139,7 @@ async def test_librarian_ingest_phase_a_then_b(monkeypatch):
     async def _fake_web_fetch(url, state, *, force=False, client=None):
         return _FakeFetchedPage(fetched_url, _PAPER_BODY)
 
-    monkeypatch.setattr(librarian_loop, "web_fetch", _fake_web_fetch)
+    monkeypatch.setattr(ingest_pipeline, "web_fetch", _fake_web_fetch)
 
     # --- patch the embedder: deterministic 768-d vector, no Ollama ---
     _fake = _FakeEmbedder()
@@ -169,8 +169,8 @@ async def test_librarian_ingest_phase_a_then_b(monkeypatch):
             "why": "test fixture",
         }
 
-        # ---- PHASE A: fetch -> parse -> chunk-plan -> stage (no vectors) ----
-        res_a = await librarian_loop.run_ingest_phase_a(source, state)
+        # ---- STAGE: fetch -> parse -> chunk-plan -> stage (no vectors) ----
+        res_a = await ingest_pipeline.stage_source(source, state)
         assert res_a.get("awaiting") == "mimir", f"phase A should await Mimir: {res_a}"
         doc_id = res_a["document_id"]
         assert doc_id is not None
@@ -190,12 +190,12 @@ async def test_librarian_ingest_phase_a_then_b(monkeypatch):
         assert len(plan) == n_chunks
         assert all(not c["has_embedding"] for c in plan), "phase A must not embed"
 
-        # Re-running phase A dedupes (same canonical_key).
-        res_a2 = await librarian_loop.run_ingest_phase_a(source, state)
+        # Re-staging dedupes (same canonical_key).
+        res_a2 = await ingest_pipeline.stage_source(source, state)
         assert res_a2.get("deduped") is True, f"re-run should dedupe: {res_a2}"
 
-        # ---- PHASE B: embed -> KG (best-effort) -> flip queryable ----
-        res_b = await librarian_loop.run_ingest_phase_b(doc_id, state)
+        # ---- FINALIZE: embed -> KG (best-effort) -> flip queryable ----
+        res_b = await ingest_pipeline.embed_and_finalize(doc_id, state)
         assert res_b.get("queryable") is True, f"phase B should flip queryable: {res_b}"
         assert res_b.get("embedded") == n_chunks, "all staged chunks should embed"
 
