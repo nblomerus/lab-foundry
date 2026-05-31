@@ -1254,6 +1254,19 @@ class PostgresClient:
                 document_id,
             )
 
+    async def set_document_license(self, document_id: int, license: str | None) -> None:
+        """Persist a resolved license (e.g. a GitHub SPDX id) onto the document.
+        Captured by Mimir during signal resolution, before the trust gate runs —
+        so a restrictive license is both queryable here and visible to the gate."""
+        if not license:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE documents SET license = $1 WHERE id = $2",
+                license,
+                document_id,
+            )
+
     async def append_certification(
         self,
         document_id: int,

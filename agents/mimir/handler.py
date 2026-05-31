@@ -14,8 +14,10 @@ classify_trust is ~95% zero-token deterministic; the lone LLM step (the
 web_reputable/web_unknown tie-breaker, mimir.certify) runs only when needs_llm
 fires AND a router/curator are wired. Gated on MIMIR_LOOP (env, default OFF).
 
-Remaining deferred: license capture at stage time — the license hard-gate is
-built, but no source exposes a license to feed it yet.
+License capture: _resolve_signals reads a GitHub repo's SPDX id and persists it
+(state.set_document_license) before the gate runs, so a restrictive license can
+fire the hard-gate. arXiv's API exposes no license, so papers stay license-None
+(correctly not blocked).
 """
 
 from __future__ import annotations
@@ -77,12 +79,23 @@ async def _doi_resolves(doi: str) -> bool:
         return False
 
 
-async def _github_repo_signals(url: str | None) -> tuple[bool | None, int | None]:
-    """For a github.com/<owner>/<repo> URL, return (has_release, days_since_push)
-    via the GitHub API (GITHUB_TOKEN used if set). (None, None) on any failure."""
+def _spdx_or_none(license_obj: dict | None) -> str | None:
+    """Pull a usable SPDX id from the GitHub `license` object. GitHub reports
+    `NOASSERTION` when it can't detect a standard license — treat that (and a
+    missing license) as unknown (None), NOT as a block, to avoid over-quarantining."""
+    spdx = (license_obj or {}).get("spdx_id")
+    if not spdx or spdx.upper() in {"NOASSERTION", "NONE"}:
+        return None
+    return spdx
+
+
+async def _github_repo_signals(url: str | None) -> tuple[bool | None, int | None, str | None]:
+    """For a github.com/<owner>/<repo> URL, return (has_release, days_since_push,
+    license_spdx) via the GitHub API (GITHUB_TOKEN used if set). The license is the
+    repo's detected SPDX id (e.g. 'MIT', 'GPL-3.0'). (None, None, None) on failure."""
     parts = [p for p in urlparse(url or "").path.split("/") if p]
     if len(parts) < 2:
-        return None, None
+        return None, None, None
     owner, repo = parts[0], parts[1]
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "labfoundry-mimir"}
     token = os.environ.get("GITHUB_TOKEN")
@@ -92,17 +105,19 @@ async def _github_repo_signals(url: str | None) -> tuple[bool | None, int | None
         async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, headers=headers) as client:
             meta_resp = await client.get(f"https://api.github.com/repos/{owner}/{repo}")
             if meta_resp.status_code != 200:
-                return None, None
-            pushed = meta_resp.json().get("pushed_at")
+                return None, None, None
+            body = meta_resp.json()
+            pushed = body.get("pushed_at")
             days = None
             if pushed:
                 dt = datetime.fromisoformat(pushed.replace("Z", "+00:00"))
                 days = (datetime.now(UTC) - dt).days
+            license_spdx = _spdx_or_none(body.get("license"))
             rel = await client.get(f"https://api.github.com/repos/{owner}/{repo}/releases", params={"per_page": 1})
             has_release = rel.status_code == 200 and bool(rel.json())
-            return has_release, days
+            return has_release, days, license_spdx
     except Exception:  # noqa: BLE001 — best-effort probe
-        return None, None
+        return None, None, None
 
 
 async def _resolve_signals(meta: DocMeta) -> None:
@@ -113,7 +128,11 @@ async def _resolve_signals(meta: DocMeta) -> None:
         meta.doi_resolves = await _doi_resolves(meta.doi)
     host = (urlparse(meta.source_url or "").hostname or "").lower()
     if host == "github.com" or host.endswith(".github.com"):
-        meta.github_has_release, meta.github_days_since_push = await _github_repo_signals(meta.source_url)
+        meta.github_has_release, meta.github_days_since_push, license_spdx = await _github_repo_signals(meta.source_url)
+        # A repo's own license is more authoritative than anything staged; only
+        # overwrite when the probe actually found one.
+        if license_spdx:
+            meta.license = license_spdx
 
 
 async def _block(state, doc_id: int, *, signals: dict, reason: str, used_llm: bool) -> dict:
@@ -185,6 +204,8 @@ async def ingest_source(source, state, *, router=None, curator=None, session=Non
     doc = await state.get_document(doc_id)
     meta = _doc_meta(doc)
     await _resolve_signals(meta)  # best-effort: lifts DOI->peer_reviewed, active repo->official_repo
+    if meta.license:  # capture a resolved license (e.g. GitHub SPDX) onto the doc
+        await state.set_document_license(doc_id, meta.license)
     tc = classify_trust(meta)
 
     if tc.blocked:
