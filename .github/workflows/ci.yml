@@ -57,6 +57,20 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     needs: lint
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: labfoundry
+          POSTGRES_PASSWORD: labfoundry
+          POSTGRES_DB: labfoundry
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U labfoundry -d labfoundry"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://labfoundry:labfoundry@localhost:5432/labfoundry
     steps:
       - uses: actions/checkout@v4
 
@@ -71,11 +85,13 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio pytest-cov
 
+      - name: Apply baseline schema
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_schema.sql
+
       - name: Run tests with coverage
-        # DB-backed integration tests (labfoundry_corpus, librarian_ingest) skip
-        # themselves here because DATABASE_URL is unset. To run them in CI, add a
-        # `pgvector/pgvector:pg16` service, apply migrations, and set DATABASE_URL
-        # (pending a fresh-init-clean migration set — see migration 008 notes).
+        # The pgvector service + applied schema let the DB-backed integration
+        # tests (labfoundry_corpus, librarian_ingest) run here; they monkeypatch
+        # the embedder, so no Ollama is needed.
         run: pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Upload coverage report

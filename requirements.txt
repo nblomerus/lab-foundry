@@ -142,6 +142,8 @@ packaging==26.2
     # via
     #   langfuse
     #   pytest
+pgvector==0.4.2
+    # via -r requirements.in
 platformdirs==4.9.6
     # via
     #   python-discovery

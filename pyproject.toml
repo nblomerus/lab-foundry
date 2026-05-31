@@ -39,8 +39,7 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
-# Coverage floor enforced by CI (pytest-cov reads this). In CI neither a DB
-# (DATABASE_URL) nor pgvector is present, so the corpus/librarian integration
-# tests skip and this reflects the no-DB unit-level floor (~21%). Ratchet up as
-# the suite grows / a pgvector+Postgres service is added to CI.
-fail_under = 20
+# Coverage floor enforced by CI (pytest-cov reads this). CI now runs a pgvector
+# Postgres service with the baseline schema applied, so the DB-backed integration
+# tests run too (~27%). Ratchet up as the suite grows.
+fail_under = 26
