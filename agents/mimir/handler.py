@@ -115,3 +115,16 @@ async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
     result = await embed_and_finalize(doc_id, state)
     log.info("mimir: APPROVED doc %s at tier=%s — %s", doc_id, tc.tier, tc.reason)
     return {"document_id": doc_id, "decision": "approve", "tier": tc.tier, **result}
+
+
+async def handle_sweep_requested(event: dict, dispatcher) -> dict | None:
+    """Triggered by `library.sweep_requested` (the watchdog tick, or a manual
+    trigger). Runs the data collectors over the topics on the event payload, or
+    the env/default standing topics, emitting `source.discovered` per new source."""
+    if not _loop_enabled():
+        return None
+
+    from agents.mimir.collectors import run_discovery_sweep
+
+    topics = (event.get("payload") or {}).get("topics")
+    return await run_discovery_sweep(topics, dispatcher.state)
