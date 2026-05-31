@@ -225,3 +225,92 @@ async def test_librarian_ingest_phase_a_then_b(monkeypatch):
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM documents WHERE source_kind = $1", TEST_SOURCE_KIND)
         await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_mimir_certifies_and_ingests(monkeypatch):
+    """Mimir (one agent) stages a discovered source, classify_trust-gates it,
+    writes the trust verdict + an immutable certification, then finalizes —
+    no separate Librarian, no ingest_approved handshake."""
+    dsn = await _dsn_or_skip()
+
+    from agents.mimir.handler import handle_source_discovered
+    from library.corpus import tools as corpus_tools
+    from library.ingest import pipeline as ingest_pipeline
+    from state.client import PostgresClient
+
+    monkeypatch.setenv("MIMIR_LOOP", "on")
+
+    # arxiv.org host -> classify_trust returns 'preprint' deterministically.
+    arxiv_url = "https://arxiv.org/abs/2401.99999"
+
+    async def _fake_web_fetch(url, state, *, force=False, client=None):
+        return _FakeFetchedPage(arxiv_url, _PAPER_BODY)
+
+    monkeypatch.setattr(ingest_pipeline, "web_fetch", _fake_web_fetch)
+
+    _fake = _FakeEmbedder()
+
+    async def _fake_get_embedder():
+        return _fake
+
+    monkeypatch.setattr(corpus_tools, "_get_embedder", _fake_get_embedder)
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, init=_init_conn)
+    state = PostgresClient(pool=pool)
+
+    class _Dispatcher:
+        pass
+
+    dispatcher = _Dispatcher()
+    dispatcher.state = state
+
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM documents WHERE source_kind = $1", TEST_SOURCE_KIND)
+
+    try:
+        source = {
+            "kind": "paper",
+            "source_kind": TEST_SOURCE_KIND,
+            "canonical_key": "test_librarian_ingest:mimir-paper",
+            "url": arxiv_url,
+            "arxiv_id": "2401.99999",
+            "doi": None,
+            "title": "Trust-Gated Ingest",
+            "why": "test fixture",
+        }
+        event = {"id": 1, "payload": {"source": source}}
+
+        res = await handle_source_discovered(event, dispatcher)
+        assert res["decision"] == "approve", res
+        assert res["tier"] == "preprint"
+        doc_id = res["document_id"]
+
+        async with pool.acquire() as conn:
+            doc = await conn.fetchrow("SELECT * FROM documents WHERE id = $1", doc_id)
+            cert = await conn.fetchrow(
+                "SELECT * FROM certifications WHERE document_id = $1 ORDER BY id DESC LIMIT 1",
+                doc_id,
+            )
+        assert doc["queryable"] is True, "approved doc must be queryable after finalize"
+        assert doc["trust_tier"] == "preprint"
+        assert doc["status"] == "certified"
+        assert doc["trust_state"] == "provisional"
+        assert cert is not None
+        assert cert["decision"] == "approve"
+        assert cert["to_tier"] == "preprint"
+        assert cert["used_llm"] is False
+
+        # Re-discovery dedupes at stage time, so Mimir does not re-certify.
+        res2 = await handle_source_discovered(event, dispatcher)
+        assert res2.get("deduped") is True, res2
+    finally:
+        # certifications has no ON DELETE CASCADE (immutable audit ledger), so
+        # clear it before the documents it references.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM certifications WHERE document_id IN (SELECT id FROM documents WHERE source_kind = $1)",
+                TEST_SOURCE_KIND,
+            )
+            await conn.execute("DELETE FROM documents WHERE source_kind = $1", TEST_SOURCE_KIND)
+        await pool.close()

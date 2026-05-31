@@ -247,19 +247,16 @@ async def main() -> int:
     dispatcher.register("phase.budget_exceeded", handle_phase_budget_exceeded)
     dispatcher.register("claim.created", handle_graph_sink_claim_created)
 
-    # Librarian ingest loop — gated on LIBRARIAN_LOOP (default OFF), mirroring
-    # the RESEARCHER_LOOP / ADVERSARY_LOOP / AUDITOR_LOOP / PLANNER_LOOP gates.
-    # source.discovered -> phase A (fetch/parse/chunk/stage, awaiting Mimir);
-    # mimir.ingest_approved -> phase B (embed/KG/flip queryable).
-    if os.environ.get("LIBRARIAN_LOOP", "").lower() in {"v1", "on"}:
-        from agents.librarian.handler import (
-            handle_ingest_approved,
-            handle_source_discovered,
-        )
+    # Mimir — Warden of the Library. ONE agent owns ingest + trust: on a
+    # discovered source it stages, classify_trust-gates, then finalizes or
+    # quarantines inline (no separate Librarian agent, no ingest_approved
+    # handshake). Gated on MIMIR_LOOP (env, default OFF), mirroring the other
+    # *_LOOP gates.
+    if os.environ.get("MIMIR_LOOP", "").lower() in {"v1", "on"}:
+        from agents.mimir.handler import handle_source_discovered as handle_mimir_source_discovered
 
-        dispatcher.register("source.discovered", handle_source_discovered)
-        dispatcher.register("mimir.ingest_approved", handle_ingest_approved)
-        log.info("librarian ingest loop ENABLED (LIBRARIAN_LOOP)")
+        dispatcher.register("source.discovered", handle_mimir_source_discovered)
+        log.info("mimir ingest loop ENABLED (MIMIR_LOOP)")
 
     # Graceful shutdown
     stop_event = asyncio.Event()
