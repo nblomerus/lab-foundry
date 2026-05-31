@@ -52,19 +52,13 @@ def _doc_meta(doc: dict) -> DocMeta:
     )
 
 
-async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
-    """Triggered by `source.discovered`. Stage the source, classify its trust,
-    write the verdict + an immutable certification, then finalize (approve) or
-    quarantine (block). The source rides the event payload."""
-    if not _loop_enabled():
-        return None
+async def ingest_source(source, state) -> dict:
+    """The shared trust-gated ingest core used by BOTH discovery and acquire.
 
-    source = (event.get("payload") or {}).get("source")
-    if not source:
-        log.warning("mimir: source.discovered event %s has no payload.source", event.get("id"))
-        return {"skipped": True, "reason": "no source in payload"}
-
-    state = dispatcher.state
+    Stage the source (cheap: fetch/parse/chunk, no vectors), classify its trust,
+    write the verdict + an immutable certification, then finalize (approve →
+    embed + queryable) or quarantine (block). Returns a result dict with a
+    `decision` of "approve"/"block" (or a stage skip/dedupe/failure dict)."""
     try:
         staged = await stage_source(source, state)
     except Exception as e:  # noqa: BLE001 — one source failure is non-fatal to the harness
@@ -115,6 +109,20 @@ async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
     result = await embed_and_finalize(doc_id, state)
     log.info("mimir: APPROVED doc %s at tier=%s — %s", doc_id, tc.tier, tc.reason)
     return {"document_id": doc_id, "decision": "approve", "tier": tc.tier, **result}
+
+
+async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
+    """Triggered by `source.discovered` (the collectors' push path). The source
+    rides the event payload; hand it to the shared trust-gated ingest core."""
+    if not _loop_enabled():
+        return None
+
+    source = (event.get("payload") or {}).get("source")
+    if not source:
+        log.warning("mimir: source.discovered event %s has no payload.source", event.get("id"))
+        return {"skipped": True, "reason": "no source in payload"}
+
+    return await ingest_source(source, dispatcher.state)
 
 
 async def handle_sweep_requested(event: dict, dispatcher) -> dict | None:

@@ -262,6 +262,11 @@ async def main() -> int:
 
         dispatcher.register("source.discovered", handle_mimir_source_discovered)
         dispatcher.register("library.sweep_requested", handle_mimir_sweep_requested)
+
+        # Acquire/pull path: PI/Researcher/Novelty ask Mimir for a specific source.
+        from agents.mimir.acquire import handle_acquire_requested as handle_mimir_acquire_requested
+
+        dispatcher.register("acquire.requested", handle_mimir_acquire_requested)
         log.info("mimir ingest loop ENABLED (MIMIR_LOOP)")
 
     # Graceful shutdown
