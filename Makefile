@@ -143,10 +143,15 @@ bootstrap:
 harness:
 	python -m harness.main
 
+# Drive ONE Mimir cycle on demand against the live stack (preflight -> ingest ->
+# report). The fast way to fully test the Library without booting the full loop.
+mimir-firstlight:
+	python -m ops.mimir_firstlight $(ARGS)
+
 api:
 	$(VENV_PYTHON) -m uvicorn api.main:app --host 0.0.0.0 --port $(API_PORT) --reload
 
-.PHONY: web web-install dev api harness bootstrap
+.PHONY: web web-install dev api harness bootstrap mimir-firstlight
 
 web-install:
 	cd web && $(WEB_ENV) npm install
