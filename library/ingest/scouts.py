@@ -35,13 +35,19 @@ THE SCOUT PATTERN (copy this for github/openml/…):
 from __future__ import annotations
 
 import logging
+import os
 
+import httpx
 from pydantic import BaseModel
 
 from library.ingest.fetcher import search_arxiv
 from library.ingest.schemas import DocumentKind
 
 log = logging.getLogger(__name__)
+
+_SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
+_GITHUB_API = "https://api.github.com"
+_SCOUT_UA = "labfoundry-scout"
 
 
 # -------------------------------------------------------------------------
@@ -110,4 +116,80 @@ async def scout_arxiv(
                 why=f"arxiv topic: {topic}",
             )
 
+    return list(seen.values())
+
+
+# -------------------------------------------------------------------------
+# Web scout — SearXNG (kind='web'). Self-contained (no agents.* import) so the
+# library layer stays independent. Best-effort: empty list on any failure.
+# -------------------------------------------------------------------------
+
+
+async def scout_web(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
+    """Scout the open web (SearXNG) for pages on `topics`. canonical_key is the
+    URL. PURE: returns descriptors only (the collector emits/dedupes)."""
+    seen: dict[str, SourceDescriptor] = {}
+    async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": _SCOUT_UA}) as client:
+        for topic in topics:
+            try:
+                resp = await client.get(
+                    f"{_SEARXNG_URL}/search",
+                    params={"q": topic, "format": "json", "categories": "general"},
+                )
+                results = resp.json().get("results", []) if resp.status_code == 200 else []
+            except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
+                log.warning("scout_web: topic %r failed: %s", topic, e)
+                continue
+            for r in results[:per_topic]:
+                url = r.get("url")
+                if not url or url in seen:
+                    continue
+                seen[url] = SourceDescriptor(
+                    kind="web",
+                    source_kind="web",
+                    canonical_key=url,
+                    url=url,
+                    title=(r.get("title") or None),
+                    why=f"web topic: {topic}",
+                )
+    return list(seen.values())
+
+
+# -------------------------------------------------------------------------
+# GitHub scout — repo search (kind='code'). Uses GITHUB_TOKEN if set.
+# -------------------------------------------------------------------------
+
+
+async def scout_github(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
+    """Scout GitHub for repos matching `topics` (sorted by stars). canonical_key
+    is 'owner/repo'. PURE: returns descriptors only. Best-effort."""
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": _SCOUT_UA}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    seen: dict[str, SourceDescriptor] = {}
+    async with httpx.AsyncClient(timeout=8.0, headers=headers) as client:
+        for topic in topics:
+            try:
+                resp = await client.get(
+                    f"{_GITHUB_API}/search/repositories",
+                    params={"q": topic, "sort": "stars", "per_page": per_topic},
+                )
+                items = resp.json().get("items", []) if resp.status_code == 200 else []
+            except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
+                log.warning("scout_github: topic %r failed: %s", topic, e)
+                continue
+            for it in items:
+                full = it.get("full_name")
+                if not full or full in seen:
+                    continue
+                seen[full] = SourceDescriptor(
+                    kind="code",
+                    source_kind="github",
+                    canonical_key=full,
+                    url=it.get("html_url"),
+                    title=full,
+                    why=f"github topic: {topic}",
+                )
     return list(seen.values())

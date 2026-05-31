@@ -46,7 +46,7 @@ async def test_sweep_emits_source_discovered_for_new(db, monkeypatch):
     async def _fake_scout(topics, per_topic=5):
         return _descriptors()
 
-    monkeypatch.setattr(collectors, "scout_arxiv", _fake_scout)
+    monkeypatch.setitem(collectors._SCOUTS, "arxiv", _fake_scout)
     await _clean(db)
     try:
         res = await collectors.run_discovery_sweep(["anything"], db)
@@ -69,7 +69,7 @@ async def test_sweep_skips_already_ingested(db, monkeypatch):
     async def _fake_scout(topics, per_topic=5):
         return _descriptors()
 
-    monkeypatch.setattr(collectors, "scout_arxiv", _fake_scout)
+    monkeypatch.setitem(collectors._SCOUTS, "arxiv", _fake_scout)
     await _clean(db)
     try:
         # Pre-ingest the first descriptor; the sweep should skip it.
@@ -83,6 +83,35 @@ async def test_sweep_skips_already_ingested(db, monkeypatch):
         assert n == 1
     finally:
         await _clean(db)
+
+
+async def test_sweep_emits_trends_digest(db, monkeypatch):
+    import agents.mimir.collectors as collectors
+
+    async def _fake_scout(topics, per_topic=5):
+        return _descriptors()
+
+    monkeypatch.setitem(collectors._SCOUTS, "arxiv", _fake_scout)
+    await _clean(db)
+    try:
+        await collectors.run_discovery_sweep(["anything"], db)
+        row = await db.pool.fetchrow("SELECT payload FROM events WHERE event_type = 'library.trends'")
+        assert row is not None
+        payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+        assert payload["count"] == 2
+        assert len(payload["new"]) == 2
+    finally:
+        await _clean(db)
+
+
+async def test_default_sweep_topics_track_active_claims(db, monkeypatch):
+    from agents.mimir.collectors import default_sweep_topics
+
+    monkeypatch.delenv("LIBRARY_TOPICS", raising=False)
+    await db.create_claim("speculative decoding for faster LLM inference", 0.6)
+    topics = await default_sweep_topics(db)
+    assert any("speculative decoding" in t for t in topics)  # agenda steers discovery
+    assert len(topics) > 1  # frontier defaults still present
 
 
 def test_discovery_topics_default(monkeypatch):
