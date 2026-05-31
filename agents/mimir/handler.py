@@ -23,11 +23,17 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
+from urllib.parse import urlparse
+
+import httpx
 
 from library.ingest.pipeline import embed_and_finalize, stage_source
 from library.trust import DocMeta, classify_trust
 
 log = logging.getLogger(__name__)
+
+_PROBE_TIMEOUT = 5.0
 
 
 def _loop_enabled() -> bool:
@@ -36,13 +42,8 @@ def _loop_enabled() -> bool:
 
 
 def _doc_meta(doc: dict) -> DocMeta:
-    """Build the trust signals from a staged `documents` row.
-
-    DOI/GitHub resolution is a follow-up, so doi_resolves stays False here — an
-    unresolved DOI falls through the ladder rather than over-crediting itself to
-    peer_reviewed. arXiv (preprint), reputable-domain (web_reputable) and the
-    license gate are the live deterministic signals today.
-    """
+    """Build the base trust signals from a staged `documents` row. The probe-
+    backed signals (doi_resolves, github_*) are filled by _resolve_signals."""
     return DocMeta(
         source_url=doc.get("source_url"),
         doi=doc.get("doi"),
@@ -50,6 +51,57 @@ def _doc_meta(doc: dict) -> DocMeta:
         arxiv_id=doc.get("arxiv_id"),
         license=doc.get("license"),
     )
+
+
+async def _doi_resolves(doi: str) -> bool:
+    """HEAD https://doi.org/<doi> — True if it resolves (<400). Best-effort: a
+    resolving DOI is what lifts a doc to peer_reviewed, so a probe failure stays
+    conservative (False -> falls through the ladder)."""
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, follow_redirects=True) as client:
+            resp = await client.head(f"https://doi.org/{doi}")
+            return resp.status_code < 400
+    except Exception:  # noqa: BLE001 — best-effort probe
+        return False
+
+
+async def _github_repo_signals(url: str | None) -> tuple[bool | None, int | None]:
+    """For a github.com/<owner>/<repo> URL, return (has_release, days_since_push)
+    via the GitHub API (GITHUB_TOKEN used if set). (None, None) on any failure."""
+    parts = [p for p in urlparse(url or "").path.split("/") if p]
+    if len(parts) < 2:
+        return None, None
+    owner, repo = parts[0], parts[1]
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "labfoundry-mimir"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, headers=headers) as client:
+            meta_resp = await client.get(f"https://api.github.com/repos/{owner}/{repo}")
+            if meta_resp.status_code != 200:
+                return None, None
+            pushed = meta_resp.json().get("pushed_at")
+            days = None
+            if pushed:
+                dt = datetime.fromisoformat(pushed.replace("Z", "+00:00"))
+                days = (datetime.now(UTC) - dt).days
+            rel = await client.get(f"https://api.github.com/repos/{owner}/{repo}/releases", params={"per_page": 1})
+            has_release = rel.status_code == 200 and bool(rel.json())
+            return has_release, days
+    except Exception:  # noqa: BLE001 — best-effort probe
+        return None, None
+
+
+async def _resolve_signals(meta: DocMeta) -> None:
+    """Best-effort network probes that fill the signals classify_trust needs for
+    the top tiers (peer_reviewed via a resolving DOI, official_repo via an active
+    GitHub repo). Mutates `meta`; any failure leaves the conservative default."""
+    if meta.doi:
+        meta.doi_resolves = await _doi_resolves(meta.doi)
+    host = (urlparse(meta.source_url or "").hostname or "").lower()
+    if host == "github.com" or host.endswith(".github.com"):
+        meta.github_has_release, meta.github_days_since_push = await _github_repo_signals(meta.source_url)
 
 
 async def ingest_source(source, state) -> dict:
@@ -70,7 +122,9 @@ async def ingest_source(source, state) -> dict:
         return staged  # skipped / deduped — nothing fresh to certify
 
     doc = await state.get_document(doc_id)
-    tc = classify_trust(_doc_meta(doc))
+    meta = _doc_meta(doc)
+    await _resolve_signals(meta)  # best-effort: lifts DOI->peer_reviewed, active repo->official_repo
+    tc = classify_trust(meta)
 
     if tc.blocked:
         await state.set_document_trust(doc_id, tier="quarantined", trust_state="quarantined", status="blocked")

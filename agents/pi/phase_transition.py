@@ -13,6 +13,7 @@ marked 'merged' with parent_id pointing to the winning one.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -39,6 +40,14 @@ class CharterContent(BaseModel):
 class PhaseTransitionDecision(BaseModel):
     action: Literal["ratify", "reject", "defer"]
     reasoning: str = Field(..., min_length=20)
+    needed_sources: list[str] = Field(
+        default_factory=list,
+        max_length=3,
+        description=(
+            "Up to 3 specific papers/topics the mission is missing to make or "
+            "support this decision well. Mimir will try to acquire them."
+        ),
+    )
     chosen_claim_id: int | None = Field(
         default=None,
         description="If transitioning to commitment/execution: the winning claim.",
@@ -133,6 +142,30 @@ if "pi.phase_transition_ratify" not in RECIPES:
 # -------------------------------------------------------------------------
 
 
+async def _request_pi_sources(needed: list[str], state) -> None:
+    """Route the PI's flagged mission gaps into Mimir's acquire path (gated on
+    MIMIR_LOOP). Fire-and-forget; Mimir's per-agent daily cap bounds volume."""
+    if os.environ.get("MIMIR_LOOP", "").lower() not in {"v1", "on"}:
+        return
+    from agents.mimir.acquire import AcquireRequest, request_acquire
+
+    for topic in needed[:3]:
+        t = (topic or "").strip()
+        if not t:
+            continue
+        try:
+            await request_acquire(
+                state,
+                AcquireRequest(
+                    requester="pi",
+                    query=t,
+                    why=f"PI flagged a mission gap needing a source during a phase transition: {t}",
+                ),
+            )
+        except Exception:  # noqa: BLE001 — a failed request must never sink the transition
+            log.exception("PI: gap-source acquire request failed")
+
+
 async def handle_phase_transition_proposed(event: dict, dispatcher) -> dict | None:
     """
     Triggered by phase.transition_proposed. PI ratifies, rejects, or defers.
@@ -178,6 +211,10 @@ async def handle_phase_transition_proposed(event: dict, dispatcher) -> dict | No
         "target_phase": target_phase,
         "run_id": run_id,
     }
+
+    # The PI may flag sources the mission is missing — ask Mimir to acquire them.
+    if decision.needed_sources:
+        await _request_pi_sources(decision.needed_sources, dispatcher.state)
 
     # -- Reject --
     if decision.action == "reject":
