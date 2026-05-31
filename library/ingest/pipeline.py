@@ -1,39 +1,25 @@
 """
-loop.py — the Librarian ingest loop (MIMIR_WARDEN_SCOPE.md §3).
+pipeline.py — the deterministic ingest tools Mimir calls (MIMIR_WARDEN_SCOPE §3).
 
-The Librarian is the corpus DOER. Phase 2 keeps the whole ingest pipeline
-DETERMINISTIC — there are NO LLM recipes here:
+Two pure-doer functions, NO LLM:
 
-  * fetch  — resolve full text via the existing `fetcher` read path.
-  * parse  — `parser.parse_paper` (vendored rag-bench, heuristic, no LLM).
-  * chunk  — `chunker.PaperChunker().plan` (vendored rag-bench, tokenizer math).
-  * embed  — the SAME embedder the corpus read path uses
-             (`labfoundry_corpus.tools._get_embedder`); no new embedder.
-  * KG     — `merge_paper` from the parsed metadata only (best-effort, swallowed).
+  stage_source(source, state)
+      fetch -> parse -> chunk-plan -> upsert `documents` (trust columns left at
+      their quarantined/provisional DB defaults — Mimir owns them) -> stage the
+      chunk plan (text only, NO vectors) -> emit `document.parsed`. Cheap; runs
+      BEFORE the trust decision so a blocked source never costs an embed pass.
 
-THE MIMIR GATE — why the loop is split into two phases
-------------------------------------------------------
-The Librarian governs NOTHING. It must "never self-certify". That invariant is
-encoded MECHANICALLY by splitting the loop at the trust gate:
+  embed_and_finalize(document_id, state)
+      embed the staged chunks -> write vectors -> best-effort MERGE the KG Paper
+      node -> flip `documents.queryable` -> emit `document.ingested`. Runs only
+      AFTER Mimir approves the document.
 
-  PHASE A  (run on `source.discovered`):
-      fetch -> parse -> chunk-plan -> upsert `documents` row (trust columns at
-      their DB defaults: status='quarantined', trust_state='provisional') ->
-      stage the chunk plan (text only, NO vectors) -> emit `document.parsed`.
-      Phase A costs ONE cheap pass and then STOPS, awaiting Mimir.
-
-  PHASE B  (run ONLY on `mimir.ingest_approved`):
-      embed the staged chunks -> write vectors -> best-effort MERGE the KG
-      Paper node -> flip `documents.queryable` -> emit `document.ingested`.
-
-Making phase B a SEPARATE invocation triggered by Mimir's event turns the trust
-gate into a hard control-flow boundary, not a politeness convention: a blocked
-source costs one parse pass, never the (much larger) embed pass.
-
-Mimir (Phase 3) does not exist yet. The dev escape `LIBRARIAN_AUTO_APPROVE`
-(env, default OFF) lets phase A emit `mimir.ingest_approved` itself so the
-pipeline can run end-to-end before Mimir lands. The emission lives in the
-handler (`handlers/librarian.py`), not here, so the loop stays a pure doer.
+Mimir orchestrates the two with the trust gate between them:
+    stage_source -> classify_trust -> (certify) -> embed_and_finalize
+Splitting at the gate keeps "never spend the expensive embed on an untrusted
+source" a mechanical control-flow fact, not a politeness convention. fetch /
+parse / chunk / embed / KG are all deterministic — the only judgment (trust)
+lives in classify_trust + Mimir, never here.
 """
 
 from __future__ import annotations
@@ -106,14 +92,14 @@ async def _resolve_arxiv_fulltext(
 
     # Fallback: the abstract. Re-query arXiv by id (best-effort).
     log.info(
-        "librarian: ar5iv full text for %s too short (%d chars) — falling back to abstract",
+        "ingest: ar5iv full text for %s too short (%d chars) — falling back to abstract",
         arxiv_id,
         len(text),
     )
     try:
         results = await search_arxiv(f"id:{arxiv_id}", max_results=1)
     except Exception as e:  # noqa: BLE001 — fallback is best-effort
-        log.warning("librarian: abstract fallback search_arxiv(%s) failed: %s", arxiv_id, e)
+        log.warning("ingest: abstract fallback search_arxiv(%s) failed: %s", arxiv_id, e)
         results = []
 
     if results and results[0].abstract.strip():
@@ -145,22 +131,22 @@ async def _resolve_fulltext(
 
 
 # -------------------------------------------------------------------------
-# PHASE A — fetch -> parse -> chunk-plan -> persist (provisional), STOP
+# STAGE — fetch -> parse -> chunk-plan -> persist (provisional), STOP
 # -------------------------------------------------------------------------
 
 
-async def run_ingest_phase_a(
+async def stage_source(
     source: dict | SourceDescriptor,
     state,
     *,
     dispatcher=None,
 ) -> dict:
-    """Run phase A of ingest for one discovered source.
+    """Stage one discovered source for ingest (the pre-trust pass).
 
     Resolves full text, parses + chunk-plans deterministically, upserts the
     `documents` row (trust columns left at their quarantined/provisional DB
     defaults — Mimir owns them), stages the chunk plan WITHOUT vectors, and
-    emits `document.parsed`. Then STOPS, awaiting `mimir.ingest_approved`.
+    emits `document.parsed`. Then STOPS — Mimir decides trust before any embed.
 
     Returns one of:
       {"skipped": True, "reason": ...}                 — nothing fetchable
@@ -171,7 +157,7 @@ async def run_ingest_phase_a(
 
     text, fetched_url = await _resolve_fulltext(desc, state)
     if not text or not text.strip():
-        log.info("librarian phase A: no fetchable text for %s/%s", desc.source_kind, desc.canonical_key)
+        log.info("ingest stage: no fetchable text for %s/%s", desc.source_kind, desc.canonical_key)
         return {"skipped": True, "reason": "empty/blocked"}
 
     # Parse (deterministic, no LLM).
@@ -205,7 +191,7 @@ async def run_ingest_phase_a(
 
     if not is_new:
         log.info(
-            "librarian phase A: %s/%s already ingested as doc %s — deduped",
+            "ingest stage: %s/%s already ingested as doc %s — deduped",
             desc.source_kind,
             desc.canonical_key,
             doc_id,
@@ -228,7 +214,7 @@ async def run_ingest_phase_a(
     )
 
     log.info(
-        "librarian phase A: doc %s staged %d/%d chunks — awaiting Mimir",
+        "ingest stage: doc %s staged %d/%d chunks — awaiting Mimir",
         doc_id,
         n_inserted,
         len(plan),
@@ -237,7 +223,7 @@ async def run_ingest_phase_a(
 
 
 # -------------------------------------------------------------------------
-# PHASE B — embed -> write vectors -> KG -> flip queryable (Mimir-approved only)
+# FINALIZE — embed -> write vectors -> KG -> flip queryable (post-approval)
 # -------------------------------------------------------------------------
 
 
@@ -265,7 +251,7 @@ async def _embed_pending(plan: list[dict]) -> tuple[list[dict], int, int]:
                 vec = await embedder.embed(c["text"])
             except Exception as e:  # noqa: BLE001 — per-chunk embed failure is non-fatal
                 failed += 1
-                log.warning("librarian phase B: embed failed for chunk ord %s: %s", c.get("ordinal"), e)
+                log.warning("ingest finalize: embed failed for chunk ord %s: %s", c.get("ordinal"), e)
                 continue
             rows.append(
                 {
@@ -278,8 +264,8 @@ async def _embed_pending(plan: list[dict]) -> tuple[list[dict], int, int]:
     return rows, len(rows), failed
 
 
-async def run_ingest_phase_b(document_id: int, state) -> dict:
-    """Run phase B of ingest for one Mimir-approved document.
+async def embed_and_finalize(document_id: int, state) -> dict:
+    """Finalize one Mimir-approved document (the post-trust pass).
 
     Embeds the staged chunks lacking a vector (via the corpus read path's
     embedder), writes the vectors, best-effort MERGEs the KG Paper node from the
@@ -292,13 +278,13 @@ async def run_ingest_phase_b(document_id: int, state) -> dict:
     """
     doc = await state.get_document(document_id)
     if doc is None:
-        log.info("librarian phase B: doc %s not found — skipping", document_id)
+        log.info("ingest finalize: doc %s not found — skipping", document_id)
         return {"skipped": True, "reason": "not_found"}
 
     # Mimir blocked it: status='blocked' or trust_state quarantined/decayed.
     if doc.get("status") == "blocked" or doc.get("trust_state") in {"quarantined", "decayed"}:
         log.info(
-            "librarian phase B: doc %s blocked by Mimir (status=%s, trust_state=%s) — skipping",
+            "ingest finalize: doc %s blocked by Mimir (status=%s, trust_state=%s) — skipping",
             document_id,
             doc.get("status"),
             doc.get("trust_state"),
@@ -326,7 +312,7 @@ async def run_ingest_phase_b(document_id: int, state) -> dict:
             authors=list(doc.get("authors") or []),
         )
     except Exception:  # noqa: BLE001 — KG is best-effort, never blocks ingest
-        log.exception("librarian phase B: merge_paper failed for doc %s — continuing", document_id)
+        log.exception("ingest finalize: merge_paper failed for doc %s — continuing", document_id)
 
     await state.set_document_queryable(document_id, True)
 
@@ -344,7 +330,7 @@ async def run_ingest_phase_b(document_id: int, state) -> dict:
     )
 
     log.info(
-        "librarian phase B: doc %s queryable — embedded %d chunks (%d failed)",
+        "ingest finalize: doc %s queryable — embedded %d chunks (%d failed)",
         document_id,
         embedded,
         failed,
