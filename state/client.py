@@ -1303,3 +1303,18 @@ class PostgresClient:
                 source_kind,
                 canonical_key,
             )
+
+    async def count_acquires_today(self, requester: str) -> int:
+        """Count `acquire.requested` events from `requester` since midnight UTC —
+        Mimir's per-agent daily acquisition cap (no extra table; the event bus is
+        the ledger)."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM events
+                WHERE event_type = 'acquire.requested'
+                  AND payload->>'requester' = $1
+                  AND emitted_at >= date_trunc('day', NOW())
+                """,
+                requester,
+            )
