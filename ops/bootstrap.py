@@ -3,7 +3,7 @@ Bootstrap the LabFoundry research lab. Run once at the start of a research manda
 
 Steps:
   1. Seed company_state with the research mandate / methodology / success-criterion.
-  2. Invoke the PI in 'pi.frame_research' mode to generate 4-6
+  2. Invoke the PI in 'pi.exploration_kickoff' mode to generate 4-6
      candidate research questions.
   3. Insert each question as a claim with initial confidence (confidence=0.40).
   4. For each claim, queue knowledge acquisition tasks to ground it in literature.
@@ -161,29 +161,24 @@ async def bootstrap() -> None:
         )
         print(f"✓ PI returned {len(output.categories)} categories (run #{run_id}).")
 
-        # ---------- 3. Insert categories as theses ----------
-        async with pool.acquire() as conn, conn.transaction():
-            for cat in output.categories:
-                thesis_id = await conn.fetchval(
-                    """
-                        INSERT INTO theses (claim, confidence, created_by_run_id)
-                        VALUES ($1, $2, $3)
-                        RETURNING id
-                        """,
-                    cat.claim,
-                    0.40,
-                    run_id,
-                )
-                # ---------- 4. Queue disambiguating questions ----------
+        # ---------- 3. Insert categories as claims ----------
+        for cat in output.categories:
+            claim = await state.create_claim(
+                cat.claim,
+                initial_confidence=0.40,
+                created_by_run_id=run_id,
+            )
+            # ---------- 4. Queue disambiguating questions as research tasks ----------
+            async with pool.acquire() as conn, conn.transaction():
                 for q in cat.disambiguating_questions:
                     await conn.execute(
                         """
                             INSERT INTO tasks (
-                                thesis_id, department, task_type,
+                                claim_id, department, task_type,
                                 description, payload, priority
                             ) VALUES ($1, 'research', 'disambiguate', $2, $3::jsonb, 5)
                             """,
-                        thesis_id,
+                        claim.id,
                         q,
                         json.dumps(
                             {
@@ -192,7 +187,7 @@ async def bootstrap() -> None:
                             }
                         ),
                     )
-                print(f"  ↳ T{thesis_id}: {cat.claim}")
+            print(f"  ↳ C{claim.id}: {cat.claim}")
 
         # ---------- 5. Emit bootstrap event ----------
         async with pool.acquire() as conn:
@@ -209,7 +204,7 @@ async def bootstrap() -> None:
                 """,
                 json.dumps(
                     {
-                        "thesis_count": len(output.categories),
+                        "claim_count": len(output.categories),
                         "run_id": run_id,
                         "deadline": deadline.isoformat(),
                     }
@@ -218,7 +213,7 @@ async def bootstrap() -> None:
 
         print()
         print("✓ Bootstrap complete.")
-        print(f"  Theses seeded: {len(output.categories)}")
+        print(f"  Claims seeded: {len(output.categories)}")
         print(f"  Research tasks queued: {len(output.categories) * 3}")
         print(f"  Deadline: {deadline.isoformat()}")
         print()
@@ -226,7 +221,7 @@ async def bootstrap() -> None:
         print(f"    {output.selection_reasoning}")
         print()
         print("Start the harness now:")
-        print("    python -m src.harness.main")
+        print("    python -m harness.main")
 
     finally:
         await router.close()
