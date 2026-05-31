@@ -253,3 +253,149 @@ async def test_detect_slop_breaker_below_threshold(db):
 async def test_create_critic_verdict_schema_mismatch(db):
     c = await db.create_claim("c", 0.5)
     await db.create_critic_verdict(claim_id=c.id, verdict="kill", confidence=0.9, reasoning="r", cited_finding_ids=[])
+
+
+# ---- fetch cache ---------------------------------------------------------
+
+
+async def test_fetch_cache_roundtrip(db):
+    assert await db.fetch_cache_get("http://x/a") is None
+    await db.fetch_cache_put(
+        "http://x/a",
+        content="hello",
+        extractor="trafilatura",
+        status_code=200,
+        bytes_fetched=5,
+        ttl_seconds=3600,
+    )
+    hit = await db.fetch_cache_get("http://x/a")
+    assert hit is not None
+    assert hit["content"] == "hello"
+    assert hit["extractor"] == "trafilatura"
+
+
+async def test_fetch_cache_upsert_overwrites(db):
+    await db.fetch_cache_put("http://x/b", "v1", "e1", 200, 2, 3600)
+    await db.fetch_cache_put("http://x/b", "v2", "e2", 500, 2, 3600)
+    hit = await db.fetch_cache_get("http://x/b")
+    assert hit["content"] == "v2"
+    assert hit["status_code"] == 500
+
+
+async def test_fetch_cache_expired_is_miss(db):
+    # ttl 0 -> expires_at = now(), so it's already non-future -> a miss
+    await db.fetch_cache_put("http://x/c", "stale", "e", 200, 5, 0)
+    assert await db.fetch_cache_get("http://x/c") is None
+
+
+# ---- research loop: inquiries / evidence / experiments -------------------
+
+
+async def test_record_inquiry(db):
+    tid = await _make_task(db)
+    iid = await db.record_inquiry(
+        task_id=tid,
+        iteration=0,
+        question="why?",
+        sub_questions=[{"q": "sub1"}],
+        proposed_experiments=[{"kind": "fetch_pricing"}],
+    )
+    assert iid > 0
+    tree = await db.get_research_tree(tid)
+    assert len(tree["inquiries"]) == 1
+    assert tree["inquiries"][0]["question"] == "why?"
+    assert tree["inquiries"][0]["sub_questions"] == [{"q": "sub1"}]
+
+
+async def test_record_evidence_and_read(db):
+    tid = await _make_task(db)
+    eid = await db.record_evidence(
+        task_id=tid,
+        inquiry_id=None,
+        sub_question_idx=0,
+        url="http://e",
+        quote="q",
+        claim="c",
+        stance="supports",
+        confidence=0.7,
+        title="T",
+    )
+    assert eid > 0
+    rows = await db.get_evidence_for_task(tid)
+    assert len(rows) == 1
+    assert rows[0]["stance"] == "supports"
+    assert rows[0]["url"] == "http://e"
+
+
+async def test_record_evidence_rejects_bad_confidence(db):
+    tid = await _make_task(db)
+    with pytest.raises(ValueError):
+        await db.record_evidence(
+            task_id=tid,
+            inquiry_id=None,
+            sub_question_idx=0,
+            url="u",
+            quote="q",
+            claim="c",
+            stance="neutral",
+            confidence=1.5,
+        )
+
+
+async def test_experiment_lifecycle(db):
+    tid = await _make_task(db)
+    xid = await db.start_experiment(task_id=tid, inquiry_id=None, kind="fetch_pricing", params={"url": "http://p"})
+    running = await db.get_experiment_runs_for_task(tid)
+    assert running[0]["status"] == "running"
+    assert running[0]["params"] == {"url": "http://p"}
+    await db.complete_experiment(xid, result={"price": 9.99}, interpretation="cheap")
+    done = await db.get_experiment_runs_for_task(tid)
+    assert done[0]["status"] == "completed"
+    assert done[0]["result"] == {"price": 9.99}
+    assert done[0]["interpretation"] == "cheap"
+
+
+async def test_fail_experiment(db):
+    tid = await _make_task(db)
+    xid = await db.start_experiment(task_id=tid, inquiry_id=None, kind="k", params={})
+    await db.fail_experiment(xid, "exploded")
+    rows = await db.get_experiment_runs_for_task(tid)
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["error"] == "exploded"
+
+
+async def test_get_research_tree_assembles_everything(db):
+    c = await db.create_claim("c", 0.5)
+    tid = await db.pool.fetchval(
+        "INSERT INTO tasks (department, task_type, description, claim_id) "
+        "VALUES ('research', 'execute', 't', $1) RETURNING id",
+        c.id,
+    )
+    await db.record_inquiry(task_id=tid, iteration=0, question="q", sub_questions=[], proposed_experiments=[])
+    await db.record_evidence(
+        task_id=tid,
+        inquiry_id=None,
+        sub_question_idx=0,
+        url="u",
+        quote="q",
+        claim="c",
+        stance="neutral",
+        confidence=0.5,
+    )
+    await db.start_experiment(task_id=tid, inquiry_id=None, kind="k", params={})
+    await db.record_finding(
+        task_id=tid,
+        source="w",
+        title="t",
+        summary="s",
+        relevance_score=7,
+        why_it_matters="w",
+        claim_id=c.id,
+    )
+    tree = await db.get_research_tree(tid)
+    assert tree["task"]["id"] == tid
+    assert len(tree["inquiries"]) == 1
+    assert len(tree["evidence"]) == 1
+    assert len(tree["experiments"]) == 1
+    assert len(tree["findings"]) == 1
+    assert tree["agent_runs"] == []  # none recorded

@@ -184,7 +184,7 @@ async def main() -> int:
     async with pool.acquire() as conn:
         bootstrapped = await conn.fetchval("SELECT 1 FROM company_state WHERE id = 1")
     if not bootstrapped:
-        log.error("company_state not seeded; run `python -m src.bootstrap` first")
+        log.error("company_state not seeded; run `python -m ops.bootstrap` first")
         await pool.close()
         return 1
 
