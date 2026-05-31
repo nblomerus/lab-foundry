@@ -148,10 +148,15 @@ harness:
 mimir-firstlight:
 	python -m ops.mimir_firstlight $(ARGS)
 
+# Bulk-seed the Library from the rag-bench arXiv corpus (~21.8k papers, ~2h).
+# Resumable: safe to Ctrl-C and re-run. ARGS="--limit 100" for a pilot.
+seed-corpus:
+	python -m ops.seed_corpus $(ARGS)
+
 api:
 	$(VENV_PYTHON) -m uvicorn api.main:app --host 0.0.0.0 --port $(API_PORT) --reload
 
-.PHONY: web web-install dev api harness bootstrap mimir-firstlight
+.PHONY: web web-install dev api harness bootstrap mimir-firstlight seed-corpus
 
 web-install:
 	cd web && $(WEB_ENV) npm install
