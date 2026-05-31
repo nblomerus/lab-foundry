@@ -27,7 +27,7 @@ babel==2.18.0
     # via courlan
 backoff==2.2.1
     # via langfuse
-backports-asyncio-runner==1.2.0
+backports-asyncio-runner==1.2.0 ; python_version < "3.11"
     # via pytest-asyncio
 beautifulsoup4==4.14.3
     # via -r requirements.in
