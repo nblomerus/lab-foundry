@@ -100,6 +100,13 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "You translate claims into concrete research tasks. Each task must be falsifiable, "
         "scoped to one claim, and produceable by a knowledge scout in a single session."
     ),
+    "mimir": (
+        "You are Mimir, Warden of the Library. You decide whether a source is trustworthy "
+        "enough to enter the research corpus. Most trust is settled deterministically; you are "
+        "consulted ONLY for ambiguous web sources with no verifiable identifier. Approve "
+        "credible, citable sources; block spam, SEO filler, and unverifiable claims. You may "
+        "not mint paper-grade trust — that requires a verifiable identifier you don't have here."
+    ),
 }
 
 
@@ -262,6 +269,27 @@ excluded.
     return PromptLayer(name="task_data", content=content, priority=1)
 
 
+async def _build_mimir_certify_task_data(ctx: dict, state, memory) -> PromptLayer:
+    content = f"""## Source under trust review
+
+Title: {ctx.get("title") or "(none)"}
+URL:   {ctx.get("source_url") or "(none)"}
+Host:  {ctx.get("host") or "(unknown)"}
+
+This source has NO falsifiable trust identifier (not arXiv, no resolving DOI, not
+an active GitHub repo, not a known-reputable domain). Decide whether it belongs
+in the research corpus.
+
+- decision: "approve" for a credible, citable source; "block" for spam / SEO
+  filler / content farms / unverifiable claims.
+- tier: user_asserted | web_unknown | web_reputable (you may NOT set a higher
+  tier — paper-grade trust needs a verifiable identifier). Default to web_unknown
+  unless the source is clearly reputable.
+- reasons: 1-2 sentences.
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
 # -------------------------------------------------------------------------
 # Recipe registry
 # -------------------------------------------------------------------------
@@ -300,6 +328,17 @@ RECIPES: dict[str, Recipe] = {
         output_schema="ResearcherFindings",
         task_data_builder=_build_researcher_task_data,
     ),
+    "mimir.certify": Recipe(
+        invocation_type="mimir.certify",
+        description="Mimir's trust tie-breaker for an ambiguous web source with no verifiable identifier.",
+        agent="mimir",
+        total_budget=6_000,
+        use_cold_path=True,
+        recall_sessions=[],
+        recall_k=0,
+        output_schema="MimirVerdict",
+        task_data_builder=_build_mimir_certify_task_data,
+    ),
 }
 
 
@@ -313,6 +352,7 @@ TOOLS_BY_AGENT: dict[str, list[str]] = {
     "researcher": ["labfoundry-state", "labfoundry-events", "labfoundry-research"],
     "evaluation": ["labfoundry-state", "labfoundry-memory", "labfoundry-events"],
     "adversary": ["labfoundry-state", "labfoundry-memory", "labfoundry-events", "labfoundry-research"],
+    "mimir": ["labfoundry-state", "labfoundry-corpus", "labfoundry-knowledge"],
 }
 
 

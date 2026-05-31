@@ -278,6 +278,7 @@ ROUTE: dict[str, Tier] = {
     "critic.kill_verdict": Tier.REASONING,
     # Workhorse — standard strategic / tactical
     "pi.exploration_kickoff": Tier.WORKHORSE,
+    "mimir.certify": Tier.WORKHORSE,  # only the ~5% ambiguous web_unknown case; the deterministic path is free
     "pi.weekly_synthesis": Tier.WORKHORSE,
     "pi.rescore_claims": Tier.WORKHORSE,
     "pi.spawn_claim": Tier.WORKHORSE,
