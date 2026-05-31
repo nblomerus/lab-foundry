@@ -9,7 +9,7 @@ started working again. _coerce_dt normalizes all cases to a datetime.
 
 from datetime import UTC, datetime
 
-from labfoundry.memory.client import _coerce_dt
+from memory.client import _coerce_dt
 
 
 def test_parses_iso_string_with_z():

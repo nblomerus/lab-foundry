@@ -15,7 +15,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _reset_corpus_singletons():
     try:
-        from labfoundry.mcp_servers.labfoundry_corpus import tools
+        from library.corpus import tools
     except Exception:
         # pgvector/asyncpg not importable in this environment — nothing to reset.
         yield

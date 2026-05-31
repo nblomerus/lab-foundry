@@ -1,22 +1,8 @@
-# Packaging + tooling config for LabFoundry. Runtime deps are pinned in
-# requirements.txt (pip-compiled from requirements.in); `pip install -e .` makes
-# the src/-layout package importable (so `python -m labfoundry.…` works).
-
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "labfoundry"
-description = "LabFoundry — an autonomous AI research lab"
-requires-python = ">=3.11"
-dynamic = ["version"]
-
-[tool.setuptools.dynamic]
-version = { file = "version" }
-
-[tool.setuptools.packages.find]
-where = ["src"]
+# Tooling config for LabFoundry (ruff / pytest / coverage). LabFoundry runs as an
+# application, not an installable package: the top-level domain folders (agents/,
+# harness/, library/, state/, …) are importable from the repo root — no install
+# step. Runtime deps are pinned in requirements.txt (pip-compiled from
+# requirements.in); the canonical version lives in the `version` file.
 
 [tool.ruff]
 line-length = 122  # matches rag-bench
@@ -36,19 +22,19 @@ fixable = ["ALL"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["."]
 asyncio_mode = "strict"
 addopts = "-ra"
 # DB-backed integration tests skip themselves unless DATABASE_URL points at a
 # migrated pgvector database (see tests/test_labfoundry_corpus.py).
 
 [tool.coverage.run]
-source = ["labfoundry"]
+source = ["agents", "harness", "library", "state", "memory", "skills", "api", "ops"]
 branch = true
 omit = [
     "tests/*",
     "*/server.py",                  # thin MCP/FastMCP wrappers
-    "src/labfoundry/bootstrap.py",
+    "ops/bootstrap.py",
 ]
 
 [tool.coverage.report]

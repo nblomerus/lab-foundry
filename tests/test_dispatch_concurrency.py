@@ -13,7 +13,7 @@ import asyncio
 
 import pytest
 
-from labfoundry.harness.dispatch import Dispatcher
+from harness.dispatch import Dispatcher
 
 # --------------------------------------------------------------------------
 # Fake asyncpg pool / connection

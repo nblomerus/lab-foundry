@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 
-from labfoundry.research.librarian import ChunkPlanItem, PaperChunker, ParsedDoc
+from library.ingest import ChunkPlanItem, PaperChunker, ParsedDoc
 
 
 def _make_doc() -> ParsedDoc:

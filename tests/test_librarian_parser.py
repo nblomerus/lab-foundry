@@ -11,8 +11,8 @@ plus citation metadata, and asserts that `parse_paper`:
 
 from __future__ import annotations
 
-from labfoundry.research.librarian import ChunkPlanItem, PaperChunker, ParsedDoc
-from labfoundry.research.librarian.parser import parse_paper
+from library.ingest import ChunkPlanItem, PaperChunker, ParsedDoc
+from library.ingest.parser import parse_paper
 
 # A realistic arxiv-like markdown paper: multiple section headers, an acronym
 # definition in-line, an equation block, and a blocklisted References section.

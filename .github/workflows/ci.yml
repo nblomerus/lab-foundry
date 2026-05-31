@@ -76,7 +76,7 @@ jobs:
         # themselves here because DATABASE_URL is unset. To run them in CI, add a
         # `pgvector/pgvector:pg16` service, apply migrations, and set DATABASE_URL
         # (pending a fresh-init-clean migration set — see migration 008 notes).
-        run: pytest --cov=labfoundry --cov-report=term-missing --cov-report=xml:coverage.xml
+        run: pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Upload coverage report
         if: always()

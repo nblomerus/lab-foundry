@@ -8,7 +8,7 @@ StartLimitIntervalSec=0
 Type=simple
 WorkingDirectory=/home/nicholas/workspace/lab-foundry
 EnvironmentFile=/home/nicholas/workspace/lab-foundry/.env
-ExecStart=/home/nicholas/.pyenv/versions/labfoundry/bin/python -m uvicorn labfoundry.api.main:app --host 0.0.0.0 --port 8503
+ExecStart=/home/nicholas/.pyenv/versions/labfoundry/bin/python -m uvicorn api.main:app --host 0.0.0.0 --port 8503
 Restart=always
 RestartSec=10
 

@@ -138,13 +138,13 @@ psql:
 # ---------------------- LabFoundry commands ----------------------
 
 bootstrap:
-	python -m labfoundry.bootstrap
+	python -m ops.bootstrap
 
 harness:
-	python -m labfoundry.harness.main
+	python -m harness.main
 
 api:
-	$(VENV_PYTHON) -m uvicorn labfoundry.api.main:app --host 0.0.0.0 --port $(API_PORT) --reload
+	$(VENV_PYTHON) -m uvicorn api.main:app --host 0.0.0.0 --port $(API_PORT) --reload
 
 .PHONY: web web-install dev api harness bootstrap
 
@@ -156,15 +156,15 @@ web:
 
 dev:
 	@trap 'kill 0' INT TERM EXIT; \
-	$(VENV_PYTHON) -m uvicorn labfoundry.api.main:app --host 0.0.0.0 --port $(API_PORT) --reload & \
+	$(VENV_PYTHON) -m uvicorn api.main:app --host 0.0.0.0 --port $(API_PORT) --reload & \
 	(cd web && $(WEB_ENV) PORT=$(WEB_PORT) npm run dev) & \
 	wait
 
 research-mcp:
-	python -m labfoundry.mcp_servers.labfoundry_research.server
+	python -m agents.researcher.server
 
 state-mcp:
-	python -m labfoundry.mcp_servers.labfoundry_state.server
+	python -m state.server
 
 
 # ---------------------- Cleanup ----------------------

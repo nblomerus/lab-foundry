@@ -42,18 +42,18 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 
 # Force experiment kinds + curator recipes to register at import time.
-import labfoundry.research.experiments  # noqa: F401
-import labfoundry.research.loop  # noqa: F401
-from labfoundry.handlers.task_completed import handle_task_completed
-from labfoundry.harness.curator import Curator
-from labfoundry.harness.router import (
+import agents.researcher.experiments  # noqa: F401
+import agents.researcher.loop  # noqa: F401
+from agents.evaluation.handler import handle_task_completed
+from agents.researcher.loop import run_research_task
+from harness.curator import Curator
+from harness.router import (
     GPULock,
     Router,
     build_cloud_chain,
     build_premium_chain,
 )
-from labfoundry.research.loop import run_research_task
-from labfoundry.state.client import PostgresClient
+from state.client import PostgresClient
 
 logging.basicConfig(
     level=logging.INFO,
