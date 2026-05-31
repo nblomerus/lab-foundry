@@ -1214,11 +1214,81 @@ class PostgresClient:
         document_id: int,
         value: bool = True,
     ) -> None:
-        """Flip documents.queryable (the Librarian sets it after embed/upsert
-        succeeds, so the retrieval path can see the doc)."""
+        """Flip documents.queryable (the ingest pipeline sets it after embed/
+        upsert succeeds, so the retrieval path can see the doc)."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE documents SET queryable = $1 WHERE id = $2",
                 value,
                 document_id,
+            )
+
+    async def set_document_trust(
+        self,
+        document_id: int,
+        *,
+        tier: str,
+        trust_state: str,
+        status: str,
+        certified_by_run_id: int | None = None,
+    ) -> None:
+        """Write Mimir's trust verdict onto the document — the denormalized hot
+        path (certifications holds the immutable history). Mimir owns these
+        columns; the ingest tools never touch them."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE documents
+                SET trust_tier = $1::trust_tier,
+                    trust_state = $2::trust_state,
+                    status = $3::document_status,
+                    certified_by_run_id = $4,
+                    certified_at = NOW(),
+                    last_trust_review_at = NOW()
+                WHERE id = $5
+                """,
+                tier,
+                trust_state,
+                status,
+                certified_by_run_id,
+                document_id,
+            )
+
+    async def append_certification(
+        self,
+        document_id: int,
+        *,
+        decision: str,
+        to_tier: str,
+        to_state: str,
+        from_tier: str | None = None,
+        signals: dict | None = None,
+        used_llm: bool = False,
+        reasons: str = "",
+        decided_by_run_id: int | None = None,
+        requested_by: str | None = None,
+    ) -> int:
+        """Append an immutable certifications row — Mimir's audit trail (the
+        critic_verdicts-style append ledger behind the denormalized trust_*)."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                INSERT INTO certifications (
+                    document_id, decision, from_tier, to_tier, to_state,
+                    signals, used_llm, reasons, decided_by_run_id, requested_by
+                )
+                VALUES ($1, $2, $3::trust_tier, $4::trust_tier, $5::trust_state,
+                        $6::jsonb, $7, $8, $9, $10)
+                RETURNING id
+                """,
+                document_id,
+                decision,
+                from_tier,
+                to_tier,
+                to_state,
+                json.dumps(signals or {}),
+                used_llm,
+                reasons,
+                decided_by_run_id,
+                requested_by,
             )
