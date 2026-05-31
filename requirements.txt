@@ -88,6 +88,8 @@ httpx-sse==0.4.3
     # via mcp
 identify==2.6.19
     # via pre-commit
+ijson==3.5.0
+    # via labfoundry (ops.seed_corpus streams the multi-GB rag-bench corpus)
 idna==3.16
     # via
     #   anyio
