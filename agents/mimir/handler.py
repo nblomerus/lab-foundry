@@ -137,7 +137,7 @@ async def _block(state, doc_id: int, *, signals: dict, reason: str, used_llm: bo
         dedup_key=f"blocked-{doc_id}",
     )
     log.info("mimir: BLOCKED doc %s — %s", doc_id, reason)
-    return {"document_id": doc_id, "decision": "block", "reason": reason}
+    return {"document_id": doc_id, "decision": "block", "reason": reason, "used_llm": used_llm}
 
 
 async def _certify_llm(doc: dict, curator, router, session) -> MimirVerdict | None:
@@ -214,7 +214,7 @@ async def ingest_source(source, state, *, router=None, curator=None, session=Non
     )
     result = await embed_and_finalize(doc_id, state)
     log.info("mimir: APPROVED doc %s at tier=%s (llm=%s) — %s", doc_id, tier, used_llm, reason)
-    return {"document_id": doc_id, "decision": "approve", "tier": tier, **result}
+    return {"document_id": doc_id, "decision": "approve", "tier": tier, "used_llm": used_llm, **result}
 
 
 async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
