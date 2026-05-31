@@ -40,7 +40,13 @@ import sys
 import time
 from pathlib import Path
 
-from ops.mimir_firstlight import _load_dotenv, _register_vector_codec
+import asyncpg
+import httpx
+import ijson
+
+from library.corpus.tools import EMBED_MODEL
+from ops._env import load_dotenv, register_vector_codec
+from state.client import PostgresClient
 
 DATA_DIR = "/mnt/data/rag-bench-data"
 _OK, _NO, _DOT = "✓", "✗", "•"
@@ -67,8 +73,6 @@ def _arxiv_id_from_doc(doc_id: str, meta: dict | None) -> str:
 
 class _BatchEmbedder:
     def __init__(self, ollama_url: str, model: str, dim: int = 768):
-        import httpx
-
         self.url, self.model, self.dim = ollama_url, model, dim
         self._http = httpx.AsyncClient(timeout=180.0)
 
@@ -96,8 +100,6 @@ class _BatchEmbedder:
 
 
 def _build_or_load_meta(parsed_path: Path, cache_path: Path) -> dict[str, dict]:
-    import ijson
-
     if cache_path.exists():
         print(f"  {_DOT} loading cached metadata index ({cache_path.name})")
         with cache_path.open() as f:
@@ -131,8 +133,6 @@ def _grouped_chunks(chunks_path: Path):
     """Stream chunks.json, yielding (doc_id, [chunk_text, …]) per paper. Assumes
     chunks are contiguous by doc_id (they are: chunk_id is 'arxiv_<id>_<sec>_<n>',
     written per paper)."""
-    import ijson
-
     cur, texts = None, []
     with chunks_path.open("rb") as fh:
         for ch in ijson.items(fh, "item"):
@@ -221,7 +221,7 @@ async def _ingest(state, embedder, doc_id: str, raw_texts: list[str], meta: dict
 
 
 async def run(args: argparse.Namespace) -> int:
-    _load_dotenv()
+    load_dotenv()
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         print("DATABASE_URL not set (and no .env) — cannot run.", file=sys.stderr)
@@ -233,15 +233,10 @@ async def run(args: argparse.Namespace) -> int:
             print(f"{_NO} missing {p}", file=sys.stderr)
             return 2
 
-    import asyncpg
-
-    from library.corpus.tools import EMBED_MODEL
-    from state.client import PostgresClient
-
     print(f"Bulk-seeding from {data} (embedder={EMBED_MODEL}, batch={args.batch_size}, limit={args.limit or 'all'})")
     meta_index = _build_or_load_meta(parsed_path, data / ".lf_meta_index.json")
 
-    pool = await asyncpg.create_pool(db_url, min_size=2, max_size=6, init=_register_vector_codec)
+    pool = await asyncpg.create_pool(db_url, min_size=2, max_size=6, init=register_vector_codec)
     state = PostgresClient(pool=pool)
     embedder = _BatchEmbedder(os.environ.get("OLLAMA_URL", "http://localhost:11434"), EMBED_MODEL)
 

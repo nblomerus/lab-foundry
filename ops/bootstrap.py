@@ -30,6 +30,10 @@ from pydantic import BaseModel, Field
 
 from harness.curator import Curator
 from harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
+from memory.client import ZepClient
+from ops._env import load_dotenv
+from skills.client import LessonsClient
+from state.client import PostgresClient
 
 # =========================================================================
 # THE SEED — the only thing the watcher provides
@@ -110,9 +114,7 @@ class ExplorationKickoffOutput(BaseModel):
 
 
 async def bootstrap() -> None:
-    from ops.mimir_firstlight import _load_dotenv
-
-    _load_dotenv()  # so DATABASE_URL + the cloud keys load when run bare
+    load_dotenv()  # so DATABASE_URL + the cloud keys load when run bare
     db_url = os.environ["DATABASE_URL"]
     ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
@@ -145,11 +147,6 @@ async def bootstrap() -> None:
         print("✓ Seeded company_state (research mandate, no timeline).")
 
         # ---------- 2. PI exploration kickoff ----------
-        # Wire up clients. In a fuller setup these come from a DI container.
-        from memory.client import ZepClient
-        from skills.client import LessonsClient
-        from state.client import PostgresClient
-
         state = PostgresClient(pool=pool)
         memory = ZepClient.from_env()
         lessons = LessonsClient(pool=pool)
