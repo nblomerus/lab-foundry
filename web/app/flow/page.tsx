@@ -2,13 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import { ResearchLoop } from "../components/ResearchLoop";
-import type { PowerSummary } from "../components/LiveFlow";
+import { Floorplan } from "../components/Floorplan";
 import type { Snapshot } from "../lib/types";
 
-export default function FlowPage() {
+export default function FloorplanPage() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
-  const [power, setPower] = useState<PowerSummary | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -16,34 +14,14 @@ export default function FlowPage() {
     const load = async () => {
       try {
         const s = await api.snapshot();
-        if (!cancelled) {
-          setSnap(s);
-          setErr(null);
-        }
+        if (!cancelled) { setSnap(s); setErr(null); }
       } catch (e) {
         if (!cancelled) setErr(String(e));
-      }
-      // Hardware/budget telemetry for the Quartermaster. Non-fatal: if the
-      // debug endpoint is down, the node falls back to budget-only.
-      try {
-        const costs = await api.debugCosts();
-        if (!cancelled && costs?.power) {
-          setPower({
-            total_watts: costs.power.total_watts,
-            gpu_count: costs.power.gpus.length,
-            projected_usd_per_day: costs.power.projected_usd_per_day,
-          });
-        }
-      } catch {
-        /* leave power null — Quartermaster shows budget only */
       }
     };
     load();
     const id = setInterval(load, 6_000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
 
   if (err) {
@@ -55,9 +33,7 @@ export default function FlowPage() {
     );
   }
 
-  if (!snap) {
-    return <div className="text-sm text-slate-500">Loading snapshot…</div>;
-  }
-
-  return <ResearchLoop snapshot={snap} power={power} />;
+  // The floorplan renders fine with a null snapshot (it just omits live badges),
+  // so we don't gate on loading — the building is drawn immediately.
+  return <Floorplan snapshot={snap} />;
 }
