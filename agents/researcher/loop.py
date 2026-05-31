@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from agents.researcher.schemas import (
     EvidenceBatch,
@@ -485,6 +486,38 @@ MAX_PAGES_PER_SUBQ = 4  # safety cap on fetches per sub-question
 MAX_EVIDENCE_TO_SYNTH = 60  # cap how much evidence we ship into synthesis
 
 
+async def _request_gap_sources(gap, task, state) -> None:
+    """Fire-and-forget: ask Mimir to acquire a source for the Researcher's top
+    knowledge gap on this claim. The LLM's `gap_check` already named what's
+    missing; this routes the top gap into the acquire/pull path so the corpus
+    grows for the next pass — it never blocks this task.
+
+    Gated on MIMIR_LOOP (no consumer to fulfil it otherwise). One request per
+    gap_check (top gap only); Mimir's per-agent daily cap bounds the rest.
+    """
+    if os.environ.get("MIMIR_LOOP", "").lower() not in {"v1", "on"}:
+        return
+    if not gap.gaps:
+        return
+    top = gap.gaps[0].strip()
+    if not top:
+        return
+    try:
+        from agents.mimir.acquire import AcquireRequest, request_acquire
+
+        await request_acquire(
+            state,
+            AcquireRequest(
+                requester="researcher",
+                query=top,
+                claim_id=task.claim_id,
+                why=f"researcher needs a source to close a knowledge gap on claim {task.claim_id}: {top}",
+            ),
+        )
+    except Exception:  # noqa: BLE001 — a failed request must never sink the research task
+        log.exception("researcher: gap-source acquire request failed")
+
+
 async def run_research_task(task, dispatcher, *, triggered_by_event_id=None) -> dict:
     """
     Drive the agentic researcher loop for one claimed task.
@@ -708,6 +741,11 @@ async def run_research_task(task, dispatcher, *, triggered_by_event_id=None) -> 
             step_name=f"gap_check/iter{iteration}",
             parent_step_id=synth_run_id,
         )
+
+        # The gaps the LLM just named are missing info worth acquiring whether or
+        # not we iterate this task — ask Mimir to pull a source for the top one.
+        if gap.has_gaps and task.claim_id:
+            await _request_gap_sources(gap, task, state)
 
         if not gap.should_iterate or not gap.proposed_followups:
             break
