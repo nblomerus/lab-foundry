@@ -1,0 +1,11 @@
+# Local dev hooks. Install once with: pre-commit install
+# Pinned to the same ruff the CI lint job uses, so local + CI agree on format.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14
+    hooks:
+      - id: ruff
+        args: [--fix]
+        types_or: [python, pyi]
+      - id: ruff-format
+        types_or: [python, pyi]

@@ -1,0 +1,56 @@
+# Packaging + tooling config for LabFoundry. Runtime deps are pinned in
+# requirements.txt (pip-compiled from requirements.in); `pip install -e .` makes
+# the src/-layout package importable (so `python -m labfoundry.…` works).
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labfoundry"
+description = "LabFoundry — an autonomous AI research lab"
+requires-python = ">=3.11"
+dynamic = ["version"]
+
+[tool.setuptools.dynamic]
+version = { file = "version" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 122  # matches rag-bench
+target-version = "py311"
+extend-exclude = ["web", "migrations", ".next", "node_modules"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "I",   # isort
+]
+fixable = ["ALL"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "strict"
+addopts = "-ra"
+# DB-backed integration tests skip themselves unless DATABASE_URL points at a
+# migrated pgvector database (see tests/test_labfoundry_corpus.py).
+
+[tool.coverage.run]
+source = ["labfoundry"]
+branch = true
+omit = [
+    "tests/*",
+    "*/server.py",                  # thin MCP/FastMCP wrappers
+    "src/labfoundry/bootstrap.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+# fail_under is intentionally NOT set yet — ratchet up as coverage grows.

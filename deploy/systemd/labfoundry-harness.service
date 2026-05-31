@@ -1,0 +1,19 @@
+[Unit]
+Description=LabFoundry autonomous harness (event-driven agent loop)
+After=network.target
+# Disable the start-rate limiter so a long dependency outage doesn't park the
+# unit in a permanent 'failed' state; the preflight gate makes the retries safe.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nicholas/workspace/lab-foundry
+EnvironmentFile=/home/nicholas/workspace/lab-foundry/.env
+ExecStart=/home/nicholas/.pyenv/versions/labfoundry/bin/python -m labfoundry.harness.main
+# Restart on crash AND on clean exit (the preflight exits non-zero when a
+# hard dependency is down — we want to keep retrying until it recovers).
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

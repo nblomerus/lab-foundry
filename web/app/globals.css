@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  /* Light slate palette — matches the command-console mockup */
+  --color-bg-from: #e2e8f0;
+  --color-bg-to:   #eef2f7;
+
+  --color-text:        #0f172a;       /* slate-900 */
+  --color-text-dim:    #64748b;       /* slate-500 */
+  --color-text-faint:  #94a3b8;       /* slate-400 */
+
+  --color-pass:   #059669;            /* emerald-600 */
+  --color-warn:   #d97706;            /* amber-600  */
+  --color-info:   #2563eb;            /* blue-600   */
+  --color-slop:   #dc2626;            /* red-600    */
+}
+
+html, body {
+  background: linear-gradient(180deg, #f8fafc, #eef2f7);
+  background-image:
+    radial-gradient(circle at top left, #e2e8f0, transparent 32%),
+    linear-gradient(180deg, #f8fafc, #eef2f7);
+  color: var(--color-text);
+  min-height: 100%;
+}
+
+/* Pulsing dot for live indicators */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.85); }
+}
+.pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+
+::-webkit-scrollbar         { width: 8px; height: 8px; }
+::-webkit-scrollbar-track   { background: transparent; }
+::-webkit-scrollbar-thumb   { background: #cbd5e1; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }

@@ -1,0 +1,28 @@
+# Runtime
+asyncpg
+pgvector  # asyncpg vector codec (pgvector.asyncpg.register_vector) for labfoundry_corpus
+neo4j>=5.0,<6
+httpx
+pydantic
+tiktoken
+mcp
+# Pinned: the memory->thread namespace rename across majors silently broke
+# every memory write. Bump deliberately, not by surprise.
+zep-cloud==3.22.0
+langfuse
+beautifulsoup4
+lxml
+trafilatura
+python-dotenv
+
+# Command-center backend
+fastapi
+uvicorn[standard]
+websockets
+
+# Dev
+ruff
+pytest
+pytest-asyncio
+pytest-cov
+pre-commit
