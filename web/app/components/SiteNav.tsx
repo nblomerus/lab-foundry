@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BrainCircuit, Eye, GitBranch, Layers3, Target, TerminalSquare, Play, FlaskConical, Bug, Network } from "lucide-react";
+import { BrainCircuit, Eye, LayoutDashboard, Layers3, Target, TerminalSquare, Play, FlaskConical, Bug, Network } from "lucide-react";
 import { cx } from "./ui";
 
 const NAV = [
   { href: "/",       icon: Target,         label: "Research OS" },
-  { href: "/flow",   icon: GitBranch,      label: "Flow" },
+  { href: "/flow",   icon: LayoutDashboard, label: "Floorplan" },
   { href: "/claims", icon: Layers3,        label: "Claims" },
   { href: "/events", icon: TerminalSquare, label: "Events" },
   { href: "/org",    icon: Eye,            label: "Org" },
