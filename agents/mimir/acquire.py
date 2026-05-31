@@ -27,6 +27,7 @@ import os
 
 from pydantic import BaseModel, Field
 
+from agents.mimir.handler import _loop_enabled, ingest_source
 from library.ingest.scouts import SourceDescriptor, scout_arxiv
 
 log = logging.getLogger(__name__)
@@ -134,8 +135,6 @@ async def _reply(state, req: AcquireRequest, *, status: str, reason: str, docume
 async def handle_acquire_requested(event: dict, dispatcher) -> dict | None:
     """Triggered by `acquire.requested`. Adjudicate deterministically (cap →
     resolve → dedupe → trust-gated ingest) and reply."""
-    from agents.mimir.handler import _loop_enabled, ingest_source
-
     if not _loop_enabled():
         return None
 

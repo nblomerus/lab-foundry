@@ -41,59 +41,35 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
-from pathlib import Path
+
+import asyncpg
+import httpx
+
+from agents.mimir.acquire import AcquireRequest, handle_acquire_requested, request_acquire
+from agents.mimir.collectors import run_discovery_sweep
+from agents.mimir.handler import ingest_source
+from harness.curator import Curator
+from harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
+from library.ingest.fetcher import search_arxiv
+from memory.client import ZepClient
+from ops._env import load_dotenv, register_vector_codec
+from skills.client import LessonsClient
+from state.client import PostgresClient
 
 # Mimir's handlers gate on MIMIR_LOOP; this runner IS Mimir's loop for one cycle,
-# so turn the gate on before anything imports it. (handle_acquire_requested reads
-# it at call time, so setting it here is sufficient.)
+# so turn the gate on. (handle_acquire_requested reads it at call time.)
 os.environ.setdefault("MIMIR_LOOP", "on")
 
-
-# -------------------------------------------------------------------------
-# .env loader — no dependency (python-dotenv is optional; the Makefile injects
-# .env for `make` targets, but `python -m ops.mimir_firstlight` runs bare).
-# -------------------------------------------------------------------------
-
-
-def _load_dotenv() -> None:
-    """Best-effort: set vars from ./.env that aren't already in the environment."""
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if not env_path.exists():
-        return
-    for raw in env_path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = val
-
-
-# -------------------------------------------------------------------------
-# Small report helpers
-# -------------------------------------------------------------------------
-
-_OK = "✓"  # ✓
-_NO = "✗"  # ✗
-_DOT = "•"  # •
+_OK = "✓"
+_NO = "✗"
+_DOT = "•"
 
 
 def _line(mark: str, text: str) -> None:
     print(f"  {mark} {text}")
-
-
-async def _register_vector_codec(conn) -> None:
-    """The corpus writes vector(768) via state.set_chunk_embeddings; asyncpg needs
-    the pgvector codec registered per connection (mirrors harness/main.py)."""
-    try:
-        import pgvector.asyncpg
-
-        await pgvector.asyncpg.register_vector(conn)
-    except Exception as e:  # noqa: BLE001 — without it, embed writes fail, not stage
-        print(f"  {_NO} pgvector codec not registered (embed writes will fail): {e}", file=sys.stderr)
 
 
 # -------------------------------------------------------------------------
@@ -104,8 +80,6 @@ async def _register_vector_codec(conn) -> None:
 async def _preflight(pool, *, mode: str, want_llm: bool) -> bool:
     """Probe every live dependency Mimir's cycle touches. Returns True if all the
     HARD checks pass; soft checks only warn."""
-    import httpx
-
     print("Preflight")
     hard_ok = True
 
@@ -157,8 +131,6 @@ async def _preflight(pool, *, mode: str, want_llm: bool) -> bool:
     scouts = os.environ.get("LIBRARY_SCOUTS", "arxiv")
     if mode == "discover" and "arxiv" in scouts:
         try:
-            from library.ingest.fetcher import search_arxiv
-
             hits = await search_arxiv("large language models", max_results=1)
             if hits:
                 _line(_OK, "arXiv API reachable")
@@ -183,8 +155,6 @@ async def _preflight(pool, *, mode: str, want_llm: bool) -> bool:
 
     # 5. Premium chain (SOFT — the LLM tie-breaker only fires for web_unknown)
     if want_llm:
-        from harness.router import build_premium_chain
-
         chain = build_premium_chain(os.environ)
         if chain:
             lead = chain[0]
@@ -203,8 +173,6 @@ async def _preflight(pool, *, mode: str, want_llm: bool) -> bool:
 
 async def _ingest_and_render(source: dict, state, router, curator) -> dict | None:
     """Run the exact ingest core the dispatcher calls, print a one-line verdict."""
-    from agents.mimir.handler import ingest_source
-
     res = await ingest_source(source, state, router=router, curator=curator, session=None)
     decision = res.get("decision")
     if decision == "approve":
@@ -224,8 +192,6 @@ async def _ingest_and_render(source: dict, state, router, curator) -> dict | Non
 async def _drive_discover(pool, state, router, curator, *, topics, per_topic, limit) -> None:
     """Run a real discovery sweep, then ingest the freshly discovered sources —
     the same two-step the watchdog + dispatcher do, compressed into one pass."""
-    from agents.mimir.collectors import run_discovery_sweep
-
     print(f"Discovery sweep  (topics={topics or 'agenda+frontier'}  per_topic={per_topic})")
     sweep = await run_discovery_sweep(topics, state, per_topic=per_topic)
     _line(_DOT, f"scanned {sweep['scanned']} sources, {sweep['discovered']} new -> source.discovered")
@@ -242,8 +208,6 @@ async def _drive_discover(pool, state, router, curator, *, topics, per_topic, li
         return
 
     print(f"Ingesting {len(rows)} discovered source(s)  (cap --limit={limit})")
-    import json
-
     for row in rows:
         payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
         await _ingest_and_render(payload["source"], state, router, curator)
@@ -285,8 +249,6 @@ async def _drive_seed(state, router, curator, *, arxiv_id, url) -> None:
 async def _drive_acquire(pool, state, router, curator, *, requester, arxiv_id, query) -> None:
     """Drive the demand path: an allowed agent asks Mimir for a source, Mimir
     adjudicates (cap -> resolve -> dedupe -> ingest) and replies."""
-    from agents.mimir.acquire import AcquireRequest, handle_acquire_requested, request_acquire
-
     why = f"first-light acquire smoke for {requester}: needs this source to ground a specific claim"
     req = AcquireRequest(requester=requester, why=why, arxiv_id=arxiv_id, query=query)
     print(f"Acquire  requester={requester}  {'arxiv:' + arxiv_id if arxiv_id else 'query:' + repr(query)}")
@@ -306,8 +268,6 @@ async def _drive_acquire(pool, state, router, curator, *, requester, arxiv_id, q
 
     shim = _Shim()
     shim.state, shim.router, shim.curator, shim.session = state, router, curator, None
-
-    import json
 
     payload = ev["payload"] if isinstance(ev["payload"], dict) else json.loads(ev["payload"])
     res = await handle_acquire_requested({"id": ev["id"], "payload": payload}, shim)
@@ -342,22 +302,14 @@ async def _corpus_snapshot(pool) -> None:
 
 
 async def run(args: argparse.Namespace) -> int:
-    _load_dotenv()
+    load_dotenv()
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         print("DATABASE_URL not set (and no .env) — cannot run.", file=sys.stderr)
         return 2
 
-    import asyncpg
-
-    from harness.curator import Curator
-    from harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
-    from memory.client import ZepClient
-    from skills.client import LessonsClient
-    from state.client import PostgresClient
-
     want_llm = not args.no_llm
-    pool = await asyncpg.create_pool(db_url, min_size=2, max_size=6, init=_register_vector_codec)
+    pool = await asyncpg.create_pool(db_url, min_size=2, max_size=6, init=register_vector_codec)
 
     router = None
     created_temp_state = False

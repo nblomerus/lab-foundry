@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field
 
+from agents.mimir.collectors import run_discovery_sweep
 from library.ingest.pipeline import embed_and_finalize, stage_source
 from library.trust import DocMeta, classify_trust
 
@@ -264,8 +265,6 @@ async def handle_sweep_requested(event: dict, dispatcher) -> dict | None:
     the env/default standing topics, emitting `source.discovered` per new source."""
     if not _loop_enabled():
         return None
-
-    from agents.mimir.collectors import run_discovery_sweep
 
     topics = (event.get("payload") or {}).get("topics")
     return await run_discovery_sweep(topics, dispatcher.state)
