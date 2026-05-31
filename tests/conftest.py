@@ -40,7 +40,11 @@ async def db():
         async with pool.acquire() as conn:
             if await conn.fetchval("SELECT to_regclass('public.claims')") is None:
                 pytest.skip("schema not applied (no claims table)")
-            await conn.execute("TRUNCATE claims, events, tasks, findings, critic_verdicts RESTART IDENTITY CASCADE")
+            await conn.execute(
+                "TRUNCATE claims, events, tasks, findings, critic_verdicts, "
+                "research_inquiries, evidence, experiment_runs, fetch_cache, agent_runs "
+                "RESTART IDENTITY CASCADE"
+            )
             await conn.execute(
                 "INSERT INTO company_state (id, problem_statement, deadline) "
                 "VALUES (1, 'test problem', now() + interval '30 days') "

@@ -42,4 +42,4 @@ show_missing = true
 # Coverage floor enforced by CI (pytest-cov reads this). CI runs a pgvector
 # Postgres service with the schema applied, so DB-backed tests run. Ratchet up as
 # the suite grows (state/client.py is ~69%; research-loop + corpus methods next).
-fail_under = 28
+fail_under = 30
