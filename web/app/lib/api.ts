@@ -322,8 +322,28 @@ export interface BenchJobResponse {
   results?: BenchResult[];
 }
 
+export interface KnowledgeStats {
+  corpus: {
+    status: string;
+    documents_by_kind: Record<string, number>;
+    docs_by_trust_tier: Record<string, number>;
+    by_status: Record<string, number>;
+    chunks: number;
+    chunks_embedded: number;
+    datasets: number;
+  };
+  graph: {
+    status: string;
+    papers?: number;
+    datasets?: number;
+    citations?: number;
+    error?: string;
+  };
+}
+
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
+  knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
   events:    (limit = 100) => jget<LabFoundryEvent[]>(`/events?limit=${limit}`),
   findings:  (thesisId: number) => jget<Finding[]>(`/claims/${thesisId}/findings`),
   query:     (body: { query: string; context_window?: number; include_sources?: boolean }) =>
