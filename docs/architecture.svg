@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 760" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2c5fb8"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa3ad"/>
+    </marker>
+    <marker id="arrowSeed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7a5cc0"/>
+    </marker>
+    <style>
+      .lane   { fill:#5b6b7b; font-size:13px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+      .box    { fill:#ffffff; stroke:#2c5fb8; stroke-width:2; rx:10; }
+      .boxhdr { fill:#eef3fb; stroke:#2c5fb8; stroke-width:2; rx:10; }
+      .plan   { fill:#fafbfc; stroke:#9aa3ad; stroke-width:1.6; stroke-dasharray:5 4; rx:10; }
+      .seed   { fill:#f4f0fc; stroke:#7a5cc0; stroke-width:2; rx:10; }
+      .t      { fill:#1f2d3d; font-size:14px; font-weight:600; }
+      .s      { fill:#5b6b7b; font-size:11.5px; }
+      .sp     { fill:#9aa3ad; font-size:11.5px; font-style:italic; }
+      .flow   { stroke:#2c5fb8; stroke-width:2; fill:none; }
+      .flowg  { stroke:#9aa3ad; stroke-width:1.6; fill:none; stroke-dasharray:5 4; }
+      .flowsd { stroke:#7a5cc0; stroke-width:2.2; fill:none; }
+      .edgelbl{ fill:#7a8493; font-size:10.5px; }
+    </style>
+  </defs>
+
+  <text x="40" y="38" fill="#1f2d3d" font-size="22" font-weight="700">LabFoundry — Knowledge Pipeline</text>
+  <text x="40" y="60" class="s" font-size="12.5">External signal → trust-gated by Mimir → queryable Library → (planned) research workflow. Solid = live now, dashed = planned.</text>
+
+  <!-- ===================== Lane labels ===================== -->
+  <text x="50"   y="100" class="lane">Sources</text>
+  <text x="300"  y="100" class="lane">Collectors</text>
+  <text x="560"  y="100" class="lane">Mimir · Warden</text>
+  <text x="900"  y="100" class="lane">Library</text>
+  <text x="1120" y="100" class="lane">Consumers</text>
+
+  <!-- ===================== Sources ===================== -->
+  <rect class="box" x="40"  y="120" width="170" height="40"/><text class="t" x="56" y="145">arXiv API</text>
+  <rect class="box" x="40"  y="170" width="170" height="40"/><text class="t" x="56" y="195">Web (SearXNG)</text>
+  <rect class="box" x="40"  y="220" width="170" height="40"/><text class="t" x="56" y="245">GitHub API</text>
+  <rect class="plan" x="40" y="270" width="170" height="38"/><text class="sp" x="56" y="294">OpenML · planned</text>
+  <rect class="plan" x="40" y="318" width="170" height="38"/><text class="sp" x="56" y="342">Datasets · planned</text>
+
+  <!-- rag-bench base seed -->
+  <rect class="seed" x="40" y="470" width="220" height="84"/>
+  <text class="t" x="56" y="497" fill="#5a3fa0">rag-bench base corpus</text>
+  <text class="s" x="56" y="517">21.8k parsed arXiv papers</text>
+  <text class="s" x="56" y="535">one-time bulk seed</text>
+  <text class="s" x="56" y="549" fill="#7a5cc0">(re-embedded with nomic)</text>
+
+  <!-- ===================== Collectors ===================== -->
+  <rect class="boxhdr" x="280" y="120" width="200" height="188"/>
+  <text class="t" x="296" y="146">Discovery sweep</text>
+  <text class="s" x="296" y="167">agenda-driven topics</text>
+  <text class="t" x="296" y="196" font-size="13">scout_arxiv</text>
+  <text class="t" x="296" y="218" font-size="13">scout_web</text>
+  <text class="t" x="296" y="240" font-size="13">scout_github</text>
+  <text class="sp" x="296" y="266">openml · planned</text>
+  <text class="sp" x="296" y="286">dataset · planned</text>
+
+  <!-- ===================== Mimir ===================== -->
+  <rect class="boxhdr" x="540" y="120" width="300" height="300"/>
+  <text class="t" x="558" y="146" font-size="15">Mimir — one agent owns ingest + trust</text>
+
+  <rect class="box" x="558" y="160" width="264" height="40"/>
+  <text class="t" x="572" y="185" font-size="13">stage  ·  fetch → parse → chunk</text>
+
+  <rect class="box" x="558" y="208" width="264" height="92"/>
+  <text class="t" x="572" y="230" font-size="13">classify_trust  (~95% zero-token)</text>
+  <text class="s" x="572" y="250">ladder: preprint · repo · web · …</text>
+  <text class="s" x="572" y="268">license hard-gate (SPDX)</text>
+  <text class="s" x="572" y="286">LLM tie-breaker on web_unknown</text>
+
+  <rect class="box" x="558" y="308" width="126" height="44"/>
+  <text class="t" x="572" y="330" font-size="12.5">certify →</text>
+  <text class="s" x="572" y="346">embed + finalize</text>
+  <rect class="box" x="696" y="308" width="126" height="44"/>
+  <text class="t" x="710" y="330" font-size="12.5">quarantine</text>
+  <text class="s" x="710" y="346">(blocked)</text>
+
+  <text class="s" x="558" y="378">push: source.discovered</text>
+  <text class="s" x="558" y="396">pull: acquire.requested</text>
+
+  <!-- ===================== Library ===================== -->
+  <rect class="boxhdr" x="880" y="120" width="190" height="160"/>
+  <text class="t" x="896" y="146">Library</text>
+  <text class="s" x="896" y="166">queryable research memory</text>
+  <rect class="box" x="896" y="180" width="158" height="40"/>
+  <text class="t" x="910" y="205" font-size="13">pgvector · 768d</text>
+  <rect class="box" x="896" y="228" width="158" height="40"/>
+  <text class="t" x="910" y="253" font-size="13">Neo4j · graph</text>
+
+  <!-- ===================== Consumers (planned) ===================== -->
+  <rect class="plan" x="1090" y="120" width="190" height="40"/><text class="sp" x="1106" y="145">PI · Ariadne</text>
+  <rect class="plan" x="1090" y="168" width="190" height="40"/><text class="sp" x="1106" y="193">Planner</text>
+  <rect class="plan" x="1090" y="216" width="190" height="40"/><text class="sp" x="1106" y="241">Researchers</text>
+  <rect class="plan" x="1090" y="264" width="190" height="40"/><text class="sp" x="1106" y="289">Critic · Gate</text>
+  <rect class="plan" x="1090" y="312" width="190" height="40"/><text class="sp" x="1106" y="337">Experiments</text>
+  <rect class="plan" x="1090" y="360" width="190" height="40"/><text class="sp" x="1106" y="385">Publication</text>
+
+  <!-- ===================== Flows ===================== -->
+  <!-- sources -> collectors -->
+  <path class="flow"  d="M210,140 H272" marker-end="url(#arrow)"/>
+  <path class="flow"  d="M210,190 H272" marker-end="url(#arrow)"/>
+  <path class="flow"  d="M210,240 H272" marker-end="url(#arrow)"/>
+  <path class="flowg" d="M210,289 H272" marker-end="url(#arrowGray)"/>
+  <path class="flowg" d="M210,337 H272" marker-end="url(#arrowGray)"/>
+
+  <!-- collectors -> mimir (source.discovered) -->
+  <path class="flow" d="M480,214 H532" marker-end="url(#arrow)"/>
+  <text class="edgelbl" x="486" y="208">source.discovered</text>
+
+  <!-- rag-bench seed -> mimir pipeline -->
+  <path class="flowsd" d="M260,500 C420,500 470,380 538,320" marker-end="url(#arrowSeed)"/>
+  <text class="edgelbl" x="330" y="470" fill="#7a5cc0">bulk loader → stage/embed</text>
+
+  <!-- mimir certify -> library -->
+  <path class="flow" d="M822,328 C852,328 860,250 874,210" marker-end="url(#arrow)"/>
+  <text class="edgelbl" x="828" y="300">certified</text>
+
+  <!-- library -> consumers (query) -->
+  <path class="flowg" d="M1070,200 C1082,200 1082,190 1086,188" marker-end="url(#arrowGray)"/>
+  <text class="edgelbl" x="1076" y="178">query</text>
+
+  <!-- consumers -> mimir (acquire / demand, pull) -->
+  <path class="flowg" d="M1090,330 C760,470 700,450 690,408" marker-end="url(#arrowGray)"/>
+  <text class="edgelbl" x="820" y="452">acquire.requested (pull) · planned consumers</text>
+
+  <!-- ===================== Legend ===================== -->
+  <rect x="40" y="690" width="1240" height="44" fill="#f7f9fb" stroke="#e2e8ef" rx="8"/>
+  <rect x="60" y="703" width="26" height="16" class="box"/>
+  <text class="s" x="94" y="716">live now</text>
+  <rect x="180" y="703" width="26" height="16" class="plan"/>
+  <text class="s" x="214" y="716">planned</text>
+  <rect x="300" y="703" width="26" height="16" class="seed"/>
+  <text class="s" x="334" y="716">one-time base seed (rag-bench)</text>
+  <line x1="560" y1="711" x2="600" y2="711" class="flow" marker-end="url(#arrow)"/>
+  <text class="s" x="608" y="716">data flow</text>
+  <line x1="700" y1="711" x2="740" y2="711" class="flowg" marker-end="url(#arrowGray)"/>
+  <text class="s" x="748" y="716">planned flow / demand pull</text>
+</svg>
