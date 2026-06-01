@@ -341,9 +341,25 @@ export interface KnowledgeStats {
   };
 }
 
+export interface CorpusHit {
+  document_id: number;
+  title: string | null;
+  source_url: string | null;
+  trust_tier: string;
+  score: number;
+  snippet: string;
+}
+export interface CorpusSearchResult {
+  status: string;
+  query: string;
+  hits: CorpusHit[];
+  error?: string;
+}
+
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
+  corpusSearch: (q: string, k = 6) => jget<CorpusSearchResult>(`/knowledge/search?q=${encodeURIComponent(q)}&k=${k}`),
   events:    (limit = 100) => jget<LabFoundryEvent[]>(`/events?limit=${limit}`),
   findings:  (thesisId: number) => jget<Finding[]>(`/claims/${thesisId}/findings`),
   query:     (body: { query: string; context_window?: number; include_sources?: boolean }) =>

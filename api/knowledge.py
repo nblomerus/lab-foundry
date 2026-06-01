@@ -18,6 +18,8 @@ import logging
 import asyncpg
 from fastapi import APIRouter, Request
 
+from library.corpus.tools import corpus_search
+
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -94,3 +96,33 @@ async def knowledge_stats(request: Request) -> dict:
         corpus = {**_planned_corpus(), "status": "error", "error": str(e)}
     graph = await _graph_stats()
     return {"corpus": corpus, "graph": graph}
+
+
+@router.get("/search")
+async def knowledge_search(q: str = "", k: int = 6) -> dict:
+    """Semantic search over the certified corpus (the Library inspector's search
+    box). Embeds the query + ANN over chunks; degrades to empty on any failure so
+    the dashboard never 500s."""
+    q = (q or "").strip()
+    if not q:
+        return {"status": "ok", "query": "", "hits": []}
+    try:
+        hits = await corpus_search(q, k=min(max(k, 1), 12))
+    except Exception as e:  # noqa: BLE001 — never 500 the dashboard on a search
+        log.warning("corpus search failed: %s", e)
+        return {"status": "error", "error": str(e), "query": q, "hits": []}
+    return {
+        "status": "ok",
+        "query": q,
+        "hits": [
+            {
+                "document_id": h.document_id,
+                "title": h.title,
+                "source_url": h.source_url,
+                "trust_tier": h.trust_tier,
+                "score": round(h.score, 4),
+                "snippet": (h.text or "")[:240],
+            }
+            for h in hits
+        ],
+    }
