@@ -14,8 +14,8 @@ import type { LabFoundryEvent, Snapshot, StreamMessage } from "../lib/types";
 // stats; the Library panel can search the corpus).
 // =========================================================================
 
-const VW = 1480;
-const VH = 1080;
+const VW = 1500;
+const VH = 1100;
 
 type RoomId =
   | "web" | "arxiv" | "github" | "openml"
@@ -171,6 +171,19 @@ function sourceKindOf(e: LabFoundryEvent): string | null {
   const k = src?.source_kind;
   return typeof k === "string" ? k : null;
 }
+// SVG <text> doesn't wrap; greedily split a subtitle into lines that fit the room.
+function wrapText(text: string, maxChars: number): string[] {
+  const words = text.split(" ");
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    if (!cur) cur = w;
+    else if ((cur + " " + w).length <= maxChars) cur += " " + w;
+    else { lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
 function reasonOf(e: LabFoundryEvent): string {
   const r = (e.payload as { reasons?: unknown } | null | undefined)?.reasons;
   return typeof r === "string" ? r : "blocked";
@@ -231,7 +244,9 @@ function RoomBox({ room, phase, activeClaims, selected, onSelect }: {
       <DoorArc room={room} />
       <text x={room.x + room.w / 2} y={room.y + (big ? room.h / 2 - 6 : 50)} textAnchor="middle"
         fontSize={big ? 26 : 21} fontWeight={700} fill={room.active ? C.ink : C.muted}>{room.title}</text>
-      <text x={room.x + room.w / 2} y={room.y + (big ? room.h / 2 + 22 : 76)} textAnchor="middle" fontSize={13.5} fill={C.faint}>{room.sub}</text>
+      {(big ? [room.sub] : wrapText(room.sub, Math.max(12, Math.floor((room.w - 22) / 6.6)))).slice(0, 3).map((ln, i) => (
+        <text key={i} x={room.x + room.w / 2} y={room.y + (big ? room.h / 2 + 22 : 74) + i * 16} textAnchor="middle" fontSize={13.5} fill={C.faint}>{ln}</text>
+      ))}
       {room.id === "mimir" && phase && (
         <g>
           <rect x={room.x + room.w / 2 - 56} y={room.y + room.h - 44} width={112} height={24} rx={12} fill="rgba(16,185,129,0.1)" stroke={C.active} strokeWidth={1} />
@@ -573,7 +588,7 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
         </div>
       </div>
 
-      <div className="relative overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-white to-slate-50/60 p-5 shadow-sm backdrop-blur sm:p-7">
+      <div className="relative overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-white to-slate-50/60 p-6 shadow-sm backdrop-blur sm:p-10">
         <svg viewBox={`0 0 ${VW} ${VH}`} className="h-auto w-full" onClick={() => setSelected(null)}>
           <defs>
             {([["active", C.active], ["plan", C.plan], ["seed", C.seed]] as const).map(([id, col]) => (
@@ -583,17 +598,17 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
             ))}
           </defs>
 
-          <rect x={44} y={72} width={VW - 88} height={832} rx={12} fill="none" stroke={C.wall} strokeWidth={5} />
+          <rect x={16} y={48} width={1468} height={872} rx={16} fill="none" stroke={C.wall} strokeWidth={5} />
           {/* divider wall between the two north wings */}
-          <line x1={829} y1={80} x2={829} y2={300} stroke={C.wall} strokeWidth={3} opacity={0.55} />
+          <line x1={829} y1={48} x2={829} y2={300} stroke={C.wall} strokeWidth={3} opacity={0.5} />
           {/* main entrance (south wall, under the knowledge core) */}
-          <path d="M 470 904 A 30 30 0 0 1 530 904" fill="none" stroke={C.wall} strokeWidth={2.5} />
-          <path d="M 530 904 A 30 30 0 0 1 590 904" fill="none" stroke={C.wall} strokeWidth={2.5} />
-          <text x={620} y={900} fontSize={12} letterSpacing="1.2" fill={C.faint}>MAIN ENTRANCE</text>
+          <path d="M 438 920 A 30 30 0 0 1 498 920" fill="none" stroke={C.wall} strokeWidth={2.5} />
+          <path d="M 498 920 A 30 30 0 0 1 558 920" fill="none" stroke={C.wall} strokeWidth={2.5} />
+          <text x={588} y={916} fontSize={12} letterSpacing="1.2" fill={C.faint}>MAIN ENTRANCE</text>
           <text x={946} y={476} textAnchor="middle" fontSize={17} fontWeight={700} letterSpacing="1.6" fill="#aab2bd">RESEARCH WORKFLOW</text>
 
-          <ZoneBracket x1={60} x2={806} y={66} label="COLLECTORS" />
-          <ZoneBracket x1={852} x2={1420} y={66} label="RESEARCH & DISCOVERY" />
+          <ZoneBracket x1={60} x2={806} y={36} label="COLLECTORS" />
+          <ZoneBracket x1={852} x2={1420} y={36} label="RESEARCH & DISCOVERY" />
           <ZoneBracket x1={742} x2={1190} y={676} label="EVALUATION & OUTPUT" />
           <ZoneBracket x1={300} x2={700} y={858} label="KNOWLEDGE CORE" />
 
@@ -615,13 +630,13 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
           </g>
 
           <g>
-            <rect x={VW / 2 - 300} y={958} width={600} height={66} rx={14} fill="rgba(255,255,255,0.9)" stroke="#e2e8ef" strokeWidth={1} />
-            <rect x={VW / 2 - 270} y={977} width={30} height={28} rx={7} fill={C.activeFill} stroke={C.active} strokeWidth={2.2} />
-            <text x={VW / 2 - 228} y={989} fontSize={14} fontWeight={700} fill={C.ink}>Active now</text>
-            <text x={VW / 2 - 228} y={1007} fontSize={12} fill={C.muted}>Live and operational</text>
-            <rect x={VW / 2 + 36} y={977} width={30} height={28} rx={7} fill="none" stroke={C.plan} strokeWidth={1.8} strokeDasharray="5 4" />
-            <text x={VW / 2 + 78} y={989} fontSize={14} fontWeight={700} fill={C.ink}>Planned next</text>
-            <text x={VW / 2 + 78} y={1007} fontSize={12} fill={C.muted}>Coming soon / under development</text>
+            <rect x={VW / 2 - 300} y={982} width={600} height={66} rx={14} fill="rgba(255,255,255,0.9)" stroke="#e2e8ef" strokeWidth={1} />
+            <rect x={VW / 2 - 270} y={1001} width={30} height={28} rx={7} fill={C.activeFill} stroke={C.active} strokeWidth={2.2} />
+            <text x={VW / 2 - 228} y={1013} fontSize={14} fontWeight={700} fill={C.ink}>Active now</text>
+            <text x={VW / 2 - 228} y={1031} fontSize={12} fill={C.muted}>Live and operational</text>
+            <rect x={VW / 2 + 36} y={1001} width={30} height={28} rx={7} fill="none" stroke={C.plan} strokeWidth={1.8} strokeDasharray="5 4" />
+            <text x={VW / 2 + 78} y={1013} fontSize={14} fontWeight={700} fill={C.ink}>Planned next</text>
+            <text x={VW / 2 + 78} y={1031} fontSize={12} fill={C.muted}>Coming soon / under development</text>
           </g>
         </svg>
 
