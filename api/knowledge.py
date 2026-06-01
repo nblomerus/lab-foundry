@@ -35,6 +35,7 @@ def _planned_corpus() -> dict:
         "chunks": 0,
         "chunks_embedded": 0,
         "datasets": 0,
+        "docs_today": 0,
     }
 
 
@@ -48,6 +49,9 @@ async def _corpus_stats(pool) -> dict:
             "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded FROM chunks"
         )
         datasets = await conn.fetchval("SELECT COUNT(*) FROM datasets")
+        docs_today = await conn.fetchval(
+            "SELECT COUNT(*) FROM documents WHERE COALESCE(certified_at, ingested_at) >= date_trunc('day', now())"
+        )
     return {
         "status": "ok",
         "documents_by_kind": {r["k"]: r["c"] for r in by_kind},
@@ -56,7 +60,23 @@ async def _corpus_stats(pool) -> dict:
         "chunks": chunks["total"],
         "chunks_embedded": chunks["embedded"],
         "datasets": datasets,
+        "docs_today": docs_today,
     }
+
+
+async def _memory_counts(pool) -> dict:
+    """Structured-memory counts from Postgres (claims + experiment runs)."""
+    out = {"claims": 0, "experiments": 0}
+    try:
+        async with pool.acquire() as conn:
+            out["claims"] = await conn.fetchval("SELECT COUNT(*) FROM claims") or 0
+            try:
+                out["experiments"] = await conn.fetchval("SELECT COUNT(*) FROM experiment_runs") or 0
+            except Exception:  # noqa: BLE001 — table may not exist
+                out["experiments"] = 0
+    except Exception as e:  # noqa: BLE001
+        log.warning("memory counts failed: %s", e)
+    return out
 
 
 async def _graph_stats() -> dict:
@@ -67,11 +87,13 @@ async def _graph_stats() -> dict:
 
         driver = await _get_driver()
         async with driver.session() as session:
+            nodes = await session.run("MATCH (n) RETURN COUNT(n) AS count")
             papers = await session.run("MATCH (p:Paper) RETURN COUNT(p) AS count")
             datasets = await session.run("MATCH (d:Dataset) RETURN COUNT(d) AS count")
             citations = await session.run("MATCH (:Finding)-[:CITES]->(:Paper) RETURN COUNT(*) AS count")
             return {
                 "status": "ok",
+                "nodes": (await nodes.data())[0]["count"],
                 "papers": (await papers.data())[0]["count"],
                 "datasets": (await datasets.data())[0]["count"],
                 "citations": (await citations.data())[0]["count"],
@@ -95,7 +117,44 @@ async def knowledge_stats(request: Request) -> dict:
         log.warning("knowledge corpus stats failed: %s", e)
         corpus = {**_planned_corpus(), "status": "error", "error": str(e)}
     graph = await _graph_stats()
-    return {"corpus": corpus, "graph": graph}
+    memory = await _memory_counts(pool)
+    return {"corpus": corpus, "graph": graph, "memory": memory}
+
+
+@router.get("/recent")
+async def knowledge_recent(request: Request, limit: int = 8) -> dict:
+    """Latest ingested documents for the Library's 'recent ingests' feed."""
+    pool = request.app.state.pool
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, title, source_kind, arxiv_id, source_url, status, "
+                "COALESCE(certified_at, ingested_at) AS at "
+                "FROM documents ORDER BY COALESCE(certified_at, ingested_at) DESC NULLS LAST LIMIT $1",
+                min(max(limit, 1), 20),
+            )
+            today = await conn.fetchval(
+                "SELECT COUNT(*) FROM documents WHERE COALESCE(certified_at, ingested_at) >= date_trunc('day', now())"
+            )
+    except Exception as e:  # noqa: BLE001 — never 500 the dashboard
+        log.warning("knowledge recent failed: %s", e)
+        return {"status": "error", "error": str(e), "today": 0, "items": []}
+    return {
+        "status": "ok",
+        "today": today or 0,
+        "items": [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "source_kind": r["source_kind"],
+                "arxiv_id": r["arxiv_id"],
+                "source_url": r["source_url"],
+                "status": r["status"],
+                "at": r["at"].isoformat() if r["at"] else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 @router.get("/search")

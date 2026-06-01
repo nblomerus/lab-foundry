@@ -331,14 +331,33 @@ export interface KnowledgeStats {
     chunks: number;
     chunks_embedded: number;
     datasets: number;
+    docs_today: number;
   };
   graph: {
     status: string;
+    nodes?: number;
     papers?: number;
     datasets?: number;
     citations?: number;
     error?: string;
   };
+  memory?: { claims: number; experiments: number };
+}
+
+export interface RecentIngest {
+  id: number;
+  title: string | null;
+  source_kind: string;
+  arxiv_id: string | null;
+  source_url: string | null;
+  status: string;
+  at: string | null;
+}
+export interface RecentIngests {
+  status: string;
+  today: number;
+  items: RecentIngest[];
+  error?: string;
 }
 
 export interface CorpusHit {
@@ -359,6 +378,7 @@ export interface CorpusSearchResult {
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
+  recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),
   corpusSearch: (q: string, k = 6) => jget<CorpusSearchResult>(`/knowledge/search?q=${encodeURIComponent(q)}&k=${k}`),
   events:    (limit = 100) => jget<LabFoundryEvent[]>(`/events?limit=${limit}`),
   findings:  (thesisId: number) => jget<Finding[]>(`/claims/${thesisId}/findings`),
