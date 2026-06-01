@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { api, type CorpusHit, type KnowledgeStats } from "../lib/api";
+import { Boxes, Compass, Database, FileCode, FileText, Github, Globe, Network, Search } from "lucide-react";
+import { api, type CorpusHit, type KnowledgeStats, type RecentIngest } from "../lib/api";
 import { useEventStream } from "../lib/ws";
 import type { LabFoundryEvent, Snapshot, StreamMessage } from "../lib/types";
 
@@ -384,18 +385,22 @@ function CorpusSearch() {
     <div>
       <SubHead label="Search the corpus" />
       <div className="flex gap-2">
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") run(); }}
-          placeholder="e.g. mixture-of-experts routing"
-          className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm focus:border-emerald-300 focus:outline-none"
-        />
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") run(); }}
+            placeholder="e.g. mixture-of-experts routing"
+            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm focus:border-emerald-300 focus:outline-none"
+          />
+        </div>
         <button type="button" onClick={run} disabled={loading || !q.trim()}
-          className="shrink-0 rounded-xl bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+          className="shrink-0 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">
           {loading ? "…" : "Search"}
         </button>
       </div>
+      <p className="mt-1.5 text-[11px] text-slate-400">Search across titles, abstracts, code, entities, and full text.</p>
       {err && <p className="mt-2 text-xs text-red-500">{err}</p>}
       {hits && hits.length === 0 && !err && <p className="mt-2 text-sm text-slate-400">No matches.</p>}
       {hits && hits.length > 0 && (
@@ -425,6 +430,203 @@ function CorpusSearch() {
   );
 }
 
+// =========================================================================
+// Rich Library inspector pieces
+// =========================================================================
+
+const KIND_HEX: Record<string, string> = {
+  paper: "#3b82f6", web: "#10b981", code: "#f59e0b", dataset: "#8b5cf6",
+  media: "#ec4899", note: "#64748b", log: "#94a3b8",
+};
+const TIER_HEX: Record<string, string> = {
+  peer_reviewed: "#059669", preprint: "#10b981", official_repo: "#14b8a6",
+  web_reputable: "#3b82f6", web_unknown: "#94a3b8", user_asserted: "#a78bfa", quarantined: "#f87171",
+};
+const TILE_ACCENT: Record<string, string> = {
+  slate: "bg-slate-100 text-slate-500", emerald: "bg-emerald-50 text-emerald-600", blue: "bg-blue-50 text-blue-600",
+  violet: "bg-violet-50 text-violet-600", amber: "bg-amber-50 text-amber-600",
+};
+
+function StatCard({ icon: Icon, label, value, sub, subGreen = false, accent = "slate" }: {
+  icon: typeof FileText; label: string; value: string | number; sub?: string; subGreen?: boolean; accent?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+      <span className={`inline-flex rounded-lg p-1.5 ${TILE_ACCENT[accent] ?? TILE_ACCENT.slate}`}><Icon className="h-4 w-4" /></span>
+      <div className="mt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="mt-0.5 text-xl font-semibold tabular-nums text-slate-900">{typeof value === "number" ? value.toLocaleString() : value}</div>
+      {sub && <div className={`mt-0.5 text-[11px] ${subGreen ? "text-emerald-600" : "text-slate-400"}`}>{sub}</div>}
+    </div>
+  );
+}
+
+function Composition({ kinds }: { kinds: Record<string, number> }) {
+  const entries = Object.entries(kinds).sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((s, [, v]) => s + v, 0) || 1;
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap gap-x-5 gap-y-3">
+        {entries.map(([k, v]) => {
+          const pct = (v / total) * 100;
+          const hex = KIND_HEX[k] ?? "#94a3b8";
+          return (
+            <div key={k} className="min-w-[84px] flex-1">
+              <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: hex }}>{k}</div>
+              <div className="mt-0.5 text-sm font-semibold tabular-nums text-slate-800">
+                {v.toLocaleString()} <span className="text-[11px] font-normal text-slate-400">({pct.toFixed(0)}%)</span>
+              </div>
+              <div className="mt-1 h-1.5 w-full rounded-full bg-slate-100">
+                <div className="h-full rounded-full" style={{ width: `${Math.max(pct, 3)}%`, background: hex }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 text-[11px] text-slate-400">Total {total.toLocaleString()} items</div>
+    </div>
+  );
+}
+
+function TrustBreakdown({ tiers }: { tiers: Record<string, number> }) {
+  const order = ["peer_reviewed", "preprint", "official_repo", "web_reputable", "web_unknown", "user_asserted", "quarantined"];
+  const total = Object.values(tiers).reduce((a, b) => a + b, 0) || 1;
+  const present = order.filter((t) => tiers[t]);
+  return (
+    <div>
+      <div className="flex h-3 w-full overflow-hidden rounded-full bg-slate-100">
+        {present.map((t) => <div key={t} style={{ width: `${(tiers[t] / total) * 100}%`, background: TIER_HEX[t] ?? "#94a3b8" }} title={`${t}: ${tiers[t]}`} />)}
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+        {present.map((t) => (
+          <span key={t} className="flex items-center gap-1.5">
+            <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: TIER_HEX[t] ?? "#94a3b8" }} />
+            <span className="text-slate-600">{t.replace(/_/g, " ")}</span>
+            <span className="text-slate-400">{tiers[t].toLocaleString()} ({((tiers[t] / total) * 100).toFixed(1)}%)</span>
+          </span>
+        ))}
+      </div>
+      <div className="mt-1.5 text-right text-[11px] text-slate-400">Total {total.toLocaleString()} items</div>
+    </div>
+  );
+}
+
+function KgTile({ label, value, caption, color }: { label: string; value: string | number; caption: string; color: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="mt-0.5 text-xl font-semibold tabular-nums" style={{ color }}>{typeof value === "number" ? value.toLocaleString() : value}</div>
+      <div className="mt-0.5 text-[11px] text-slate-400">{caption}</div>
+    </div>
+  );
+}
+
+const SOURCE_META: Record<string, { icon: typeof FileText; bg: string; fg: string }> = {
+  arxiv:  { icon: FileText, bg: "#fee2e2", fg: "#dc2626" },
+  github: { icon: Github,   bg: "#f1f5f9", fg: "#0f172a" },
+  web:    { icon: Globe,    bg: "#ecfdf5", fg: "#059669" },
+  doi:    { icon: FileText, bg: "#eef2ff", fg: "#4f46e5" },
+  dataset:{ icon: Database, bg: "#f5f3ff", fg: "#7c3aed" },
+  openml: { icon: Database, bg: "#f5f3ff", fg: "#7c3aed" },
+  code:   { icon: FileCode, bg: "#fffbeb", fg: "#d97706" },
+};
+
+function IngestRow({ it }: { it: RecentIngest }) {
+  const src = SOURCE_META[it.source_kind] ?? SOURCE_META.web;
+  const Icon = src.icon;
+  const isNew = it.at ? Date.now() - new Date(it.at).getTime() < 3_600_000 : false;
+  const meta = it.arxiv_id ? `arXiv:${it.arxiv_id}` : it.source_kind;
+  const blocked = it.status === "blocked" || it.status === "quarantined";
+  return (
+    <li className="flex items-start gap-2.5 rounded-2xl border border-slate-200 bg-white p-2.5">
+      <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ background: src.bg, color: src.fg }}>
+        <Icon className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1">
+        {it.source_url ? (
+          <a href={it.source_url} target="_blank" rel="noreferrer" className="block truncate text-sm font-medium text-slate-800 hover:text-emerald-700">{it.title || `doc #${it.id}`}</a>
+        ) : (
+          <div className="truncate text-sm font-medium text-slate-800">{it.title || `doc #${it.id}`}</div>
+        )}
+        <div className="mt-0.5 truncate text-[11px] text-slate-400">{meta}{it.at ? ` · Ingested ${ago(it.at)}` : ""}</div>
+      </div>
+      {blocked
+        ? <span className="shrink-0 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-600">Blocked</span>
+        : isNew && <span className="shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">New</span>}
+    </li>
+  );
+}
+
+function LatestIngests() {
+  const [data, setData] = useState<{ today: number; items: RecentIngest[] } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.recentIngests(8).then((d) => { if (!cancelled) setData({ today: d.today, items: d.items }); }).catch(() => {});
+    load();
+    const id = setInterval(load, 15_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  const items = (data?.items ?? []).slice(0, 5);
+  return (
+    <div>
+      <div className="mb-1.5 mt-4 flex items-center justify-between">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Latest ingests</span>
+        <a href="/events" className="text-[11px] font-medium text-emerald-700 hover:underline">View all</a>
+      </div>
+      {items.length === 0 ? (
+        <p className="text-sm text-slate-400">No ingests yet.</p>
+      ) : (
+        <ul className="space-y-1.5">{items.map((it) => <IngestRow key={it.id} it={it} />)}</ul>
+      )}
+      {data && <p className="mt-2 text-[11px] text-slate-400">Showing {items.length} of {data.today} ingests today</p>}
+    </div>
+  );
+}
+
+function LibraryInspector({ knowledge, snapshot }: { knowledge: KnowledgeStats | null; snapshot: Snapshot | null }) {
+  const corpus = knowledge?.corpus;
+  const graph = knowledge?.graph;
+  const memory = knowledge?.memory;
+  const totalDocs = corpus ? Object.values(corpus.documents_by_kind).reduce((a, b) => a + b, 0) : 0;
+  const embedPct = corpus && corpus.chunks > 0 ? (corpus.chunks_embedded / corpus.chunks) * 100 : 0;
+  const directions = snapshot?.state?.active_claims_count ?? memory?.claims ?? 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-2">
+        <StatCard icon={FileText} label="Documents" value={totalDocs} accent="emerald"
+          sub={corpus && corpus.docs_today > 0 ? `+${corpus.docs_today.toLocaleString()} today` : "in the corpus"} subGreen={!!corpus && corpus.docs_today > 0} />
+        <StatCard icon={Boxes} label="Embedded chunks" value={corpus?.chunks_embedded ?? 0} accent="blue"
+          sub={corpus ? `${embedPct.toFixed(embedPct >= 99.95 ? 0 : 1)}% embedded` : undefined} />
+        <StatCard icon={Network} label="Graph entities" value={graph?.status === "ok" ? (graph.nodes ?? 0) : "—"} accent="violet"
+          sub={graph?.status === "ok" ? `${(graph.papers ?? 0).toLocaleString()} papers · Neo4j` : "graph offline"} />
+        <StatCard icon={Compass} label="Active directions" value={directions} accent="amber"
+          sub={snapshot?.state?.current_phase ? `phase · ${snapshot.state.current_phase}` : "research agenda"} />
+      </div>
+
+      {corpus && Object.keys(corpus.documents_by_kind).length > 0 && (
+        <div><SubHead label="Corpus composition" /><Composition kinds={corpus.documents_by_kind} /></div>
+      )}
+
+      {corpus && Object.keys(corpus.docs_by_trust_tier).length > 0 && (
+        <div><SubHead label="Trust tier breakdown" /><TrustBreakdown tiers={corpus.docs_by_trust_tier} /></div>
+      )}
+
+      <div>
+        <SubHead label="Knowledge graph (structured memory)" />
+        <div className="grid grid-cols-2 gap-2">
+          <KgTile label="KG papers" value={graph?.status === "ok" ? (graph.papers ?? 0) : "—"} caption="in graph" color="#7c3aed" />
+          <KgTile label="Datasets" value={(graph?.datasets ?? corpus?.datasets) ?? 0} caption="in graph" color="#0f766e" />
+          <KgTile label="Experiments" value={memory?.experiments ?? 0} caption="runs" color="#d97706" />
+          <KgTile label="Claims" value={memory?.claims ?? 0} caption="research directions" color="#059669" />
+        </div>
+      </div>
+
+      <CorpusSearch />
+      <LatestIngests />
+    </div>
+  );
+}
+
 function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
   roomId: RoomId; snapshot: Snapshot | null; knowledge: KnowledgeStats | null; events: LabFoundryEvent[]; onClose: () => void;
 }) {
@@ -438,7 +640,6 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
   const blocked = useMemo(() => events.filter((e) => e.event_type === "mimir.ingest_blocked").slice(0, 6), [events]);
   const role = info.role ? snapshot?.org_roles?.find((r) => r.role === info.role) : undefined;
   const corpus = knowledge?.corpus;
-  const graph = knowledge?.graph;
 
   return (
     <div>
@@ -491,30 +692,7 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
         </div>
       )}
 
-      {roomId === "library" && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-2">
-            <StatTile label="Documents" value={corpus ? Object.values(corpus.documents_by_kind).reduce((a, b) => a + b, 0) : 0} tone="emerald" />
-            <StatTile label="Chunks embedded" value={corpus?.chunks_embedded ?? 0} tone="blue" />
-          </div>
-          {corpus && Object.keys(corpus.documents_by_kind).length > 0 && (
-            <div className="flex flex-wrap gap-1.5 text-[11px]">
-              {Object.entries(corpus.documents_by_kind).map(([k, v]) => (
-                <span key={k} className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">{k} · {v.toLocaleString()}</span>
-              ))}
-            </div>
-          )}
-          {corpus && Object.keys(corpus.docs_by_trust_tier).length > 0 && (
-            <div><SubHead label="By trust tier" /><TierBars tiers={corpus.docs_by_trust_tier} /></div>
-          )}
-          <div className="grid grid-cols-2 gap-2">
-            <StatTile label="KG papers" value={graph?.status === "ok" ? (graph.papers ?? 0) : "—"} tone="violet" />
-            <StatTile label="Datasets" value={corpus?.datasets ?? 0} tone="slate" />
-          </div>
-          <CorpusSearch />
-          <p className="text-[11px] text-slate-400">Base corpus seeded from rag-bench (~21.8k arXiv papers); embeddings via nomic-embed-text.</p>
-        </div>
-      )}
+      {roomId === "library" && <LibraryInspector knowledge={knowledge} snapshot={snapshot} />}
 
       {(roomId === "web" || roomId === "arxiv" || roomId === "github") && (
         <div className="space-y-3">
@@ -648,7 +826,7 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
               animate={{ x: 0, opacity: 1 }}
               exit={{ x: "100%", opacity: 0.4 }}
               transition={{ type: "spring", stiffness: 280, damping: 32 }}
-              className="absolute right-0 top-0 z-20 h-full w-full max-w-[420px] overflow-y-auto border-l border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur"
+              className="absolute right-0 top-0 z-20 h-full w-full max-w-[440px] overflow-y-auto border-l border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur"
             >
               <RoomInspector roomId={selected} snapshot={snapshot} knowledge={knowledge} events={events} onClose={() => setSelected(null)} />
             </motion.aside>
