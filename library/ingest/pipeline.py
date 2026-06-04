@@ -25,10 +25,15 @@ lives in classify_trust + Mimir, never here.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 
+import httpx
+
+from library.graph.tools import merge_paper
 from library.ingest.chunker import PaperChunker
-from library.ingest.fetcher import search_arxiv, web_fetch
+from library.ingest.fetcher import USER_AGENT, search_arxiv, web_fetch
 from library.ingest.parser import parse_paper
 from library.ingest.scouts import SourceDescriptor
 
@@ -39,6 +44,15 @@ log = logging.getLogger(__name__)
 # challenge page (ar5iv occasionally has no HTML rendering for very new papers),
 # so we fall back to the arXiv abstract rather than ingest a near-empty body.
 _MIN_FULLTEXT_CHARS = 1_000
+
+# A source must resolve to at least this much text to be worth a document. Below
+# it (a JS-walled page, a repo with no README, a thin dataset card) we skip
+# rather than create a hollow, unretrievable, but "queryable" row.
+_MIN_DOC_CHARS = 250
+
+_GITHUB_API = "https://api.github.com"
+_HF_API = "https://huggingface.co"
+_HF_DATASETS_SERVER = "https://datasets-server.huggingface.co"
 
 # Embed in batches so a 60-chunk paper doesn't open 60 concurrent HTTP calls.
 # The embedder itself serializes on the GPULock; this just bounds how much we
@@ -111,16 +125,140 @@ async def _resolve_arxiv_fulltext(
     return text, ar5iv_url
 
 
+async def _resolve_github_fulltext(desc: SourceDescriptor, state) -> tuple[str, str | None]:
+    """Resolve a GitHub repo to real content via the API (NOT by scraping the
+    JS-rendered repo page, which trafilatura mostly fails on): repo metadata
+    (description, stars, language, topics, license) + the README markdown. We do
+    NOT store the code itself — the README + metadata is the high-signal 'what is
+    this and why does it matter' the lab actually needs."""
+    repo = desc.canonical_key  # "owner/repo"
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    meta: dict = {}
+    readme = ""
+    async with httpx.AsyncClient(timeout=12.0, headers=headers, follow_redirects=True) as client:
+        try:
+            r = await client.get(f"{_GITHUB_API}/repos/{repo}")
+            if r.status_code == 200:
+                meta = r.json()
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning("ingest: github repo meta %s failed: %s", repo, e)
+        try:
+            rr = await client.get(
+                f"{_GITHUB_API}/repos/{repo}/readme",
+                headers={**headers, "Accept": "application/vnd.github.raw+json"},
+            )
+            if rr.status_code == 200:
+                readme = rr.text
+        except Exception as e:  # noqa: BLE001 — many repos have no README
+            log.info("ingest: github readme %s unavailable: %s", repo, e)
+
+    parts = [f"# {repo}"]
+    if meta.get("description"):
+        parts.append(meta["description"])
+    facts = []
+    if meta.get("stargazers_count") is not None:
+        facts.append(f"Stars: {meta['stargazers_count']}")
+    if meta.get("forks_count") is not None:
+        facts.append(f"Forks: {meta['forks_count']}")
+    if meta.get("language"):
+        facts.append(f"Primary language: {meta['language']}")
+    if meta.get("topics"):
+        facts.append("Topics: " + ", ".join(meta["topics"]))
+    if (meta.get("license") or {}).get("spdx_id"):
+        facts.append(f"License: {meta['license']['spdx_id']}")
+    if meta.get("pushed_at"):
+        facts.append(f"Last push: {meta['pushed_at']}")
+    if facts:
+        parts.append("\n".join(facts))
+    if readme.strip():
+        parts.append("## README\n" + readme.strip())
+    return "\n\n".join(parts).strip(), (meta.get("html_url") or desc.url)
+
+
+async def _resolve_dataset_fulltext(desc: SourceDescriptor, state) -> tuple[str, str | None]:
+    """Resolve a HuggingFace dataset to a real landscape signal — NOT just the
+    card blurb. Pulls hub metadata (task categories, modalities, languages, size,
+    downloads, likes) and, via the datasets-server, the schema (feature names) +
+    a couple of sample rows. That's what lets the lab understand WHAT data exists
+    for a field and what's trending, rather than storing a marketing paragraph."""
+    ds_id = desc.canonical_key
+    meta: dict = {}
+    features: list[str] = []
+    sample_rows: list = []
+    async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
+        try:
+            r = await client.get(f"{_HF_API}/api/datasets/{ds_id}", params={"full": "true"})
+            if r.status_code == 200:
+                meta = r.json()
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning("ingest: hf dataset meta %s failed: %s", ds_id, e)
+        try:
+            sp = await client.get(f"{_HF_DATASETS_SERVER}/splits", params={"dataset": ds_id})
+            splits = (sp.json() or {}).get("splits") or [] if sp.status_code == 200 else []
+            if splits:
+                cfg, split = splits[0].get("config"), splits[0].get("split")
+                fr = await client.get(
+                    f"{_HF_DATASETS_SERVER}/first-rows",
+                    params={"dataset": ds_id, "config": cfg, "split": split},
+                )
+                if fr.status_code == 200:
+                    body = fr.json()
+                    features = [f.get("name") for f in (body.get("features") or []) if f.get("name")]
+                    sample_rows = [row.get("row") for row in (body.get("rows") or [])[:2]]
+        except Exception as e:  # noqa: BLE001 — many datasets aren't server-previewable
+            log.info("ingest: hf datasets-server preview %s unavailable: %s", ds_id, e)
+
+    tags = meta.get("tags") or []
+
+    def _tagged(prefix: str) -> list[str]:
+        return [t.split(":", 1)[1] for t in tags if isinstance(t, str) and t.startswith(prefix)]
+
+    parts = [f"# Dataset: {ds_id}"]
+    if meta.get("description"):
+        parts.append(str(meta["description"]).strip())
+    facts = []
+    if _tagged("task_categories:"):
+        facts.append("Tasks: " + ", ".join(_tagged("task_categories:")))
+    if _tagged("modality:"):
+        facts.append("Modalities: " + ", ".join(_tagged("modality:")))
+    if _tagged("language:"):
+        facts.append("Languages: " + ", ".join(_tagged("language:")))
+    if _tagged("size_categories:"):
+        facts.append("Size: " + ", ".join(_tagged("size_categories:")))
+    if meta.get("downloads") is not None:
+        facts.append(f"Downloads (30d): {meta['downloads']}")
+    if meta.get("likes") is not None:
+        facts.append(f"Likes: {meta['likes']}")
+    if meta.get("lastModified"):
+        facts.append(f"Last modified: {meta['lastModified']}")
+    if facts:
+        parts.append("\n".join(facts))
+    if features:
+        parts.append("Schema / features: " + ", ".join(features))
+    if sample_rows:
+        parts.append("Sample rows:\n" + json.dumps(sample_rows, default=str)[:1500])
+    return "\n\n".join(parts).strip(), f"{_HF_API}/datasets/{ds_id}"
+
+
 async def _resolve_fulltext(
     desc: SourceDescriptor,
     state,
 ) -> tuple[str, str | None]:
     """Dispatch full-text resolution by source_kind. Returns (text, fetched_url).
 
-    For non-arXiv sources we fall back to a plain `web_fetch` of the descriptor
-    url (covers source_kind=='web' and the test path)."""
+    arXiv -> ar5iv full body; github -> repo metadata + README via the API;
+    dataset -> HF hub metadata + schema + sample rows. Everything else (web, the
+    test path) falls back to a plain `web_fetch` of the descriptor url."""
     if desc.source_kind == "arxiv":
         return await _resolve_arxiv_fulltext(desc, state)
+    if desc.source_kind == "github":
+        return await _resolve_github_fulltext(desc, state)
+    if desc.source_kind == "dataset":
+        return await _resolve_dataset_fulltext(desc, state)
 
     if desc.url:
         page = await web_fetch(desc.url, state)
@@ -156,9 +294,14 @@ async def stage_source(
     desc = _as_descriptor(source)
 
     text, fetched_url = await _resolve_fulltext(desc, state)
-    if not text or not text.strip():
-        log.info("ingest stage: no fetchable text for %s/%s", desc.source_kind, desc.canonical_key)
-        return {"skipped": True, "reason": "empty/blocked"}
+    if not text or len(text.strip()) < _MIN_DOC_CHARS:
+        log.info(
+            "ingest stage: insufficient content (%d chars) for %s/%s — skipping",
+            len(text or ""),
+            desc.source_kind,
+            desc.canonical_key,
+        )
+        return {"skipped": True, "reason": "insufficient content"}
 
     # Parse (deterministic, no LLM).
     parsed = parse_paper(
@@ -171,6 +314,15 @@ async def stage_source(
 
     # Chunk-plan (deterministic, no LLM).
     plan = PaperChunker().plan(parsed)
+    if not plan:
+        # Text present but it chunked to nothing (too short / no recognizable
+        # body). Don't create a hollow, never-retrievable document for it.
+        log.info(
+            "ingest stage: %s/%s produced 0 chunks — skipping (no retrievable content)",
+            desc.source_kind,
+            desc.canonical_key,
+        )
+        return {"skipped": True, "reason": "no_chunks"}
 
     # content_hash is sha256 of the raw resolved text — the exact-bytes dedupe
     # backstop alongside the (source_kind, canonical_key) upsert key.
@@ -292,15 +444,22 @@ async def embed_and_finalize(document_id: int, state) -> dict:
         return {"skipped": True, "reason": "blocked"}
 
     plan = await state.get_chunk_plan(document_id)
+    if not plan:
+        # Nothing to embed — a hollow doc slipped through (legacy row, or a source
+        # that resolved to text but chunked to nothing). Do NOT mark it queryable:
+        # an empty, unretrievable row must not count as Library content.
+        log.info("ingest finalize: doc %s has no chunks — leaving non-queryable", document_id)
+        return {"skipped": True, "reason": "no_chunks"}
     rows, embedded, failed = await _embed_pending(plan)
     if rows:
         await state.set_chunk_embeddings(document_id, rows)
+    if embedded == 0:
+        log.info("ingest finalize: doc %s embedded 0 chunks — leaving non-queryable", document_id)
+        return {"skipped": True, "reason": "no_embeddings"}
 
     # Best-effort KG MERGE from the parsed metadata already on the document row.
     # Swallowed: Neo4j is a read-optimized projection and may be unavailable.
     try:
-        from library.graph.tools import merge_paper
-
         await merge_paper(
             document_id,
             doi=doc.get("doi"),
