@@ -347,6 +347,101 @@ async def scout_panel(request: Request, kind: str) -> dict:
     }
 
 
+def _payload(p) -> dict:
+    if isinstance(p, str):
+        return json.loads(p) if p else {}
+    return p or {}
+
+
+@router.get("/gate")
+async def gate_panel(request: Request) -> dict:
+    """The intake gate (the lab's 'entrance'): who was admitted and who was turned
+    away, with reasons. Two gates feed it — TRUST blocks (mimir.ingest_blocked:
+    license / retraction / untrusted) and QUALITY rejections
+    (library.ingest_rejected: too thin / non-content page). Plus today's tallies
+    and a recent-admitted list so decisions can be audited both ways."""
+    pool = request.app.state.pool
+    try:
+        async with pool.acquire() as conn:
+            ev_today = {
+                r["e"]: r["c"]
+                for r in await conn.fetch(
+                    "SELECT event_type e, COUNT(*) c FROM events "
+                    "WHERE emitted_at >= date_trunc('day', now()) GROUP BY event_type"
+                )
+            }
+            quarantined = await conn.fetchval("SELECT COUNT(*) FROM documents WHERE status = 'blocked'") or 0
+            blocked = await conn.fetch(
+                "SELECT e.emitted_at, e.payload, d.title, d.source_kind, d.source_url "
+                "FROM events e LEFT JOIN documents d ON d.id = e.target_id "
+                "WHERE e.event_type = 'mimir.ingest_blocked' ORDER BY e.emitted_at DESC LIMIT 15"
+            )
+            rejected = await conn.fetch(
+                "SELECT emitted_at, payload FROM events WHERE event_type = 'library.ingest_rejected' "
+                "ORDER BY emitted_at DESC LIMIT 15"
+            )
+            admitted = await conn.fetch(
+                "SELECT title, source_kind, arxiv_id, canonical_key, trust_tier, "
+                "COALESCE(certified_at, ingested_at) at FROM documents WHERE status = 'certified' "
+                "ORDER BY COALESCE(certified_at, ingested_at) DESC NULLS LAST LIMIT 8"
+            )
+    except asyncpg.UndefinedTableError:
+        return {"status": "planned"}
+    except Exception as e:  # noqa: BLE001 — never 500 the dashboard
+        log.warning("gate panel failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+    turned_away = []
+    for r in blocked:
+        p = _payload(r["payload"])
+        turned_away.append(
+            {
+                "gate": "trust",
+                "title": r["title"],
+                "url": r["source_url"],
+                "source_kind": r["source_kind"],
+                "reason": p.get("reasons") or "blocked by trust gate",
+                "at": r["emitted_at"].isoformat() if r["emitted_at"] else None,
+            }
+        )
+    for r in rejected:
+        p = _payload(r["payload"])
+        turned_away.append(
+            {
+                "gate": "quality",
+                "title": p.get("title"),
+                "url": p.get("url"),
+                "source_kind": p.get("source_kind"),
+                "reason": p.get("reason") or "failed quality gate",
+                "at": r["emitted_at"].isoformat() if r["emitted_at"] else None,
+            }
+        )
+    turned_away.sort(key=lambda x: x["at"] or "", reverse=True)
+
+    return {
+        "status": "ok",
+        "today": {
+            "admitted": ev_today.get("document.ingested", 0),
+            "blocked_trust": ev_today.get("mimir.ingest_blocked", 0),
+            "rejected_quality": ev_today.get("library.ingest_rejected", 0),
+            "discovered": ev_today.get("source.discovered", 0),
+        },
+        "quarantined": quarantined,
+        "turned_away": turned_away[:16],
+        "admitted": [
+            {
+                "title": r["title"],
+                "source_kind": r["source_kind"],
+                "arxiv_id": r["arxiv_id"],
+                "canonical_key": r["canonical_key"],
+                "trust_tier": r["trust_tier"],
+                "at": r["at"].isoformat() if r["at"] else None,
+            }
+            for r in admitted
+        ],
+    }
+
+
 @router.get("/search")
 async def knowledge_search(q: str = "", k: int = 6) -> dict:
     """Semantic search over the certified corpus (the Library inspector's search
