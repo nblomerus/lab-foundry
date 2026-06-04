@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 import asyncpg
 import pgvector.asyncpg
@@ -31,10 +33,11 @@ from pydantic import BaseModel
 
 from agents.mimir.acquire import AcquireRequest, handle_acquire_requested
 from agents.mimir.collectors import run_discovery_sweep
-from agents.mimir.handler import ingest_source
+from agents.mimir.handler import _certify_llm, _resolve_signals, ingest_source
 from api.bench import BenchContextError, build_context, get_engine
 from harness.curator import RECIPES
 from harness.router import MODELS, PREMIUM_TIERS, ROUTE, Tier
+from library.trust import DocMeta, classify_trust
 from state.client import PostgresClient
 
 log = logging.getLogger("api.agentlab")
@@ -64,6 +67,15 @@ def _llm(key: str, label: str, invocation_type: str, needs_claim: bool = False) 
 
 
 _MIMIR_MODES = [
+    {
+        "key": "classify", "label": "Classify trust (dry)", "kind": MIMIR, "action": "classify",
+        "inputs": [
+            {"name": "arxiv_id", "label": "arXiv ID", "placeholder": "1706.03762"},
+            {"name": "url", "label": "or URL", "placeholder": "https://github.com/org/repo"},
+        ],
+        "note": "Resolves signals + runs the trust gate only — no ingest, no writes. "
+                "Shows the tier, whether it's blocked, and the reason.",
+    },
     {
         "key": "seed", "label": "Seed a source", "kind": MIMIR, "action": "seed",
         "inputs": [
@@ -169,6 +181,29 @@ async def _mimir_state(app) -> PostgresClient:
     return st
 
 
+async def _classify(app, *, arxiv_id: str | None = None, url: str | None = None,
+                    doi: str | None = None, license: str | None = None, run_llm: bool = True) -> dict:
+    """The trust gate in isolation: resolve signals (DOI/GitHub probes) + classify_trust,
+    and run the LLM tie-breaker if the source lands on the web_unknown boundary. No
+    staging, embedding, or DB writes — pure classification."""
+    eng = await get_engine(app)
+    meta = DocMeta(source_url=url, doi=doi, doi_resolves=False, arxiv_id=arxiv_id, license=license)
+    await _resolve_signals(meta)
+    tc = classify_trust(meta)
+    out = {"tier": tc.tier, "blocked": tc.blocked, "needs_llm": tc.needs_llm,
+           "used_llm": False, "reason": tc.reason, "signals": tc.signals}
+    if tc.needs_llm and run_llm and not tc.blocked:
+        verdict = await _certify_llm({"title": None, "source_url": meta.source_url}, eng.curator, eng.router, None)
+        if verdict is not None:
+            out["used_llm"] = True
+            out["reason"] = verdict.reasons
+            if verdict.decision == "block":
+                out["tier"], out["blocked"] = "quarantined", True
+            else:
+                out["tier"] = verdict.tier
+    return out
+
+
 @router.get("/agents")
 async def agents(request: Request) -> dict:
     eng = await get_engine(request.app)
@@ -190,7 +225,7 @@ async def agents(request: Request) -> dict:
                 mm["runnable"] = bool(recipe and eng.schemas.get(schema_name))
                 mm["emits"] = _EMITS.get(inv)
             modes.append(mm)
-        catalog.append({**a, "modes": modes})
+        catalog.append({**a, "modes": modes, "has_suite": a["id"] in SUITES})
     try:
         claims = [{"id": c.id, "claim": c.statement} for c in await eng.state.get_active_claims(limit=25)]
     except Exception:  # noqa: BLE001
@@ -270,6 +305,14 @@ async def _run_mimir(app, mode: dict, inputs: dict[str, str]) -> dict:
     state = await _mimir_state(app)
     action = mode["action"]
 
+    if action == "classify":
+        arxiv_id = (inputs.get("arxiv_id") or "").strip() or None
+        url = (inputs.get("url") or "").strip() or None
+        if not arxiv_id and not url:
+            return {"status": "error", "kind": MIMIR, "error": "provide an arXiv ID or a URL"}
+        res = await _classify(app, arxiv_id=arxiv_id, url=url, run_llm=True)
+        return {"status": "ok", "kind": MIMIR, "action": "classify", "result": res}
+
     if action == "seed":
         arxiv_id = (inputs.get("arxiv_id") or "").strip()
         url = (inputs.get("url") or "").strip()
@@ -317,3 +360,119 @@ async def _run_mimir(app, mode: dict, inputs: dict[str, str]) -> dict:
         return {"status": "ok", "kind": MIMIR, "live": True, "action": "acquire", "result": res}
 
     return {"status": "error", "kind": MIMIR, "error": f"unknown mimir action {action}"}
+
+
+# =========================================================================
+# Test suites — a shared scenario framework; each agent declares its own cases.
+# A case runs in isolation and self-evaluates to pass / fail / gap.
+# =========================================================================
+
+
+@dataclass
+class SuiteCase:
+    id: str
+    label: str
+    question: str            # which capability it probes
+    expect: str              # human-readable expected outcome
+    gap: bool                # True = documents a known limitation (status always "gap")
+    run: Callable[[object], Awaitable[dict]]  # (app) -> {status, actual, explanation, note?}
+
+
+# ---- Mimir trust-gate suite -------------------------------------------------
+# Can he classify trust? detect bad sources? quarantine suspicious content?
+# explain decisions? Cases use the classify-only path (no ingest) so they're
+# deterministic + repeatable; the duplicate case checks the dedupe key directly.
+
+
+async def _c_good_arxiv(app) -> dict:
+    r = await _classify(app, arxiv_id="1706.03762", url="https://arxiv.org/abs/1706.03762", run_llm=False)
+    ok = r["tier"] == "preprint" and not r["blocked"]
+    return {"status": "pass" if ok else "fail", "actual": f"tier={r['tier']}", "explanation": r["reason"]}
+
+
+async def _c_good_github(app) -> dict:
+    r = await _classify(app, url="https://github.com/pytorch/pytorch", run_llm=False)
+    ok = r["tier"] == "official_repo"
+    note = "" if ok else "Expected official_repo; GitHub signals may be unavailable (no token / rate-limit) → fell back."
+    return {"status": "pass" if ok else "fail",
+            "actual": f"tier={r['tier']} · signals={r['signals']}", "explanation": r["reason"], "note": note}
+
+
+async def _c_unknown_blog(app) -> dict:
+    r = await _classify(app, url="https://www.evanmiller.org/index.html", run_llm=True)
+    ok = r["needs_llm"] and r["tier"] in {"web_unknown", "web_reputable", "quarantined"}
+    return {"status": "pass" if ok else "fail",
+            "actual": f"tier={r['tier']} · used_llm={r['used_llm']}", "explanation": r["reason"]}
+
+
+async def _c_restrictive_license(app) -> dict:
+    r = await _classify(app, url="https://example.com/proprietary-doc", license="all-rights-reserved", run_llm=False)
+    ok = r["blocked"] and r["tier"] == "quarantined"
+    return {"status": "pass" if ok else "fail",
+            "actual": f"tier={r['tier']} · blocked={r['blocked']}", "explanation": r["reason"]}
+
+
+async def _c_retracted(app) -> dict:
+    r = await _classify(app, arxiv_id="2003.08934", url="https://arxiv.org/abs/2003.08934", run_llm=False)
+    return {"status": "gap", "actual": f"tier={r['tier']}",
+            "explanation": "Classified as preprint. Mimir's trust gate is identifier/host-based and does NOT "
+                           "check retraction status — a retracted paper would still be admitted at preprint. "
+                           "Retraction detection is not implemented."}
+
+
+async def _c_duplicate(app) -> dict:
+    state = await _mimir_state(app)
+    key = await state.pool.fetchval(
+        "SELECT canonical_key FROM documents WHERE source_kind='arxiv' AND queryable LIMIT 1"
+    )
+    exists = bool(key) and await state.document_exists("arxiv", key)
+    return {"status": "pass" if exists else "fail",
+            "actual": f"document_exists('arxiv', {key}) = {exists}",
+            "explanation": (f"A re-submitted source dedupes on (source_kind, canonical_key); the existing paper "
+                            f"{key} is detected, so Mimir skips re-ingest.") if exists
+                           else "No arxiv document found to test dedupe against."}
+
+
+MIMIR_SUITE = [
+    SuiteCase("good_arxiv", "Good arXiv paper", "Classify trust", "preprint", False, _c_good_arxiv),
+    SuiteCase("good_github", "Good GitHub repo", "Classify trust", "official_repo", False, _c_good_github),
+    SuiteCase("unknown_blog", "Unknown blog", "Classify trust + explain",
+              "web_unknown → LLM tie-breaker", False, _c_unknown_blog),
+    SuiteCase("restrictive_license", "Restrictive-license source", "Detect bad + quarantine",
+              "quarantined (blocked)", False, _c_restrictive_license),
+    SuiteCase("retracted", "Retracted paper", "Detect bad sources", "preprint — gap (not detected)", True, _c_retracted),
+    SuiteCase("duplicate", "Duplicate paper", "Dedupe", "already in corpus", False, _c_duplicate),
+]
+
+SUITES: dict[str, list[SuiteCase]] = {"mimir": MIMIR_SUITE}
+
+
+@router.get("/suite")
+async def suite(agent: str) -> dict:
+    cases = SUITES.get(agent, [])
+    return {
+        "agent": agent,
+        "cases": [
+            {"id": c.id, "label": c.label, "question": c.question, "expect": c.expect, "gap": c.gap}
+            for c in cases
+        ],
+    }
+
+
+class SuiteRunRequest(BaseModel):
+    agent: str
+
+
+@router.post("/suite/run")
+async def suite_run(request: Request, req: SuiteRunRequest) -> dict:
+    cases = SUITES.get(req.agent, [])
+    results = []
+    for c in cases:
+        base = {"id": c.id, "label": c.label, "question": c.question, "expect": c.expect, "gap": c.gap}
+        try:
+            r = await c.run(request.app)
+        except Exception as e:  # noqa: BLE001 — one bad case must not sink the suite
+            log.exception("suite case %s/%s failed", req.agent, c.id)
+            r = {"status": "error", "actual": "—", "explanation": f"{type(e).__name__}: {str(e)[:200]}"}
+        results.append({**base, **r})
+    return {"agent": req.agent, "results": results}

@@ -392,8 +392,15 @@ export interface AgentMode {
   needs_claim?: boolean;
   note?: string;
 }
-export interface AgentDef { id: string; label: string; role: string; status: string; what: string; modes: AgentMode[] }
+export interface AgentDef { id: string; label: string; role: string; status: string; what: string; modes: AgentMode[]; has_suite?: boolean }
 export interface AgentCatalog { agents: AgentDef[]; claims: { id: number; claim: string }[] }
+export interface SuiteCaseMeta { id: string; label: string; question: string; expect: string; gap: boolean }
+export interface SuiteCaseResult extends SuiteCaseMeta {
+  status: "pass" | "fail" | "gap" | "error";
+  actual?: string;
+  explanation?: string;
+  note?: string;
+}
 export interface AgentRunResult {
   status: string;
   error?: string;
@@ -427,6 +434,8 @@ export const api = {
   agentCatalog: () => jget<AgentCatalog>("/agentlab/agents"),
   agentRun: (body: { agent: string; mode: string; claim_id?: number | null; inputs?: Record<string, string> }) =>
     jpost<AgentRunResult>("/agentlab/run", body),
+  agentSuite: (agent: string) => jget<{ agent: string; cases: SuiteCaseMeta[] }>(`/agentlab/suite?agent=${agent}`),
+  agentSuiteRun: (agent: string) => jpost<{ agent: string; results: SuiteCaseResult[] }>("/agentlab/suite/run", { agent }),
   events:    (limit = 100) => jget<LabFoundryEvent[]>(`/events?limit=${limit}`),
   findings:  (thesisId: number) => jget<Finding[]>(`/claims/${thesisId}/findings`),
   query:     (body: { query: string; context_window?: number; include_sources?: boolean }) =>

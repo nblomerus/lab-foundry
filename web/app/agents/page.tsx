@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Bot, Play } from "lucide-react";
-import { api, type AgentCatalog, type AgentMode, type AgentRunResult } from "../lib/api";
+import { api, type AgentCatalog, type AgentMode, type AgentRunResult, type SuiteCaseResult } from "../lib/api";
 import { Badge, Card, cx } from "../components/ui";
 
 export default function AgentLabPage() {
@@ -14,6 +14,8 @@ export default function AgentLabPage() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<AgentRunResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [suiteRunning, setSuiteRunning] = useState(false);
+  const [suiteResult, setSuiteResult] = useState<SuiteCaseResult[] | null>(null);
 
   useEffect(() => {
     api.agentCatalog()
@@ -32,19 +34,32 @@ export default function AgentLabPage() {
     const a = cat?.agents.find((x) => x.id === id);
     setAgentId(id);
     setModeKey(a?.modes[0]?.key ?? null);
-    setInputs({}); setResult(null); setClaimId(null);
+    setInputs({}); setResult(null); setClaimId(null); setSuiteResult(null);
   }
-  function pickMode(k: string) { setModeKey(k); setInputs({}); setResult(null); }
+  function pickMode(k: string) { setModeKey(k); setInputs({}); setResult(null); setSuiteResult(null); }
 
   async function run() {
     if (!agent || !mode) return;
-    setRunning(true); setResult(null); setErr(null);
+    setRunning(true); setResult(null); setSuiteResult(null); setErr(null);
     try {
       setResult(await api.agentRun({ agent: agent.id, mode: mode.key, claim_id: claimId, inputs }));
     } catch (e) {
       setResult({ status: "error", error: String(e) });
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function runSuite() {
+    if (!agent) return;
+    setSuiteRunning(true); setSuiteResult(null); setResult(null); setErr(null);
+    try {
+      const d = await api.agentSuiteRun(agent.id);
+      setSuiteResult(d.results);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSuiteRunning(false);
     }
   }
 
@@ -165,6 +180,24 @@ export default function AgentLabPage() {
                     {mode.emits && <p className="text-[11px] text-slate-400">Live, this would emit: {mode.emits}</p>}
                   </div>
                 )}
+
+                {agent.has_suite && (
+                  <div className="mt-5 border-t border-slate-100 pt-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Test suite</div>
+                      <button
+                        type="button"
+                        onClick={runSuite}
+                        disabled={suiteRunning}
+                        className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                      >{suiteRunning ? "Running…" : "Run all cases"}</button>
+                    </div>
+                    <p className="mt-1 text-[12px] text-slate-500">
+                      Curated cases that check the agent&apos;s core questions — pass / fail / known-gap, each with its
+                      explanation.
+                    </p>
+                  </div>
+                )}
               </>
             )}
           </Card>
@@ -173,13 +206,64 @@ export default function AgentLabPage() {
         {/* result panel */}
         <section className="lg:col-span-7">
           <Card>
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Result</div>
-            {!result && !running && <p className="mt-2 text-sm text-slate-400">Pick an agent + mode and run it.</p>}
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              {suiteResult || suiteRunning ? "Test suite" : "Result"}
+            </div>
+            {!result && !suiteResult && !running && !suiteRunning && (
+              <p className="mt-2 text-sm text-slate-400">Pick a mode and run it, or run the test suite.</p>
+            )}
             {running && <p className="mt-2 text-sm text-slate-500">Running… (an LLM dry-run calls the model, ~5–30s).</p>}
-            {result && <ResultView r={result} />}
+            {suiteRunning && <p className="mt-2 text-sm text-slate-500">Running the suite… (classify + GitHub/LLM probes, ~30–60s).</p>}
+            {suiteResult && <SuiteTable results={suiteResult} />}
+            {!suiteResult && result && <ResultView r={result} />}
           </Card>
         </section>
       </div>
+    </div>
+  );
+}
+
+function StatusDot({ status }: { status: string }) {
+  const bg: Record<string, string> = { pass: "bg-emerald-500", fail: "bg-red-500", error: "bg-red-500", gap: "bg-amber-500" };
+  const ch: Record<string, string> = { pass: "✓", fail: "✗", error: "!", gap: "⚠" };
+  return (
+    <span className={cx("inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white", bg[status] ?? "bg-slate-400")}>
+      {ch[status] ?? "?"}
+    </span>
+  );
+}
+
+function SuiteTable({ results }: { results: SuiteCaseResult[] }) {
+  const pass = results.filter((r) => r.status === "pass").length;
+  const fail = results.filter((r) => r.status === "fail" || r.status === "error").length;
+  const gap = results.filter((r) => r.status === "gap").length;
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Badge tone="green">{pass} pass</Badge>
+        {fail > 0 && <Badge tone="red">{fail} fail</Badge>}
+        {gap > 0 && <Badge tone="amber">{gap} gap</Badge>}
+        <span className="text-slate-400">{results.length} cases</span>
+      </div>
+      <ul className="space-y-2">
+        {results.map((r) => (
+          <li key={r.id} className="rounded-2xl border border-slate-200 bg-white p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <StatusDot status={r.status} />
+                <span className="text-sm font-semibold text-slate-900">{r.label}</span>
+              </div>
+              <span className="shrink-0 text-[10px] uppercase tracking-wide text-slate-400">{r.question}</span>
+            </div>
+            <div className="mt-1.5 grid grid-cols-1 gap-0.5 text-[12px] text-slate-500 sm:grid-cols-2">
+              <span>expected: <span className="text-slate-600">{r.expect}</span></span>
+              {r.actual && <span>actual: <span className="font-mono text-slate-600">{r.actual}</span></span>}
+            </div>
+            {r.explanation && <p className="mt-1.5 text-[12px] leading-snug text-slate-500">{r.explanation}</p>}
+            {r.note && <p className="mt-1 text-[12px] text-amber-600">{r.note}</p>}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
