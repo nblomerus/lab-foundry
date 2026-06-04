@@ -548,6 +548,7 @@ async def search_arxiv(
     query: str,
     max_results: int = 10,
     *,
+    start: int = 0,
     client: httpx.AsyncClient | None = None,
 ) -> list[ArxivResult]:
     """Search the arXiv Atom API and return typed `ArxivResult` rows.
@@ -556,6 +557,11 @@ async def search_arxiv(
     augmented generation"). On any transport error or unparseable feed this
     returns [] — discovery is best-effort and must not raise into a scout loop.
 
+    Results are sorted newest-first (submittedDate desc) so a *repeated* sweep of
+    the same topic keeps surfacing fresh papers rather than re-returning the same
+    relevance-ranked top-N (which the corpus already holds). `start` pages deeper
+    into the back catalogue — the discovery sweep rotates it to widen coverage.
+
     Pass `client` to reuse a shared httpx.AsyncClient (the scout passes one so a
     multi-topic sweep shares connections); otherwise a short-lived client is
     created and closed here.
@@ -563,8 +569,10 @@ async def search_arxiv(
     params = urlencode(
         {
             "search_query": query,
-            "start": 0,
+            "start": max(0, start),
             "max_results": max_results,
+            "sortBy": "submittedDate",
+            "sortOrder": "descending",
         }
     )
     url = f"{ARXIV_API_URL}?{params}"
