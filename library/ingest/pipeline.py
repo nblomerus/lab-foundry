@@ -69,6 +69,35 @@ def _as_descriptor(source: dict | SourceDescriptor) -> SourceDescriptor:
     return SourceDescriptor(**source)
 
 
+def _source_target_id(canonical_key: str) -> int:
+    """Stable positive bigint from a source's canonical_key (for event keys when
+    there is no document id yet — e.g. a source rejected before staging)."""
+    return int.from_bytes(hashlib.blake2b(canonical_key.encode(), digest_size=7).digest(), "big")
+
+
+async def _emit_rejected(state, desc: SourceDescriptor, stage: str, reason: str) -> None:
+    """Record a source TURNED AWAY at intake (quality gate / no usable content),
+    so the entrance/gate view can show what was rejected and why. Deduped per
+    source; telemetry-only, never raises into the ingest path."""
+    try:
+        await state.emit_corpus_event(
+            "library.ingest_rejected",
+            target_type="source",
+            target_id=_source_target_id(desc.canonical_key),
+            payload={
+                "source_kind": desc.source_kind,
+                "canonical_key": desc.canonical_key,
+                "url": desc.url,
+                "title": desc.title,
+                "stage": stage,
+                "reason": reason,
+            },
+            dedup_key=f"rejected-{stage}-{desc.source_kind}-{desc.canonical_key}",
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break ingest
+        log.exception("ingest: failed to emit ingest_rejected for %s", desc.canonical_key)
+
+
 # -------------------------------------------------------------------------
 # Full-text resolution (deterministic; no LLM)
 # -------------------------------------------------------------------------
@@ -301,6 +330,7 @@ async def stage_source(
             desc.canonical_key,
             quality.reason,
         )
+        await _emit_rejected(state, desc, "quality", quality.reason)
         return {"skipped": True, "reason": f"low_quality: {quality.reason}"}
 
     # Parse (deterministic, no LLM).
@@ -322,6 +352,7 @@ async def stage_source(
             desc.source_kind,
             desc.canonical_key,
         )
+        await _emit_rejected(state, desc, "quality", "no extractable content (0 chunks)")
         return {"skipped": True, "reason": "no_chunks"}
 
     # content_hash is sha256 of the raw resolved text — the exact-bytes dedupe
