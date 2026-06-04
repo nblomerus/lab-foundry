@@ -326,7 +326,7 @@ async def build_context(engine: BenchEngine, invocation_type: str, claim_id: int
         s = await state.get_company_state()
         theses = await state.get_active_claims(limit=10)
         days = (datetime.now(UTC) - s.phase_started_at).days
-        summary = "\n".join(f"- T{t.id} (conf {t.confidence:.2f}): {t.claim}" for t in theses) or "(none)"
+        summary = "\n".join(f"- T{t.id} (conf {t.confidence:.2f}): {t.statement}" for t in theses) or "(none)"
         return (
             {"current_phase": s.current_phase, "days_in_phase": days, "theses_summary": summary},
             f"Phase {s.current_phase}, day {days}, {len(theses)} theses",
@@ -487,7 +487,7 @@ async def options(request: Request) -> dict:
             seen.add(mid)
             models.append({"id": mid, "provider": cp.provider.value, "model_name": cp.model_name, "location": "cloud"})
 
-    theses = [{"id": t.id, "claim": t.claim} for t in await engine.state.get_active_claims(limit=25)]
+    theses = [{"id": t.id, "claim": t.statement} for t in await engine.state.get_active_claims(limit=25)]
 
     return {"tasks": tasks, "models": models, "theses": theses}
 

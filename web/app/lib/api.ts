@@ -375,11 +375,58 @@ export interface CorpusSearchResult {
   error?: string;
 }
 
+// ---- Agent Lab ----
+export interface AgentModeInput { name: string; label: string; placeholder?: string }
+export interface AgentMode {
+  key: string;
+  label: string;
+  kind: "llm" | "mimir";
+  inputs: AgentModeInput[];
+  action?: string;
+  invocation_type?: string;
+  tier?: string;
+  model?: string;
+  output_schema?: string | null;
+  runnable?: boolean;
+  emits?: string | null;
+  needs_claim?: boolean;
+  note?: string;
+}
+export interface AgentDef { id: string; label: string; role: string; status: string; what: string; modes: AgentMode[] }
+export interface AgentCatalog { agents: AgentDef[]; claims: { id: number; claim: string }[] }
+export interface AgentRunResult {
+  status: string;
+  error?: string;
+  kind?: "llm" | "mimir";
+  dry_run?: boolean;
+  live?: boolean;
+  invocation_type?: string;
+  tier?: string;
+  model?: string;
+  context_note?: string;
+  prompt_tokens?: number;
+  prompt_preview?: string;
+  latency_ms?: number;
+  output_tokens?: number;
+  parsed?: unknown;
+  raw?: string | null;
+  valid?: boolean;
+  validated?: unknown;
+  validation_error?: string | null;
+  would_emit?: string | null;
+  action?: string;
+  result?: Record<string, unknown>;
+  note?: string;
+}
+
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
   recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),
   corpusSearch: (q: string, k = 6) => jget<CorpusSearchResult>(`/knowledge/search?q=${encodeURIComponent(q)}&k=${k}`),
+  agentCatalog: () => jget<AgentCatalog>("/agentlab/agents"),
+  agentRun: (body: { agent: string; mode: string; claim_id?: number | null; inputs?: Record<string, string> }) =>
+    jpost<AgentRunResult>("/agentlab/run", body),
   events:    (limit = 100) => jget<LabFoundryEvent[]>(`/events?limit=${limit}`),
   findings:  (thesisId: number) => jget<Finding[]>(`/claims/${thesisId}/findings`),
   query:     (body: { query: string; context_window?: number; include_sources?: boolean }) =>
