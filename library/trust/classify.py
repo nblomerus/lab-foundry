@@ -46,7 +46,17 @@ def classify_trust(meta: DocMeta) -> TrustClassification:
     host = _host(meta.source_url)
     lic = (meta.license or "").strip().lower()
 
-    # License hard-gate first — independent of, and overriding, the tier ladder.
+    # Retraction/withdrawal hard-gate — a retracted source is never admitted,
+    # regardless of where it sits on the tier ladder.
+    if meta.retracted:
+        return TrustClassification(
+            tier="quarantined",
+            blocked=True,
+            signals={"host": host, "retracted": True},
+            reason="source is retracted / withdrawn",
+        )
+
+    # License hard-gate next — independent of, and overriding, the tier ladder.
     if lic in BLOCKED_LICENSES:
         return TrustClassification(
             tier="quarantined",

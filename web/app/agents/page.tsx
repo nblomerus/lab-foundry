@@ -296,6 +296,31 @@ function ResultView({ r }: { r: AgentRunResult }) {
     );
   }
 
+  if (r.kind === "collectors") {
+    const res = (r.result ?? {}) as Record<string, unknown>;
+    const sources = Array.isArray(res.sources) ? (res.sources as Array<Record<string, unknown>>) : [];
+    return (
+      <div className="mt-3 space-y-3">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Badge tone="green">{r.action}</Badge>
+          {"count" in res && <span className="rounded-lg bg-slate-100 px-2 py-0.5 text-slate-600">{String(res.count)} sources</span>}
+          {"scanned" in res && <span className="text-slate-600">{String(res.discovered)} new / {String(res.scanned)} scanned</span>}
+        </div>
+        {r.note && <p className="text-[12px] text-slate-500">{r.note}</p>}
+        {sources.length > 0 && (
+          <ul className="space-y-1.5">
+            {sources.map((s, i) => (
+              <li key={i} className="rounded-2xl border border-slate-200 bg-slate-50 p-2.5 text-xs">
+                <div className="line-clamp-1 font-medium text-slate-700">{String(s.title || s.canonical_key)}</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">{String(s.source_kind)} · {String(s.canonical_key)}</div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
   // LLM dry-run
   return (
     <div className="mt-3 space-y-3">

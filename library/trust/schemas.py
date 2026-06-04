@@ -32,6 +32,7 @@ class DocMeta(BaseModel):
     license: str | None = None
     github_has_release: bool | None = None
     github_days_since_push: int | None = None
+    retracted: bool = False  # arXiv withdrawal / DOI retraction -> hard-gate BLOCK
 
 
 class TrustClassification(BaseModel):

@@ -404,7 +404,7 @@ export interface SuiteCaseResult extends SuiteCaseMeta {
 export interface AgentRunResult {
   status: string;
   error?: string;
-  kind?: "llm" | "mimir";
+  kind?: "llm" | "mimir" | "collectors";
   dry_run?: boolean;
   live?: boolean;
   invocation_type?: string;

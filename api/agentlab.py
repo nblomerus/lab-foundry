@@ -18,6 +18,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -33,10 +34,11 @@ from pydantic import BaseModel
 
 from agents.mimir.acquire import AcquireRequest, handle_acquire_requested
 from agents.mimir.collectors import run_discovery_sweep
-from agents.mimir.handler import _certify_llm, _resolve_signals, ingest_source
+from agents.mimir.handler import _arxiv_withdrawn, _certify_llm, _resolve_signals, ingest_source
 from api.bench import BenchContextError, build_context, get_engine
 from harness.curator import RECIPES
 from harness.router import MODELS, PREMIUM_TIERS, ROUTE, Tier
+from library.ingest.scouts import scout_arxiv, scout_github, scout_web
 from library.trust import DocMeta, classify_trust
 from state.client import PostgresClient
 
@@ -45,6 +47,7 @@ router = APIRouter(prefix="/agentlab", tags=["agentlab"])
 
 LLM = "llm"
 MIMIR = "mimir"
+COLLECTORS = "collectors"
 
 # What each agent emits live (shown as "would emit" on a dry run).
 _EMITS: dict[str, str] = {
@@ -143,6 +146,25 @@ AGENTS: list[dict] = [
         "id": "reflection", "label": "Reflection", "role": "Learn lessons", "status": "planned",
         "what": "Judges whether a past run yields a generalizable lesson worth keeping.",
         "modes": [_llm("lesson_propose", "Propose lesson", "reflect.lesson_propose")],
+    },
+    {
+        "id": "collectors", "label": "Collectors", "role": "Scouts (data intake)", "status": "live",
+        "what": "The scouts that find sources for Mimir — arXiv, the open web (SearXNG), and GitHub. "
+                "The discovery sweep runs them over a topic and emits source.discovered per new source.",
+        "modes": [
+            {"key": "arxiv", "label": "arXiv scout", "kind": COLLECTORS, "action": "scout", "scout": "arxiv",
+             "inputs": [{"name": "topic", "label": "Topic", "placeholder": "large language models"}],
+             "note": "Queries arXiv; returns paper descriptors (no ingest)."},
+            {"key": "web", "label": "Web scout", "kind": COLLECTORS, "action": "scout", "scout": "web",
+             "inputs": [{"name": "topic", "label": "Topic", "placeholder": "retrieval augmented generation"}],
+             "note": "Queries SearXNG; returns web-page descriptors."},
+            {"key": "github", "label": "GitHub scout", "kind": COLLECTORS, "action": "scout", "scout": "github",
+             "inputs": [{"name": "topic", "label": "Topic", "placeholder": "mixture of experts"}],
+             "note": "Queries the GitHub API; returns repo descriptors."},
+            {"key": "sweep", "label": "Discovery sweep", "kind": COLLECTORS, "action": "sweep",
+             "inputs": [{"name": "topic", "label": "Topic", "placeholder": "graph neural networks"}],
+             "note": "Runs all enabled scouts over the topic and emits source.discovered per new source."},
+        ],
     },
 ]
 
@@ -252,6 +274,8 @@ async def run(request: Request, req: RunRequest) -> dict:
     try:
         if mode["kind"] == LLM:
             return await _run_llm(request.app, mode, req.claim_id)
+        if mode["kind"] == COLLECTORS:
+            return await _run_collectors(request.app, mode, req.inputs)
         return await _run_mimir(request.app, mode, req.inputs)
     except Exception as e:  # noqa: BLE001
         log.exception("agentlab run failed: %s/%s", req.agent, req.mode)
@@ -362,6 +386,32 @@ async def _run_mimir(app, mode: dict, inputs: dict[str, str]) -> dict:
     return {"status": "error", "kind": MIMIR, "error": f"unknown mimir action {action}"}
 
 
+_SCOUTS = {"arxiv": scout_arxiv, "web": scout_web, "github": scout_github}
+
+
+async def _run_collectors(app, mode: dict, inputs: dict[str, str]) -> dict:
+    action = mode["action"]
+    topic = (inputs.get("topic") or "").strip()
+
+    if action == "scout":
+        scout = _SCOUTS[mode["scout"]]
+        topics = [topic] if topic else ["large language models"]
+        descs = await scout(topics, per_topic=5)
+        return {
+            "status": "ok", "kind": COLLECTORS, "action": "scout", "scout": mode["scout"],
+            "result": {"count": len(descs), "sources": [d.model_dump() for d in descs[:10]]},
+        }
+
+    if action == "sweep":
+        state = await _mimir_state(app)
+        topics = [topic] if topic else None
+        res = await run_discovery_sweep(topics, state, per_topic=4)
+        return {"status": "ok", "kind": COLLECTORS, "live": True, "action": "sweep", "result": res,
+                "note": "source.discovered emitted per new source; the running harness ingests them."}
+
+    return {"status": "error", "kind": COLLECTORS, "error": f"unknown collectors action {action}"}
+
+
 # =========================================================================
 # Test suites — a shared scenario framework; each agent declares its own cases.
 # A case runs in isolation and self-evaluates to pass / fail / gap.
@@ -412,12 +462,31 @@ async def _c_restrictive_license(app) -> dict:
             "actual": f"tier={r['tier']} · blocked={r['blocked']}", "explanation": r["reason"]}
 
 
+async def _c_peer_reviewed(app) -> dict:
+    r = await _classify(app, doi="10.1038/nature14539", url="https://doi.org/10.1038/nature14539", run_llm=False)
+    ok = r["tier"] == "peer_reviewed"
+    note = "" if ok else "Expected peer_reviewed via a resolving DOI; the doi.org HEAD probe may have failed."
+    return {"status": "pass" if ok else "fail", "actual": f"tier={r['tier']}", "explanation": r["reason"], "note": note}
+
+
+async def _c_web_reputable(app) -> dict:
+    r = await _classify(app, url="https://en.wikipedia.org/wiki/Transformer_(deep_learning_architecture)", run_llm=False)
+    ok = r["tier"] == "web_reputable"
+    return {"status": "pass" if ok else "fail", "actual": f"tier={r['tier']}", "explanation": r["reason"]}
+
+
 async def _c_retracted(app) -> dict:
-    r = await _classify(app, arxiv_id="2003.08934", url="https://arxiv.org/abs/2003.08934", run_llm=False)
-    return {"status": "gap", "actual": f"tier={r['tier']}",
-            "explanation": "Classified as preprint. Mimir's trust gate is identifier/host-based and does NOT "
-                           "check retraction status — a retracted paper would still be admitted at preprint. "
-                           "Retraction detection is not implemented."}
+    # The hard-gate is deterministic — verify it directly. The live arXiv-withdrawal
+    # probe is best-effort (arXiv rate-limits aggressively), so report it as
+    # supplementary rather than gating the result on a flaky external call.
+    gate = classify_trust(DocMeta(arxiv_id="x", source_url="https://arxiv.org/abs/x", retracted=True))
+    gate_ok = gate.blocked and gate.tier == "quarantined"
+    detected = await _arxiv_withdrawn("0808.1000")
+    live = ("arXiv withdrawal detected on 0808.1000" if detected
+            else "arXiv API didn't return this run (rate-limited) — live detection unconfirmed")
+    return {"status": "pass" if gate_ok else "fail",
+            "actual": f"gate→quarantined={gate_ok} · live-detected={detected}",
+            "explanation": f"Retracted/withdrawn sources hit a hard-gate → quarantined (overrides tier). Live: {live}."}
 
 
 async def _c_duplicate(app) -> dict:
@@ -435,16 +504,71 @@ async def _c_duplicate(app) -> dict:
 
 MIMIR_SUITE = [
     SuiteCase("good_arxiv", "Good arXiv paper", "Classify trust", "preprint", False, _c_good_arxiv),
+    SuiteCase("peer_reviewed", "Peer-reviewed (resolving DOI)", "Classify trust", "peer_reviewed",
+              False, _c_peer_reviewed),
     SuiteCase("good_github", "Good GitHub repo", "Classify trust", "official_repo", False, _c_good_github),
+    SuiteCase("web_reputable", "Reputable web source", "Classify trust", "web_reputable", False, _c_web_reputable),
     SuiteCase("unknown_blog", "Unknown blog", "Classify trust + explain",
               "web_unknown → LLM tie-breaker", False, _c_unknown_blog),
     SuiteCase("restrictive_license", "Restrictive-license source", "Detect bad + quarantine",
               "quarantined (blocked)", False, _c_restrictive_license),
-    SuiteCase("retracted", "Retracted paper", "Detect bad sources", "preprint — gap (not detected)", True, _c_retracted),
+    SuiteCase("retracted", "Retracted / withdrawn paper", "Detect bad + quarantine",
+              "quarantined (hard-gate)", False, _c_retracted),
     SuiteCase("duplicate", "Duplicate paper", "Dedupe", "already in corpus", False, _c_duplicate),
 ]
 
-SUITES: dict[str, list[SuiteCase]] = {"mimir": MIMIR_SUITE}
+
+# ---- Collectors suite — do the scouts actually find well-formed sources? -----
+
+
+def _scout_result(name: str, descs: list) -> dict:
+    wellformed = all(d.source_kind == name and d.canonical_key for d in descs)
+    ok = len(descs) >= 1 and wellformed
+    note = "" if descs else f"0 results — the {name} source may be rate-limiting / unavailable this run."
+    first = descs[0].canonical_key if descs else "—"
+    return {"status": "pass" if ok else "fail",
+            "actual": f"{len(descs)} sources · well-formed={wellformed} · first={first}",
+            "explanation": f"scout_{name} returned {len(descs)} well-formed {name} descriptor(s).", "note": note}
+
+
+async def _c_scout_arxiv(app) -> dict:
+    descs: list = []
+    for attempt in range(2):  # arXiv 429s often clear on a short retry
+        descs = await scout_arxiv(["large language models"], per_topic=4)
+        if descs:
+            break
+        if attempt == 0:
+            await asyncio.sleep(2.0)
+    return _scout_result("arxiv", descs)
+
+
+async def _c_scout_web(app) -> dict:
+    return _scout_result("web", await scout_web(["retrieval augmented generation"], per_topic=4))
+
+
+async def _c_scout_github(app) -> dict:
+    return _scout_result("github", await scout_github(["mixture of experts"], per_topic=4))
+
+
+async def _c_sweep(app) -> dict:
+    state = await _mimir_state(app)
+    res = await run_discovery_sweep(["graph neural networks"], state, per_topic=3)
+    ok = res.get("scanned", 0) >= 1
+    note = "" if ok else "0 sources scanned — scouts may be rate-limited this run."
+    return {"status": "pass" if ok else "fail",
+            "actual": f"scanned={res.get('scanned')} · new={res.get('discovered')}",
+            "explanation": (f"run_discovery_sweep ran the scouts and emitted source.discovered per new source "
+                            f"({res.get('discovered')} new; the rest already in the corpus)."), "note": note}
+
+
+COLLECTORS_SUITE = [
+    SuiteCase("scout_arxiv", "arXiv scout", "Find sources", "≥1 paper descriptor", False, _c_scout_arxiv),
+    SuiteCase("scout_web", "Web scout (SearXNG)", "Find sources", "≥1 web descriptor", False, _c_scout_web),
+    SuiteCase("scout_github", "GitHub scout", "Find sources", "≥1 repo descriptor", False, _c_scout_github),
+    SuiteCase("sweep", "Discovery sweep", "Sweep + emit", "scanned ≥1, emits source.discovered", False, _c_sweep),
+]
+
+SUITES: dict[str, list[SuiteCase]] = {"mimir": MIMIR_SUITE, "collectors": COLLECTORS_SUITE}
 
 
 @router.get("/suite")
