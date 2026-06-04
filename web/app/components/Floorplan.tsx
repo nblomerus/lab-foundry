@@ -1298,8 +1298,18 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
             })()}
             <text x={588} y={916} fontSize={12} letterSpacing="1.2" fill={selected === "entrance" ? C.active : C.faint}>MAIN ENTRANCE</text>
             <text x={588} y={932} fontSize={10} letterSpacing="0.8" fill={selected === "entrance" ? "#0f9b6e" : C.faint} opacity={0.85}>the Gate · click to inspect</text>
-            {/* transparent hotspot covering the arcs + label */}
-            <rect x={430} y={888} width={270} height={50} fill="transparent" />
+            {/* transparent hotspot covering the arcs + label. pointerEvents:"all"
+                is required — a transparent fill alone lets the click fall through
+                to the SVG's deselect onClick, so the entrance never opened. */}
+            <rect
+              x={418}
+              y={882}
+              width={292}
+              height={64}
+              fill="transparent"
+              style={{ pointerEvents: "all" }}
+              onClick={(e) => { e.stopPropagation(); setSelected("entrance"); }}
+            />
           </g>
           <text x={946} y={476} textAnchor="middle" fontSize={17} fontWeight={700} letterSpacing="1.6" fill="#aab2bd">RESEARCH WORKFLOW</text>
 
