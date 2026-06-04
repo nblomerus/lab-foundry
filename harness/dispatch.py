@@ -115,9 +115,13 @@ class Dispatcher:
         # Lessons reconciliation runs hourly (the watchdog ticks every 5 min);
         # this stamps the last run so we don't reconcile on every tick.
         self._last_lessons_tick: datetime | None = None
-        # Library discovery sweep runs every LIBRARIAN_SWEEP_HOURS (default 6h);
+        # Agenda-mode library sweep cadence (only used once Ariadne is active);
         # stamped here so the 5-min watchdog doesn't kick a sweep every tick.
         self._last_sweep_tick: datetime | None = None
+        # Continuous library-intake pump (aggressive base-building while Ariadne
+        # is dark). Condition-driven, not interval-driven — see _discovery_pump.
+        self._pump_task: asyncio.Task | None = None
+        self._last_pump_emit: datetime | None = None
 
     def register(self, event_type: str, handler: Handler) -> None:
         if event_type in self._handlers:
@@ -139,6 +143,7 @@ class Dispatcher:
         """Main loop. Blocks until stop() is called."""
         self._running = True
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+        self._pump_task = asyncio.create_task(self._discovery_pump_loop())
 
         self._listener_conn = await self.pool.acquire()
         try:
@@ -160,6 +165,8 @@ class Dispatcher:
         self._running = False
         if self._watchdog_task:
             self._watchdog_task.cancel()
+        if self._pump_task:
+            self._pump_task.cancel()
 
     # -- Notify handler --------------------------------------------------
 
@@ -452,24 +459,17 @@ class Dispatcher:
                 log.exception("watchdog sweep failed")
             await asyncio.sleep(300)
 
-    async def _sweep_library_if_due(self) -> None:
-        """Kick Mimir's data collectors periodically by emitting
-        `library.sweep_requested`. Gated on MIMIR_LOOP. The interval is ADAPTIVE:
-        while Ariadne (the PI) has set no agenda the lab is in aggressive
-        base-building mode and sweeps often (LIBRARIAN_AGGRESSIVE_SWEEP_MINUTES,
-        default 45m) to fill the Library broadly; once active claims exist it
-        relaxes to the steady-state cadence (LIBRARIAN_SWEEP_HOURS, default 6h).
-        The Mimir handler turns the event into scout runs -> source.discovered."""
-        if os.environ.get("MIMIR_LOOP", "").lower() not in {"v1", "on"}:
-            return
-        now = datetime.now(UTC)
-        interval_s = self._sweep_interval_seconds()
-        if self._last_sweep_tick is not None and (now - self._last_sweep_tick).total_seconds() < interval_s:
-            return
-        self._last_sweep_tick = now
-        # dedup_key keyed to the interval window (not just the hour) so a sub-hour
-        # aggressive cadence isn't collapsed by the ON CONFLICT guard.
-        window = str(int(now.timestamp() // interval_s))
+    @staticmethod
+    def _ariadne_active() -> bool:
+        """The research workflow — Ariadne, the PI — is running when NOT in
+        KNOWLEDGE_CORE_ONLY mode. While she's dark, the lab base-builds the
+        Library continuously (the discovery pump); once she's active, discovery
+        relaxes to a gentle agenda-tracking cadence."""
+        return os.environ.get("KNOWLEDGE_CORE_ONLY", "").lower() not in {"1", "true", "on", "yes"}
+
+    async def _emit_sweep(self, dedup_key: str) -> None:
+        """Emit one `library.sweep_requested` (the Mimir handler turns it into
+        scout runs -> source.discovered). Shared by the agenda sweep + the pump."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -477,24 +477,74 @@ class Dispatcher:
                 VALUES ('library.sweep_requested', 'ingest_source', '{}'::jsonb, 'sweep-' || $1)
                 ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
                 """,
-                window,
+                dedup_key,
             )
-        log.info("library: emitted library.sweep_requested (interval=%ss)", int(interval_s))
 
-    def _sweep_interval_seconds(self) -> float:
-        """Aggressive base-building cadence while Ariadne (the PI) is dark — i.e.
-        KNOWLEDGE_CORE_ONLY mode — relaxing to the steady-state interval once the
-        research workflow is running. Leftover claims don't make her active."""
+    async def _intake_backlog(self) -> int:
+        """Work still in flight in the intake pipeline: a queued sweep plus
+        discovered-not-staged and staged-not-certified sources (pending
+        source.discovered / document.parsed events). The pump tops up when this
+        runs low so the pipeline is always working and never sits idle."""
+        try:
+            async with self.pool.acquire() as conn:
+                return (
+                    await conn.fetchval(
+                        "SELECT count(*) FROM events WHERE status = 'pending' AND event_type IN "
+                        "('library.sweep_requested', 'source.discovered', 'document.parsed')"
+                    )
+                    or 0
+                )
+        except Exception:  # noqa: BLE001 — a backlog probe failure must not kill the pump
+            log.exception("pump: intake backlog probe failed")
+            return 0
+
+    async def _sweep_library_if_due(self) -> None:
+        """Steady-state AGENDA discovery: once Ariadne (the PI) is active, top up
+        the Library on a gentle cadence (LIBRARIAN_SWEEP_HOURS, default 6h)
+        tracking her claims. While she's dark, base-building runs CONTINUOUSLY via
+        the discovery pump, so this no-ops in that mode. An interval is the right
+        tool here — an agenda top-up is a slow background refresh, not the main
+        intake driver."""
+        if os.environ.get("MIMIR_LOOP", "").lower() not in {"v1", "on"}:
+            return
+        if not self._ariadne_active():
+            return  # the continuous discovery pump owns aggressive base-building
         try:
             hours = float(os.environ.get("LIBRARIAN_SWEEP_HOURS", "6"))
         except ValueError:
             hours = 6.0
-        try:
-            agg_minutes = float(os.environ.get("LIBRARIAN_AGGRESSIVE_SWEEP_MINUTES", "45"))
-        except ValueError:
-            agg_minutes = 45.0
-        core_only = os.environ.get("KNOWLEDGE_CORE_ONLY", "").lower() in {"1", "true", "on", "yes"}
-        return agg_minutes * 60 if core_only else hours * 3600
+        now = datetime.now(UTC)
+        if self._last_sweep_tick is not None and (now - self._last_sweep_tick).total_seconds() < hours * 3600:
+            return
+        self._last_sweep_tick = now
+        await self._emit_sweep(str(int(now.timestamp() // (hours * 3600))))
+        log.info("library: emitted agenda sweep (every %sh)", hours)
+
+    async def _discovery_pump_loop(self) -> None:
+        """Continuous library-intake pump — the base-building driver while Ariadne
+        (the PI) is dark. CONDITION-driven, not interval-driven: whenever the
+        intake backlog runs below a low-water mark it fires the next discovery
+        slice, so the pipeline is always working and never idles between ticks.
+        Bounded by backpressure (it waits while the backlog is healthy) plus a
+        short min-gap covering a sweep's fetch latency so requests don't stack.
+        Idle while the loop is off or once Ariadne is active (the agenda sweep
+        takes over then)."""
+        low_water = int(os.environ.get("LIBRARY_PUMP_LOW_WATER", "40"))
+        check_s = float(os.environ.get("LIBRARY_PUMP_CHECK_SECONDS", "10"))
+        min_gap_s = float(os.environ.get("LIBRARY_PUMP_MIN_GAP_SECONDS", "60"))
+        while self._running:
+            try:
+                loop_on = os.environ.get("MIMIR_LOOP", "").lower() in {"v1", "on"}
+                if loop_on and not self._ariadne_active():
+                    now = datetime.now(UTC)
+                    gap_ok = self._last_pump_emit is None or (now - self._last_pump_emit).total_seconds() >= min_gap_s
+                    if gap_ok and await self._intake_backlog() < low_water:
+                        self._last_pump_emit = now
+                        await self._emit_sweep(f"pump-{int(now.timestamp())}")
+                        log.info("pump: intake backlog low — fired next discovery slice")
+            except Exception:  # noqa: BLE001 — the pump must never die
+                log.exception("discovery pump iteration failed")
+            await asyncio.sleep(check_s)
 
     async def _reconcile_lessons_if_due(self) -> None:
         """
