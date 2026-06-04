@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Boxes, CheckCircle2, Clock, Compass, Database, Download, FileCode, FileText, Github, Globe, Network, Search, ShieldAlert, ShieldCheck } from "lucide-react";
-import { api, type CorpusHit, type KnowledgeStats, type MimirPanel, type RecentIngest, type ScoutPanel } from "../lib/api";
+import { api, type CorpusHit, type GatePanel, type KnowledgeStats, type MimirPanel, type RecentIngest, type ScoutPanel } from "../lib/api";
 import { useEventStream } from "../lib/ws";
 import type { LabFoundryEvent, Snapshot, StreamMessage } from "../lib/types";
 
@@ -1098,12 +1098,136 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
 }
 
 // =========================================================================
+// The Gate inspector — the main entrance; what's admitted vs turned away,
+// with reasons. Backed by GET /knowledge/gate.
+// =========================================================================
+
+const GATE_BADGE: Record<string, string> = {
+  trust: "border-amber-200 bg-amber-50 text-amber-700",
+  quality: "border-violet-200 bg-violet-50 text-violet-700",
+};
+
+function GateInspector({ onClose }: { onClose: () => void }) {
+  const [panel, setPanel] = useState<GatePanel | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.gatePanel()
+      .then((p) => { if (!cancelled) setPanel(p); })
+      .catch(() => { if (!cancelled) setPanel(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const header = (
+    <div className="mb-3 flex items-start justify-between gap-2">
+      <div>
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-semibold tracking-tight text-slate-950">The Gate</h3>
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">Live</span>
+        </div>
+        <div className="mt-0.5 text-xs text-slate-500">Every source clears trust + quality here</div>
+      </div>
+      <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50">Close</button>
+    </div>
+  );
+
+  if (loading) {
+    return <div>{header}<p className="text-sm text-slate-400">Loading gate stats…</p></div>;
+  }
+  if (!panel || panel.status !== "ok") {
+    return <div>{header}<p className="text-sm text-slate-400">Gate stats unavailable.</p></div>;
+  }
+
+  const t = panel.today;
+  return (
+    <div>
+      {header}
+
+      <p className="mb-3 text-sm leading-snug text-slate-700">
+        Two gates guard the Library — <span className="font-semibold text-amber-700">TRUST</span> (source credibility) and{" "}
+        <span className="font-semibold text-violet-700">QUALITY</span> (real, substantial content). Both must pass.
+      </p>
+
+      <SubHead label="At a glance" />
+      <div className="grid grid-cols-2 gap-2">
+        <StatTile label="Admitted" value={t.admitted} tone="emerald" />
+        <StatTile label="Blocked · trust" value={t.blocked_trust} tone="amber" />
+        <StatTile label="Rejected · quality" value={t.rejected_quality} tone="slate" />
+        <StatTile label="Quarantined" value={panel.quarantined} tone="red" />
+      </div>
+      <div className="mt-2 text-[11px] text-slate-400">Discovered today · {t.discovered.toLocaleString()}</div>
+
+      <SubHead label="Turned away (why)" />
+      {panel.turned_away.length === 0 ? (
+        <p className="text-sm text-slate-400">Nothing turned away in the recent window.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {panel.turned_away.map((r, i) => {
+            const label = r.title || r.url || r.source_kind || "source";
+            const linkable = !!r.url && (r.source_kind === "web" || r.source_kind === "github" || r.source_kind === "dataset");
+            return (
+              <li key={`${r.url ?? r.title ?? r.source_kind ?? "ta"}-${i}`} className="rounded-2xl border border-slate-200 bg-white p-2.5 text-xs">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="flex min-w-0 flex-1 items-start gap-2">
+                    <span className={`mt-0.5 shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${GATE_BADGE[r.gate] ?? GATE_BADGE.quality}`}>{r.gate}</span>
+                    {linkable && r.url ? (
+                      <a href={r.url} target="_blank" rel="noreferrer" className="line-clamp-2 min-w-0 flex-1 font-medium text-emerald-700 hover:underline">{label}</a>
+                    ) : (
+                      <span className="line-clamp-2 min-w-0 flex-1 font-medium text-slate-800">{label}</span>
+                    )}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-slate-400">{ago(r.at)}</span>
+                </div>
+                {r.source_kind && <div className="mt-0.5 text-[10px] uppercase tracking-wide text-slate-400">{r.source_kind}</div>}
+                <p className="mt-1 line-clamp-2 text-slate-500">{r.reason}</p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <SubHead label="Recently admitted" />
+      {panel.admitted.length === 0 ? (
+        <p className="text-sm text-slate-400">Nothing admitted in the recent window.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {panel.admitted.map((a, i) => {
+            const badge = a.arxiv_id ? `arXiv:${a.arxiv_id}` : a.canonical_key ?? a.source_kind;
+            return (
+              <li key={`${a.canonical_key ?? a.arxiv_id ?? a.title ?? "adm"}-${i}`} className="flex items-start gap-2 rounded-2xl border border-slate-200 bg-white p-2.5 text-xs">
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+                <div className="min-w-0 flex-1">
+                  <div className="line-clamp-1 text-sm font-medium text-slate-800">{a.title ?? badge}</div>
+                  <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400">
+                    {a.trust_tier && (
+                      <span className="flex items-center gap-1">
+                        <span className={`inline-block h-2 w-2 rounded-full ${TIER_COLORS[a.trust_tier] ?? "bg-slate-300"}`} />
+                        {a.trust_tier.replace(/_/g, " ")}
+                      </span>
+                    )}
+                    <span className="truncate rounded-full bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">{badge}</span>
+                    <span>{ago(a.at)}</span>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// =========================================================================
 // Component
 // =========================================================================
 
 export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
   const { hot, connected, events } = useFloorplanLive();
-  const [selected, setSelected] = useState<RoomId | null>(null);
+  const [selected, setSelected] = useState<RoomId | "entrance" | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeStats | null>(null);
 
   useEffect(() => {
@@ -1151,10 +1275,32 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
           <rect x={16} y={48} width={1468} height={872} rx={16} fill="none" stroke={C.wall} strokeWidth={5} />
           {/* divider wall between the two north wings */}
           <line x1={829} y1={48} x2={829} y2={300} stroke={C.wall} strokeWidth={3} opacity={0.5} />
-          {/* main entrance (south wall, under the knowledge core) */}
-          <path d="M 438 920 A 30 30 0 0 1 498 920" fill="none" stroke={C.wall} strokeWidth={2.5} />
-          <path d="M 498 920 A 30 30 0 0 1 558 920" fill="none" stroke={C.wall} strokeWidth={2.5} />
-          <text x={588} y={916} fontSize={12} letterSpacing="1.2" fill={C.faint}>MAIN ENTRANCE</text>
+          {/* main entrance (south wall, under the knowledge core) — clickable: opens the Gate drill-down */}
+          <g
+            style={{ cursor: "pointer" }}
+            role="button"
+            aria-label="Open the Gate — what's admitted vs turned away, with reasons"
+            onClick={(e) => { e.stopPropagation(); setSelected("entrance"); }}
+          >
+            {selected === "entrance" && (
+              <rect x={426} y={884} width={278} height={58} rx={12}
+                fill="none" stroke={C.active} strokeWidth={3} opacity={0.9} />
+            )}
+            {(() => {
+              const arcStroke = selected === "entrance" ? C.active : C.wall;
+              const arcW = selected === "entrance" ? 3 : 2.5;
+              return (
+                <>
+                  <path d="M 438 920 A 30 30 0 0 1 498 920" fill="none" stroke={arcStroke} strokeWidth={arcW} />
+                  <path d="M 498 920 A 30 30 0 0 1 558 920" fill="none" stroke={arcStroke} strokeWidth={arcW} />
+                </>
+              );
+            })()}
+            <text x={588} y={916} fontSize={12} letterSpacing="1.2" fill={selected === "entrance" ? C.active : C.faint}>MAIN ENTRANCE</text>
+            <text x={588} y={932} fontSize={10} letterSpacing="0.8" fill={selected === "entrance" ? "#0f9b6e" : C.faint} opacity={0.85}>the Gate · click to inspect</text>
+            {/* transparent hotspot covering the arcs + label */}
+            <rect x={430} y={888} width={270} height={50} fill="transparent" />
+          </g>
           <text x={946} y={476} textAnchor="middle" fontSize={17} fontWeight={700} letterSpacing="1.6" fill="#aab2bd">RESEARCH WORKFLOW</text>
 
           <ZoneBracket x1={60} x2={806} y={36} label="COLLECTORS" />
@@ -1194,7 +1340,11 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
               transition={{ type: "spring", stiffness: 280, damping: 32 }}
               className="absolute right-0 top-0 z-20 h-full w-full max-w-[440px] overflow-y-auto border-l border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur"
             >
-              <RoomInspector roomId={selected} snapshot={snapshot} knowledge={knowledge} events={events} onClose={() => setSelected(null)} />
+              {selected === "entrance" ? (
+                <GateInspector onClose={() => setSelected(null)} />
+              ) : (
+                <RoomInspector roomId={selected} snapshot={snapshot} knowledge={knowledge} events={events} onClose={() => setSelected(null)} />
+              )}
             </motion.aside>
           )}
         </AnimatePresence>

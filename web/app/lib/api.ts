@@ -370,6 +370,14 @@ export interface MimirPanel {
   requests: { requester: string; ask: string | null; status: string; at: string | null }[];
 }
 
+export interface GatePanel {
+  status: "ok" | "planned" | "error";
+  today: { admitted: number; blocked_trust: number; rejected_quality: number; discovered: number };
+  quarantined: number;
+  turned_away: { gate: "trust" | "quality"; title: string | null; url: string | null; source_kind: string | null; reason: string; at: string | null }[];
+  admitted: { title: string | null; source_kind: string; arxiv_id: string | null; canonical_key: string | null; trust_tier: string | null; at: string | null }[];
+}
+
 export interface ScoutPanel {
   status: "ok" | "planned" | "error";
   source_kind: string;
@@ -451,6 +459,7 @@ export const api = {
   recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),
   mimirPanel: () => jget<MimirPanel>("/knowledge/mimir"),
   scoutPanel: (kind: string) => jget<ScoutPanel>(`/knowledge/scout?kind=${encodeURIComponent(kind)}`),
+  gatePanel: () => jget<GatePanel>("/knowledge/gate"),
   corpusSearch: (q: string, k = 6) => jget<CorpusSearchResult>(`/knowledge/search?q=${encodeURIComponent(q)}&k=${k}`),
   agentCatalog: () => jget<AgentCatalog>("/agentlab/agents"),
   agentRun: (body: { agent: string; mode: string; claim_id?: number | null; inputs?: Record<string, string> }) =>
