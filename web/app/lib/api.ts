@@ -360,6 +360,16 @@ export interface RecentIngests {
   error?: string;
 }
 
+export interface MimirPanel {
+  status: "ok" | "planned" | "error";
+  at_a_glance: { certified: number; certified_today: number; quarantined: number; quarantined_today: number; pending: number; ingested_today: number; ingested_yesterday: number };
+  trust_ladder: Record<string, number>;               // e.g. { preprint, official_repo, web_reputable, web_unknown, quarantined }
+  pipeline_today: { discovered: number; parsed: number; ingested: number; quarantined: number };
+  source_mix: { kind: string; count: number; pct: number }[];   // kinds: arxiv, web, github, dataset
+  recent_certifications: { title: string | null; source_kind: string; arxiv_id: string | null; canonical_key: string | null; at: string | null }[];
+  requests: { requester: string; ask: string | null; status: string; at: string | null }[];
+}
+
 export interface CorpusHit {
   document_id: number;
   title: string | null;
@@ -430,6 +440,7 @@ export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
   recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),
+  mimirPanel: () => jget<MimirPanel>("/knowledge/mimir"),
   corpusSearch: (q: string, k = 6) => jget<CorpusSearchResult>(`/knowledge/search?q=${encodeURIComponent(q)}&k=${k}`),
   agentCatalog: () => jget<AgentCatalog>("/agentlab/agents"),
   agentRun: (body: { agent: string; mode: string; claim_id?: number | null; inputs?: Record<string, string> }) =>

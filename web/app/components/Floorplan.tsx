@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Boxes, Compass, Database, FileCode, FileText, Github, Globe, Network, Search } from "lucide-react";
-import { api, type CorpusHit, type KnowledgeStats, type RecentIngest } from "../lib/api";
+import { Boxes, CheckCircle2, Clock, Compass, Database, Download, FileCode, FileText, Github, Globe, Network, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import { api, type CorpusHit, type KnowledgeStats, type MimirPanel, type RecentIngest } from "../lib/api";
 import { useEventStream } from "../lib/ws";
 import type { LabFoundryEvent, Snapshot, StreamMessage } from "../lib/types";
 
@@ -67,27 +67,56 @@ function anchor(id: RoomId, side: "top" | "bottom" | "left" | "right", t = 0.5):
   return { x: r.x + r.w, y: r.y + r.h * t };
 }
 
-interface RoomInfo { what: string; events: string[]; sourceKind?: string; role?: string; gate?: string }
+interface RoomInfo {
+  what: string;
+  events: string[];
+  sourceKind?: string;
+  role?: string;
+  gate?: string;
+  triggers?: string;   // prose: what wakes this agent
+  emits?: string[];    // event types it produces
+  pipeline?: string;   // prose: its place in the flow
+}
 const ROOM_INFO: Record<RoomId, RoomInfo> = {
-  web:    { what: "Monitors the open web (via SearXNG) for relevant material and hands new sources to Mimir.", events: ["source.discovered"], sourceKind: "web" },
-  arxiv:  { what: "Watches arXiv for new scientific papers and hands them to Mimir to ingest.", events: ["source.discovered"], sourceKind: "arxiv" },
-  github: { what: "Tracks code repositories on GitHub and surfaces them to Mimir, capturing each repo's license.", events: ["source.discovered"], sourceKind: "github" },
-  openml: { what: "Will monitor OpenML for ML datasets & benchmarks and feed them to Mimir.", events: [], gate: "scout not built yet" },
-  ariadne:     { what: "The Principal Investigator — frames research directions and decides what to pursue or kill.", events: [], role: "pi", gate: "research workflow (KNOWLEDGE_CORE_ONLY)" },
-  planner:     { what: "Turns research directions into concrete, falsifiable tasks.", events: [], role: "planner", gate: "research workflow" },
-  researchers: { what: "Investigate directions, gather evidence from the Library, and produce findings.", events: [], role: "researcher", gate: "research workflow" },
-  dataset: { what: "Tracks the AI/ML data landscape on the HuggingFace datasets hub, follows emerging trends, and hands newly discovered datasets to Mimir.", events: ["source.discovered", "library.trends"], sourceKind: "dataset" },
-  mimir:   { what: "The Warden — one agent ingests every source and gates its trust (deterministic ladder + an LLM tie-breaker), then certifies it into the Library or quarantines it.", events: ["source.discovered", "document.parsed", "document.ingested", "mimir.ingest_blocked", "library.sweep_requested", "library.trends", "acquire.requested", "acquire.fulfilled", "acquire.rejected"] },
-  library: { what: "The queryable research memory — certified documents in a pgvector (768-d) corpus plus a Neo4j knowledge graph.", events: ["document.ingested"] },
-  critic:  { what: "Will challenge claims and probe their weaknesses before they advance.", events: [], role: "critic", gate: "research workflow" },
-  gate:    { what: "Will run the promotion gate — approve, hold, reject, or merge a claim.", events: [], gate: "research workflow" },
-  ops:     { what: "Will watch infrastructure, budget and spend.", events: [], gate: "planned" },
-  experiments: { what: "Will run benchmarks and evaluations against the corpus.", events: [], gate: "planned" },
-  publication: { what: "Will assemble and publish the lab's findings.", events: [], gate: "planned" },
+  web:    { what: "Monitors the open web (via SearXNG) for relevant material and hands new sources to Mimir.", events: ["source.discovered"], sourceKind: "web",
+    triggers: "a scheduled discovery sweep.", emits: ["source.discovered"], pipeline: "Open web → Mimir → Library." },
+  arxiv:  { what: "Watches arXiv for new scientific papers and hands them to Mimir to ingest.", events: ["source.discovered"], sourceKind: "arxiv",
+    triggers: "a scheduled discovery sweep.", emits: ["source.discovered"], pipeline: "arXiv → Mimir → Library." },
+  github: { what: "Tracks code repositories on GitHub and surfaces them to Mimir, capturing each repo's license.", events: ["source.discovered"], sourceKind: "github",
+    triggers: "a scheduled discovery sweep.", emits: ["source.discovered"], pipeline: "GitHub → Mimir → Library." },
+  openml: { what: "Will monitor OpenML for ML datasets & benchmarks and feed them to Mimir.", events: [], gate: "scout not built yet",
+    triggers: "planned scout — will monitor OpenML datasets.", emits: ["source.discovered"], pipeline: "OpenML → Mimir." },
+  ariadne:     { what: "The Principal Investigator — frames research directions and decides what to pursue or kill.", events: ["claim.created", "claim.confidence_changed", "phase.transition_proposed", "phase.budget_exceeded"], role: "pi", gate: "research workflow (KNOWLEDGE_CORE_ONLY)",
+    triggers: "exploration kickoff; a claim's confidence shifts or is invalidated; a phase budget is exceeded.", emits: ["claim.created", "phase.transition_proposed"], pipeline: "Sets direction → Planner → Researchers → Critic → Gate." },
+  planner:     { what: "Turns research directions into concrete, falsifiable tasks.", events: ["queue.empty", "task.created"], role: "planner", gate: "research workflow",
+    triggers: "the task queue empties (queue.empty).", emits: ["task.created"], pipeline: "Ariadne's direction → tasks → Researchers." },
+  researchers: { what: "Investigate directions, gather evidence from the Library, and produce findings. Reads the Library and can ask Mimir to acquire a missing source.", events: ["task.created", "task.completed", "finding.high_signal", "acquire.requested"], role: "researcher", gate: "research workflow",
+    triggers: "a task is created (task.created).", emits: ["finding.high_signal", "task.completed", "acquire.requested"], pipeline: "Planner's tasks → evidence from the Library → findings → Critic." },
+  dataset: { what: "Tracks the AI/ML data landscape on the HuggingFace datasets hub, follows emerging trends, and hands newly discovered datasets to Mimir.", events: ["source.discovered", "library.trends"], sourceKind: "dataset",
+    triggers: "a scheduled discovery sweep.", emits: ["source.discovered", "library.trends"], pipeline: "HuggingFace datasets → Mimir → Library." },
+  mimir:   { what: "The Warden — one agent ingests every source and gates its trust (deterministic ladder + an LLM tie-breaker), then certifies it into the Library or quarantines it.", events: ["source.discovered", "document.parsed", "document.ingested", "mimir.ingest_blocked", "library.sweep_requested", "library.trends", "acquire.requested", "acquire.fulfilled", "acquire.rejected"],
+    triggers: "source.discovered / acquire.requested / a scheduled sweep.", emits: ["document.ingested", "mimir.ingest_blocked", "library.trends"], pipeline: "Scouts & acquisitions → trust gate → Library." },
+  library: { what: "The queryable research memory — certified documents in a pgvector (768-d) corpus plus a Neo4j knowledge graph.", events: ["document.ingested"],
+    triggers: "Mimir certifies a document (document.ingested).", emits: ["document.ingested"], pipeline: "Mimir's certified docs → corpus + graph → Researchers query it." },
+  critic:  { what: "Will challenge claims and probe their weaknesses before they advance.", events: ["finding.high_signal", "claim.invalidated"], role: "critic", gate: "research workflow",
+    triggers: "a high-signal finding (finding.high_signal).", emits: ["claim.invalidated"], pipeline: "Researchers' findings → challenge → Gate." },
+  gate:    { what: "Will run the promotion gate — approve, hold, reject, or merge a claim.", events: ["claim.confidence_changed"], gate: "research workflow",
+    triggers: "a claim's confidence crosses a promotion threshold.", emits: [], pipeline: "Critic-tested claims → promote / hold / reject / merge." },
+  ops:     { what: "Will watch infrastructure, budget and spend.", events: ["phase.budget_exceeded"], gate: "research workflow",
+    triggers: "a phase budget is exceeded; infra/cost watch.", emits: [], pipeline: "Watches the whole lab — budget, spend, infrastructure." },
+  experiments: { what: "Will run benchmarks and evaluations against the corpus.", events: [], gate: "planned",
+    triggers: "planned — will run benchmarks against the corpus.", emits: [], pipeline: "Gate-approved claims → experiments → Evaluation." },
+  publication: { what: "Will assemble and publish the lab's findings.", events: [], gate: "planned",
+    triggers: "planned — will assemble and publish findings.", emits: [], pipeline: "Validated claims → write-up → publish." },
+};
+
+// Each scout's cumulative footprint in the corpus, keyed by documents_by_kind.
+const SCOUT_KIND: Record<"web" | "arxiv" | "github" | "dataset", string> = {
+  web: "web", arxiv: "paper", github: "code", dataset: "dataset",
 };
 
 // --- Flows (the animated arrows between agents) -------------------------
-interface Flow { id: string; d: string; active: boolean; kind: "intake" | "knowledge" | "seed" | "workflow"; hotEvents: string[] }
+interface Flow { id: string; d: string; active: boolean; kind: "intake" | "knowledge" | "seed" | "workflow"; hotEvents: string[]; sourceKind?: string }
 const MIMIR = roomById("mimir");
 function intake(fromId: RoomId, toX: number): string {
   const a = anchor(fromId, "bottom", 0.62);
@@ -99,17 +128,15 @@ const LIB_EVENTS = ["document.ingested", "document.parsed"];
 const datasetAnchor = anchor("dataset", "right", 0.5);
 const mimirBottom = anchor("mimir", "bottom", 0.5);
 const libraryTop = anchor("library", "top", 0.5);
-const librarySeedIn = anchor("library", "bottom", 0.28);
 const libraryRight = anchor("library", "right", 0.4);
 
 const FLOWS: Flow[] = [
-  { id: "f-web",    d: intake("web",    MIMIR.x + 72),  active: true,  kind: "intake", hotEvents: SCOUT_EVENTS },
-  { id: "f-arxiv",  d: intake("arxiv",  MIMIR.x + 144), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS },
-  { id: "f-github", d: intake("github", MIMIR.x + 216), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS },
+  { id: "f-web",    d: intake("web",    MIMIR.x + 72),  active: true,  kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "web" },
+  { id: "f-arxiv",  d: intake("arxiv",  MIMIR.x + 144), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "arxiv" },
+  { id: "f-github", d: intake("github", MIMIR.x + 216), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "github" },
   { id: "f-openml", d: intake("openml", MIMIR.x + 252), active: false, kind: "intake", hotEvents: [] },
-  { id: "f-dataset", active: true, kind: "intake", hotEvents: SCOUT_EVENTS, d: `M ${datasetAnchor.x} ${datasetAnchor.y} L ${MIMIR.x} ${datasetAnchor.y}` },
+  { id: "f-dataset", active: true, kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "dataset", d: `M ${datasetAnchor.x} ${datasetAnchor.y} L ${MIMIR.x} ${datasetAnchor.y}` },
   { id: "f-mimir-lib", active: true, kind: "knowledge", hotEvents: LIB_EVENTS, d: `M ${mimirBottom.x} ${mimirBottom.y} L ${libraryTop.x} ${libraryTop.y}` },
-  { id: "f-seed", active: true, kind: "seed", hotEvents: [], d: `M 170 824 C 220 806, 350 ${librarySeedIn.y + 4}, ${librarySeedIn.x} ${librarySeedIn.y}` },
   { id: "f-workflow", active: false, kind: "workflow", hotEvents: [], d: `M ${libraryRight.x} ${libraryRight.y} L 742 ${libraryRight.y}` },
 ];
 
@@ -137,7 +164,16 @@ function useFloorplanLive(): { hot: Set<string>; connected: boolean; events: Lab
     for (const e of events) {
       if (seen.current.has(e.id)) continue;
       seen.current.add(e.id);
-      for (const f of FLOWS) if (f.hotEvents.includes(e.event_type)) { expiry.current.set(f.id, now + 6000); changed = true; }
+      const ek = sourceKindOf(e);
+      for (const f of FLOWS) {
+        if (!f.hotEvents.includes(e.event_type)) continue;
+        // Scout flows carry a sourceKind: only heat them when the event's
+        // source matches that scout's kind, so the animation tracks each
+        // scout's own panel (which filters to the same source_kind).
+        if (f.sourceKind && ek !== f.sourceKind) continue;
+        expiry.current.set(f.id, now + 6000);
+        changed = true;
+      }
     }
     if (changed) setHot(new Set(expiry.current.keys()));
   }, [events]);
@@ -638,6 +674,225 @@ function LibraryInspector({ knowledge, snapshot }: { knowledge: KnowledgeStats |
   );
 }
 
+// =========================================================================
+// Rich Mimir (Warden) inspector — backed by GET /knowledge/mimir
+// =========================================================================
+
+const LADDER_LABEL: Record<string, string> = {
+  official_repo: "official repo", web_reputable: "web reputable", web_unknown: "web unknown",
+};
+const MIX_LABEL: Record<string, string> = { arxiv: "arXiv", web: "Web", github: "GitHub", dataset: "Dataset" };
+const MIX_HEX: Record<string, string> = { arxiv: "#3b82f6", web: "#10b981", github: "#f59e0b", dataset: "#8b5cf6" };
+const REQ_BADGE: Record<string, string> = {
+  requested: "border-violet-200 bg-violet-50 text-violet-700",
+  fulfilled: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  rejected: "border-red-200 bg-red-50 text-red-600",
+};
+
+function FunnelStep({ label, value, last = false }: { label: string; value: number; last?: boolean }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-1.5">
+        <span className="text-xs text-slate-600">{label}</span>
+        <span className="text-sm font-semibold tabular-nums text-slate-900">{value.toLocaleString()}</span>
+      </div>
+      {!last && <div className="mx-auto my-0.5 h-2 w-px bg-slate-200" />}
+    </div>
+  );
+}
+
+function MimirWardenPanel({ panel }: { panel: MimirPanel }) {
+  const g = panel.at_a_glance;
+  const ingestDelta = g.ingested_today - g.ingested_yesterday;
+  const ladder = Object.entries(panel.trust_ladder).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const mix = panel.source_mix.filter((m) => m.count > 0);
+
+  return (
+    <div className="space-y-4">
+      {/* Warden banner */}
+      <div className="flex items-start gap-2.5 rounded-2xl border border-emerald-200 bg-emerald-50/70 p-3">
+        <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-600">
+          <ShieldCheck className="h-4 w-4" />
+        </span>
+        <p className="text-xs leading-snug text-emerald-900">
+          <span className="font-semibold">Mimir is the Warden of Knowledge.</span>{" "}
+          It ingests research from across the lab, evaluates trust, and certifies reliable content into the Library — or quarantines it.
+        </p>
+      </div>
+
+      {/* At a glance */}
+      <div>
+        <SubHead label="At a glance" />
+        <div className="grid grid-cols-2 gap-2">
+          <StatCard icon={ShieldCheck} label="Certified" value={g.certified} accent="emerald"
+            sub={`+${g.certified_today.toLocaleString()} today`} subGreen={g.certified_today > 0} />
+          <StatCard icon={ShieldAlert} label="Quarantined" value={g.quarantined} accent="amber"
+            sub={`+${g.quarantined_today.toLocaleString()} today`} />
+          <StatCard icon={Clock} label="Pending review" value={g.pending} accent="amber" />
+          <StatCard icon={Download} label="Ingested today" value={g.ingested_today} accent="blue"
+            sub={`${ingestDelta >= 0 ? "+" : ""}${ingestDelta.toLocaleString()} vs yesterday`} />
+        </div>
+      </div>
+
+      {/* Trust ladder · Intake pipeline · Source mix */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div className="lg:col-span-3">
+          <SubHead label="Trust ladder" />
+          {ladder.length === 0 ? (
+            <p className="text-sm text-slate-400">No certified sources yet.</p>
+          ) : (
+            <ul className="space-y-1">
+              {ladder.map(([tier, count]) => (
+                <li key={tier} className="flex items-center gap-2 text-[11px]">
+                  <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: TIER_HEX[tier] ?? "#94a3b8" }} />
+                  <span className="flex-1 text-slate-600">{LADDER_LABEL[tier] ?? tier.replace(/_/g, " ")}</span>
+                  <span className="font-semibold tabular-nums text-slate-700">{count.toLocaleString()}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="lg:col-span-3">
+          <SubHead label="Intake pipeline (today)" />
+          <FunnelStep label="Discovered" value={panel.pipeline_today.discovered} />
+          <FunnelStep label="Parsed" value={panel.pipeline_today.parsed} />
+          <FunnelStep label="Ingested" value={panel.pipeline_today.ingested} />
+          <FunnelStep label="Quarantined" value={panel.pipeline_today.quarantined} last />
+        </div>
+
+        <div className="lg:col-span-3">
+          <SubHead label="Source mix" />
+          {mix.length === 0 ? (
+            <p className="text-sm text-slate-400">No sources yet.</p>
+          ) : (
+            <div className="space-y-1.5">
+              {mix.map((m) => {
+                const hex = MIX_HEX[m.kind] ?? "#94a3b8";
+                return (
+                  <div key={m.kind}>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-600">{MIX_LABEL[m.kind] ?? m.kind}</span>
+                      <span className="text-slate-400">{m.count.toLocaleString()} · {m.pct}%</span>
+                    </div>
+                    <div className="mt-0.5 h-1.5 w-full rounded-full bg-slate-100">
+                      <div className="h-full rounded-full" style={{ width: `${Math.max(m.pct, 2)}%`, background: hex }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Recent certifications */}
+      <div>
+        <SubHead label="Recent certifications" />
+        {panel.recent_certifications.length === 0 ? (
+          <p className="text-sm text-slate-400">No certifications in the live window.</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {panel.recent_certifications.map((c, i) => {
+              const badge = c.arxiv_id ? `arXiv:${c.arxiv_id}` : c.canonical_key ?? c.source_kind;
+              return (
+                <li key={`${c.canonical_key ?? c.arxiv_id ?? c.title ?? "cert"}-${i}`} className="flex items-start gap-2 rounded-2xl border border-slate-200 bg-white p-2.5">
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+                  <div className="min-w-0 flex-1">
+                    <div className="line-clamp-1 text-sm font-medium text-slate-800">{c.title ?? badge}</div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400">
+                      <span className="truncate rounded-full bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">{badge}</span>
+                      <span>{ago(c.at)}</span>
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      {/* Requests */}
+      <div>
+        <SubHead label="Requests" />
+        {panel.requests.length === 0 ? (
+          <p className="text-sm text-slate-400">No acquire requests yet — agents request sources here once the research workflow is live.</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {panel.requests.map((r, i) => (
+              <li key={`${r.requester}-${i}`} className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white p-2.5 text-xs">
+                <span className="shrink-0 font-medium text-slate-700">{r.requester}</span>
+                <span className="min-w-0 flex-1 truncate text-slate-500">{r.ask ?? "—"}</span>
+                <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${REQ_BADGE[r.status] ?? "border-slate-200 bg-slate-50 text-slate-500"}`}>{r.status}</span>
+                <span className="shrink-0 text-[10px] text-slate-400">{ago(r.at)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MimirInspector({ knowledge, roomEvents, blocked }: {
+  knowledge: KnowledgeStats | null; roomEvents: LabFoundryEvent[]; blocked: LabFoundryEvent[];
+}) {
+  const [panel, setPanel] = useState<MimirPanel | null>(null);
+  const [loading, setLoading] = useState(true);
+  const corpus = knowledge?.corpus;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.mimirPanel()
+      .then((p) => { if (!cancelled) setPanel(p); })
+      .catch(() => { if (!cancelled) setPanel(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (panel && panel.status === "ok") return <MimirWardenPanel panel={panel} />;
+
+  // Fallback: corpus-based tiles (also the loading view) ------------------
+  return (
+    <div className="space-y-3">
+      {loading
+        ? <p className="text-sm text-slate-400">Loading Warden stats…</p>
+        : <p className="text-sm text-slate-400">Live stats unavailable.</p>}
+      <div className="grid grid-cols-3 gap-2">
+        <StatTile label="Today" value={corpus?.docs_today ?? 0} tone="blue" />
+        <StatTile label="Certified" value={corpus?.by_status?.certified ?? 0} tone="emerald" />
+        <StatTile label="Quarantined" value={corpus?.by_status?.quarantined ?? 0} tone="red" />
+      </div>
+      {corpus && Object.keys(corpus.docs_by_trust_tier).length > 0 && (
+        <div><SubHead label="Trust ladder" /><TierBars tiers={corpus.docs_by_trust_tier} /></div>
+      )}
+      <div>
+        <SubHead label={`Recently blocked${blocked.length ? ` (${blocked.length})` : ""}`} />
+        {blocked.length === 0 ? (
+          <p className="text-sm text-slate-400">Nothing blocked in the live window.</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {blocked.map((e) => (
+              <li key={e.id} className="rounded-2xl border border-red-100 bg-red-50/60 p-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-red-600">doc #{e.target_id}</span>
+                  <span className="text-slate-400">{fmtTime(e.emitted_at)}</span>
+                </div>
+                <p className="mt-0.5 line-clamp-2 text-slate-600">{reasonOf(e)}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div>
+        <SubHead label="Recent ingest activity" />
+        <EventRows events={roomEvents} empty="Quiet right now — Mimir sweeps on a schedule." />
+      </div>
+    </div>
+  );
+}
+
 function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
   roomId: RoomId; snapshot: Snapshot | null; knowledge: KnowledgeStats | null; events: LabFoundryEvent[]; onClose: () => void;
 }) {
@@ -649,7 +904,6 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
     return es.slice(0, 8);
   }, [events, info]);
   const blocked = useMemo(() => events.filter((e) => e.event_type === "mimir.ingest_blocked").slice(0, 6), [events]);
-  const role = info.role ? snapshot?.org_roles?.find((r) => r.role === info.role) : undefined;
   const corpus = knowledge?.corpus;
 
   return (
@@ -669,45 +923,14 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
 
       <p className="mb-3 text-sm leading-snug text-slate-700">{info.what}</p>
 
-      {roomId === "mimir" && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-2">
-            <StatTile label="Certified" value={corpus?.by_status?.certified ?? 0} tone="emerald" />
-            <StatTile label="Quarantined" value={corpus?.by_status?.quarantined ?? 0} tone="red" />
-          </div>
-          {corpus && Object.keys(corpus.docs_by_trust_tier).length > 0 && (
-            <div><SubHead label="Trust ladder" /><TierBars tiers={corpus.docs_by_trust_tier} /></div>
-          )}
-          <div>
-            <SubHead label={`Recently blocked${blocked.length ? ` (${blocked.length})` : ""}`} />
-            {blocked.length === 0 ? (
-              <p className="text-sm text-slate-400">Nothing blocked in the live window.</p>
-            ) : (
-              <ul className="space-y-1.5">
-                {blocked.map((e) => (
-                  <li key={e.id} className="rounded-2xl border border-red-100 bg-red-50/60 p-2 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-red-600">doc #{e.target_id}</span>
-                      <span className="text-slate-400">{fmtTime(e.emitted_at)}</span>
-                    </div>
-                    <p className="mt-0.5 line-clamp-2 text-slate-600">{reasonOf(e)}</p>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <div>
-            <SubHead label="Recent ingest activity" />
-            <EventRows events={roomEvents} empty="Quiet right now — Mimir sweeps on a schedule." />
-          </div>
-        </div>
-      )}
+      {roomId === "mimir" && <MimirInspector knowledge={knowledge} roomEvents={roomEvents} blocked={blocked} />}
 
       {roomId === "library" && <LibraryInspector knowledge={knowledge} snapshot={snapshot} />}
 
       {(roomId === "web" || roomId === "arxiv" || roomId === "github" || roomId === "dataset") && (
         <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
+            <StatTile label="In corpus" value={corpus?.documents_by_kind?.[SCOUT_KIND[roomId]] ?? 0} tone="violet" />
             <StatTile label="Discovered (live feed)" value={roomEvents.length} tone="emerald" />
             <StatTile label="Last activity" value={roomEvents[0] ? ago(roomEvents[0].emitted_at) : "—"} tone="slate" />
           </div>
@@ -719,18 +942,11 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
       )}
 
       {!room.active && (
-        <div className="space-y-3">
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Status</div>
-            <div className="mt-0.5">Planned — {info.gate ? `dormant until the ${info.gate} is enabled.` : "not built yet."}</div>
-          </div>
-          {role && (
-            <div className="grid grid-cols-2 gap-2">
-              <StatTile label="Runs today" value={role.runs_today} tone="blue" />
-              <StatTile label="Last run" value={ago(role.last_run_at)} tone="slate" />
-            </div>
-          )}
-        </div>
+        <p className="text-xs text-slate-400">
+          {info.gate?.includes("research workflow")
+            ? "Dormant — activates with the research workflow."
+            : "Planned — not built yet."}
+        </p>
       )}
     </div>
   );
@@ -803,12 +1019,6 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
 
           {FLOWS.map((f) => <FlowPath key={f.id} flow={f} hot={hot.has(f.id)} />)}
           {ROOMS.map((r) => <RoomBox key={r.id} room={r} phase={phase} activeClaims={activeClaims} selected={selected === r.id} onSelect={() => setSelected(r.id)} />)}
-
-          <g>
-            <rect x={64} y={820} width={196} height={54} rx={12} fill="rgba(124,92,214,0.07)" stroke={C.seed} strokeWidth={1.6} />
-            <text x={162} y={843} textAnchor="middle" fontSize={13.5} fontWeight={700} fill="#5a3fa0">Base corpus</text>
-            <text x={162} y={861} textAnchor="middle" fontSize={11.5} fill={C.muted}>21,800 arXiv papers · seed</text>
-          </g>
 
           <g>
             <rect x={60} y={590} width={210} height={98} rx={12} fill="rgba(255,255,255,0.8)" stroke="#e2e8ef" strokeWidth={1} />
