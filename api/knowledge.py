@@ -269,6 +269,84 @@ async def mimir_panel(request: Request) -> dict:
     }
 
 
+_SCOUT_KINDS = {"arxiv", "web", "github", "dataset"}
+
+
+@router.get("/scout")
+async def scout_panel(request: Request, kind: str) -> dict:
+    """Interpretable per-scout view, pulled durably from the corpus (NOT the live
+    event window, which ages out): how many of this source kind are in the
+    Library, how many today, the topics last searched (from the most recent
+    library.trends), and the most recent items it surfaced — paper titles for
+    arXiv, title+url+summary for web, owner/repo for github, dataset ids for the
+    dataset scout — each with a first-chunk snippet for context."""
+    kind = (kind or "").strip().lower()
+    if kind not in _SCOUT_KINDS:
+        return {"status": "error", "error": f"unknown scout kind {kind!r}"}
+    pool = request.app.state.pool
+    try:
+        async with pool.acquire() as conn:
+            in_corpus = await conn.fetchval("SELECT COUNT(*) FROM documents WHERE source_kind = $1", kind) or 0
+            added_today = (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM documents WHERE source_kind = $1 "
+                    "AND COALESCE(certified_at, ingested_at) >= date_trunc('day', now())",
+                    kind,
+                )
+                or 0
+            )
+            recent = await conn.fetch(
+                """
+                SELECT d.title, d.source_url, d.arxiv_id, d.canonical_key, d.status,
+                       COALESCE(d.certified_at, d.ingested_at) AS at,
+                       (SELECT c.text FROM chunks c WHERE c.document_id = d.id ORDER BY c.ordinal LIMIT 1) AS snippet
+                FROM documents d
+                WHERE d.source_kind = $1
+                ORDER BY COALESCE(d.certified_at, d.ingested_at) DESC NULLS LAST
+                LIMIT 8
+                """,
+                kind,
+            )
+            trends = await conn.fetchrow(
+                "SELECT payload, emitted_at FROM events WHERE event_type = 'library.trends' "
+                "ORDER BY emitted_at DESC LIMIT 1"
+            )
+    except asyncpg.UndefinedTableError:
+        return {"status": "planned", "source_kind": kind}
+    except Exception as e:  # noqa: BLE001 — never 500 the dashboard
+        log.warning("scout panel (%s) failed: %s", kind, e)
+        return {"status": "error", "error": str(e), "source_kind": kind}
+
+    topics: list[str] = []
+    searched_at = None
+    if trends:
+        payload = trends["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload) if payload else {}
+        topics = (payload or {}).get("topics") or []
+        searched_at = trends["emitted_at"].isoformat() if trends["emitted_at"] else None
+
+    return {
+        "status": "ok",
+        "source_kind": kind,
+        "in_corpus": in_corpus,
+        "added_today": added_today,
+        "last_searched": {"topics": topics[:12], "at": searched_at},
+        "recent": [
+            {
+                "title": r["title"],
+                "source_url": r["source_url"],
+                "arxiv_id": r["arxiv_id"],
+                "canonical_key": r["canonical_key"],
+                "status": r["status"],
+                "snippet": ((r["snippet"] or "").strip()[:240] or None),
+                "at": r["at"].isoformat() if r["at"] else None,
+            }
+            for r in recent
+        ],
+    }
+
+
 @router.get("/search")
 async def knowledge_search(q: str = "", k: int = 6) -> dict:
     """Semantic search over the certified corpus (the Library inspector's search

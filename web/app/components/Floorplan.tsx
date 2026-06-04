@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Boxes, CheckCircle2, Clock, Compass, Database, Download, FileCode, FileText, Github, Globe, Network, Search, ShieldAlert, ShieldCheck } from "lucide-react";
-import { api, type CorpusHit, type KnowledgeStats, type MimirPanel, type RecentIngest } from "../lib/api";
+import { api, type CorpusHit, type KnowledgeStats, type MimirPanel, type RecentIngest, type ScoutPanel } from "../lib/api";
 import { useEventStream } from "../lib/ws";
 import type { LabFoundryEvent, Snapshot, StreamMessage } from "../lib/types";
 
@@ -893,6 +893,161 @@ function MimirInspector({ knowledge, roomEvents, blocked }: {
   );
 }
 
+// =========================================================================
+// Scout inspector — durable recent findings, backed by GET /knowledge/scout
+// =========================================================================
+
+type ScoutItem = ScoutPanel["recent"][number];
+
+function arxivAbsUrl(id: string): string {
+  return `https://arxiv.org/abs/${id}`;
+}
+
+function ScoutRow({ kind, it }: { kind: string; it: ScoutItem }) {
+  const at = <span className="ml-2 shrink-0 text-[10px] text-slate-400">{ago(it.at)}</span>;
+
+  if (kind === "arxiv") {
+    return (
+      <li className="rounded-2xl border border-slate-200 bg-white p-2 text-xs">
+        <div className="flex items-start justify-between gap-2">
+          <div className="line-clamp-2 min-w-0 flex-1 font-medium text-slate-800">{it.title ?? "Untitled paper"}</div>
+          {at}
+        </div>
+        {it.arxiv_id && (
+          <a href={arxivAbsUrl(it.arxiv_id)} target="_blank" rel="noreferrer"
+            className="mt-1 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700 hover:underline">
+            arXiv:{it.arxiv_id}
+          </a>
+        )}
+        {it.snippet && <p className="mt-1 line-clamp-2 text-slate-500">{it.snippet}</p>}
+      </li>
+    );
+  }
+
+  if (kind === "web") {
+    return (
+      <li className="rounded-2xl border border-slate-200 bg-white p-2 text-xs">
+        <div className="flex items-start justify-between gap-2">
+          {it.source_url ? (
+            <a href={it.source_url} target="_blank" rel="noreferrer" className="line-clamp-2 min-w-0 flex-1 font-medium text-emerald-700 hover:underline">
+              {it.title || it.source_url}
+            </a>
+          ) : (
+            <div className="line-clamp-2 min-w-0 flex-1 font-medium text-slate-800">{it.title || "Untitled"}</div>
+          )}
+          {at}
+        </div>
+        {it.source_url && <div className="mt-0.5 truncate text-[10px] text-slate-400">{it.source_url}</div>}
+        {it.snippet && <p className="mt-1 line-clamp-2 text-slate-500">{it.snippet}</p>}
+      </li>
+    );
+  }
+
+  if (kind === "github") {
+    const repo = it.canonical_key || it.title || "repository";
+    const href = it.source_url || (it.canonical_key ? `https://github.com/${it.canonical_key}` : null);
+    return (
+      <li className="rounded-2xl border border-slate-200 bg-white p-2 text-xs">
+        <div className="flex items-start justify-between gap-2">
+          {href ? (
+            <a href={href} target="_blank" rel="noreferrer" className="line-clamp-2 min-w-0 flex-1 font-medium text-emerald-700 hover:underline">{repo}</a>
+          ) : (
+            <div className="line-clamp-2 min-w-0 flex-1 font-medium text-slate-800">{repo}</div>
+          )}
+          {at}
+        </div>
+        {it.snippet && <p className="mt-1 line-clamp-2 text-slate-500">{it.snippet}</p>}
+      </li>
+    );
+  }
+
+  // dataset
+  const id = it.canonical_key || it.title || "dataset";
+  return (
+    <li className="rounded-2xl border border-slate-200 bg-white p-2 text-xs">
+      <div className="flex items-start justify-between gap-2">
+        {it.source_url ? (
+          <a href={it.source_url} target="_blank" rel="noreferrer" className="line-clamp-2 min-w-0 flex-1 font-medium text-emerald-700 hover:underline">{id}</a>
+        ) : (
+          <div className="line-clamp-2 min-w-0 flex-1 font-medium text-slate-800">{id}</div>
+        )}
+        {at}
+      </div>
+      {it.snippet && <p className="mt-1 line-clamp-2 text-slate-500">{it.snippet}</p>}
+    </li>
+  );
+}
+
+function ScoutPanelView({ kind, panel }: { kind: string; panel: ScoutPanel }) {
+  const topics = panel.last_searched?.topics ?? [];
+  const recentTitle = kind === "dataset" ? "Top datasets · recently surfaced" : "Recently found";
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-3 gap-2">
+        <StatTile label="In corpus" value={panel.in_corpus} tone="violet" />
+        <StatTile label="Added today" value={panel.added_today} tone="emerald" />
+        <StatTile label="Last searched" value={panel.last_searched?.at ? ago(panel.last_searched.at) : "—"} tone="slate" />
+      </div>
+
+      {topics.length > 0 && (
+        <div>
+          <SubHead label="Last searched" />
+          <div className="flex flex-wrap gap-1.5">
+            {topics.map((t, i) => (
+              <span key={`${t}-${i}`} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{t}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <SubHead label={recentTitle} />
+        {panel.recent.length === 0 ? (
+          <p className="text-sm text-slate-400">No items yet — this scout hasn&apos;t surfaced anything into the corpus.</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {panel.recent.map((it, i) => (
+              <ScoutRow key={`${it.canonical_key ?? it.arxiv_id ?? it.source_url ?? it.title ?? "item"}-${i}`} kind={kind} it={it} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ScoutInspector({ kind, corpus }: { kind: string; corpus: KnowledgeStats["corpus"] | undefined }) {
+  const [panel, setPanel] = useState<ScoutPanel | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setPanel(null);
+    api.scoutPanel(kind)
+      .then((p) => { if (!cancelled) setPanel(p); })
+      .catch(() => { if (!cancelled) setPanel(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [kind]);
+
+  if (panel && panel.status === "ok") return <ScoutPanelView kind={kind} panel={panel} />;
+
+  // Fallback: corpus-based count tiles (also the loading view) -------------
+  return (
+    <div className="space-y-3">
+      {loading
+        ? <p className="text-sm text-slate-400">Loading…</p>
+        : <p className="text-sm text-slate-400">Live stats unavailable.</p>}
+      <div className="grid grid-cols-3 gap-2">
+        <StatTile label="In corpus" value={corpus?.documents_by_kind?.[SCOUT_KIND[kind as keyof typeof SCOUT_KIND]] ?? 0} tone="violet" />
+        <StatTile label="Added today" value="—" tone="emerald" />
+        <StatTile label="Last searched" value="—" tone="slate" />
+      </div>
+    </div>
+  );
+}
+
 function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
   roomId: RoomId; snapshot: Snapshot | null; knowledge: KnowledgeStats | null; events: LabFoundryEvent[]; onClose: () => void;
 }) {
@@ -928,17 +1083,7 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
       {roomId === "library" && <LibraryInspector knowledge={knowledge} snapshot={snapshot} />}
 
       {(roomId === "web" || roomId === "arxiv" || roomId === "github" || roomId === "dataset") && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-3 gap-2">
-            <StatTile label="In corpus" value={corpus?.documents_by_kind?.[SCOUT_KIND[roomId]] ?? 0} tone="violet" />
-            <StatTile label="Discovered (live feed)" value={roomEvents.length} tone="emerald" />
-            <StatTile label="Last activity" value={roomEvents[0] ? ago(roomEvents[0].emitted_at) : "—"} tone="slate" />
-          </div>
-          <div>
-            <SubHead label="Recently surfaced → Mimir" />
-            <EventRows events={roomEvents} empty="No new sources in the live window. Scouts sweep periodically." />
-          </div>
-        </div>
+        <ScoutInspector kind={info.sourceKind ?? roomId} corpus={corpus} />
       )}
 
       {!room.active && (
