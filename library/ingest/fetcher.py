@@ -1,7 +1,7 @@
 """
-Tiered web fetch — rung 1 (httpx + trafilatura), Postgres-backed cache,
-per-domain politeness. Rung 2 (Playwright) and rung 3 (proxy rotation) are
-deferred until we measure how often rung 1 returns empty/blocked content.
+Tiered web fetch — rung 1 (httpx + trafilatura), rung 2 (headless-browser
+render via Playwright, fired only on a rung-1 miss), Postgres-backed cache,
+per-domain politeness. Rung 3 (proxy rotation) is deferred.
 
 The cache is the moat: every page the researcher reads becomes a row in
 `fetch_cache`, and subsequent fetches of the same URL are free until the
@@ -11,7 +11,9 @@ TTL expires.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -19,7 +21,9 @@ from datetime import date
 from urllib.parse import urlencode, urlparse
 
 import httpx
+import trafilatura
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -157,7 +161,7 @@ def _release_domain(gate: _DomainGate) -> None:
 class FetchedPage(BaseModel):
     url: str
     content: str  # extracted markdown / plain text
-    extractor: str  # 'trafilatura' | 'bs4' | 'plain' | 'cached'
+    extractor: str  # 'trafilatura' | 'bs4' | 'plain' | 'playwright' | 'blocked' | 'cached'
     status_code: int
     bytes_fetched: int
     from_cache: bool = False
@@ -179,8 +183,6 @@ def _extract(body: str, content_type: str) -> tuple[str, str]:
     # trafilatura is much better than bs4 boilerplate-stripping but can produce
     # nothing on JS-rendered or unusual pages, in which case we fall back.
     try:
-        import trafilatura
-
         extracted = trafilatura.extract(
             body,
             include_comments=False,
@@ -198,6 +200,61 @@ def _extract(body: str, content_type: str) -> tuple[str, str]:
         tag.decompose()
     text = soup.get_text(separator="\n", strip=True)
     return text[:MAX_CONTENT_CHARS], "bs4"
+
+
+# -------------------------------------------------------------------------
+# Rung 2 — headless-browser render fallback
+#
+# Rung 1 (httpx + trafilatura) handles the vast majority of research pages. A
+# minority are JS-only: the server returns a near-empty shell and the real
+# content is painted client-side, so rung-1 extraction comes back blocked/empty.
+# Rung 2 renders those in headless Chromium and re-extracts. It fires ONLY on a
+# rung-1 miss (so the cost — a browser launch — is paid rarely), is capped to a
+# small number of concurrent browsers, and can be disabled with
+# WEB_FETCH_PLAYWRIGHT=off. Any failure falls through to rung-1's result, so
+# rung 2 can only ever help, never break the httpx path.
+# -------------------------------------------------------------------------
+
+_PLAYWRIGHT_ENABLED = os.environ.get("WEB_FETCH_PLAYWRIGHT", "on").strip().lower() not in (
+    "0",
+    "off",
+    "false",
+    "no",
+)
+_PLAYWRIGHT_NAV_TIMEOUT_MS = 20_000  # hard cap on navigation
+_PLAYWRIGHT_SETTLE_MS = 5_000  # best-effort wait for client-side render to settle
+# A render is expensive (a whole browser). Cap concurrent renders so a burst of
+# blocked pages (e.g. web_fetch_many over a JS-heavy host) can't spawn a browser
+# per URL. Rung 2 is the rare path, so a small cap is plenty.
+_PLAYWRIGHT_MAX_CONCURRENCY = 2
+_playwright_sem = asyncio.Semaphore(_PLAYWRIGHT_MAX_CONCURRENCY)
+
+
+async def _render_with_playwright(url: str) -> str | None:
+    """Render `url` in headless Chromium and return the post-JS HTML, or None if
+    rendering is unavailable or fails. Each call launches and tears down its own
+    browser — rung 2 fires rarely, so a persistent browser isn't worth the
+    lifecycle complexity. Any failure (missing browser binary, nav timeout, …)
+    returns None so the caller keeps rung-1's result."""
+    try:
+        async with _playwright_sem, async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                ctx = await browser.new_context(user_agent=USER_AGENT)
+                page = await ctx.new_page()
+                await page.goto(
+                    url, wait_until="domcontentloaded", timeout=_PLAYWRIGHT_NAV_TIMEOUT_MS
+                )
+                # networkidle can hang on pages with long-poll/analytics, so cap
+                # it and ignore the timeout — domcontentloaded already ran the JS.
+                with contextlib.suppress(Exception):  # settle is best-effort
+                    await page.wait_for_load_state("networkidle", timeout=_PLAYWRIGHT_SETTLE_MS)
+                return await page.content()
+            finally:
+                await browser.close()
+    except Exception as e:  # noqa: BLE001 — render failures fall through to rung-1
+        log.info("web_fetch: rung-2 render failed for %s: %s", url, e)
+        return None
 
 
 # -------------------------------------------------------------------------
@@ -269,6 +326,20 @@ async def web_fetch(
 
     content_type = resp.headers.get("content-type", "")
     content, extractor = _extract(resp.text, content_type)
+
+    # Rung 2: if rung-1 came back blocked/empty on an HTML page, it's likely
+    # JS-only — render it in a headless browser and re-extract. A non-HTML body
+    # isn't rescuable this way, and a hard challenge page (Cloudflare et al.)
+    # will still look blocked after rendering and simply fall through.
+    if _PLAYWRIGHT_ENABLED and "text/html" in content_type and _looks_blocked(content):
+        rendered = await _render_with_playwright(url)
+        if rendered:
+            r_content, _ = _extract(rendered, "text/html")
+            if not _looks_blocked(r_content):
+                content, extractor = r_content, "playwright"
+                log.info(
+                    "web_fetch: rung-2 (playwright) rescued %s (%d chars)", url, len(content)
+                )
 
     # Detect known bot-challenge / blocked pages and don't pass them downstream.
     # We still cache the result with a 'blocked' extractor + empty content so

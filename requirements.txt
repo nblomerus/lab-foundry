@@ -68,6 +68,8 @@ filelock==3.29.0
     #   virtualenv
 googleapis-common-protos==1.75.0
     # via opentelemetry-exporter-otlp-proto-http
+greenlet==3.5.1
+    # via playwright
 h11==0.16.0
     # via
     #   httpcore
@@ -150,6 +152,8 @@ platformdirs==4.9.6
     # via
     #   python-discovery
     #   virtualenv
+playwright==1.60.0
+    # via -r requirements.in
 pluggy==1.6.0
     # via pytest
 pre-commit==4.6.0
@@ -174,6 +178,8 @@ pydantic-core==2.46.4
     #   zep-cloud
 pydantic-settings==2.14.1
     # via mcp
+pyee==13.0.1
+    # via playwright
 pygments==2.20.0
     # via pytest
 pyjwt==2.13.0

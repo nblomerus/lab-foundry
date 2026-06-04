@@ -13,6 +13,7 @@ langfuse
 beautifulsoup4
 lxml
 trafilatura
+playwright  # rung-2 web fetch: render JS-only pages in headless Chromium when trafilatura comes back empty (run `playwright install chromium` once)
 python-dotenv
 
 # Command-center backend
