@@ -21,8 +21,8 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel
 
 HTTP_TIMEOUT = 30.0
-SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
-USER_AGENT = "labfoundry-research/0.1 (autonomous research agent; contact: see project README)"
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8081")
+USER_AGENT = "labfoundry-research/0.1 (autonomous research agent; +https://github.com/nblomerus/lab-foundry)"
 
 
 class SearchResult(BaseModel):

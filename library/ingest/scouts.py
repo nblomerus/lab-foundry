@@ -45,7 +45,7 @@ from library.ingest.schemas import DocumentKind
 
 log = logging.getLogger(__name__)
 
-_SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
+_SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8081")
 _GITHUB_API = "https://api.github.com"
 _SCOUT_UA = "labfoundry-scout"
 
@@ -129,16 +129,27 @@ async def scout_web(topics: list[str], per_topic: int = 5) -> list[SourceDescrip
     """Scout the open web (SearXNG) for pages on `topics`. canonical_key is the
     URL. PURE: returns descriptors only (the collector emits/dedupes)."""
     seen: dict[str, SourceDescriptor] = {}
-    async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": _SCOUT_UA}) as client:
+    async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": _SCOUT_UA}) as client:
         for topic in topics:
             try:
                 resp = await client.get(
                     f"{_SEARXNG_URL}/search",
                     params={"q": topic, "format": "json", "categories": "general"},
                 )
-                results = resp.json().get("results", []) if resp.status_code == 200 else []
+                if resp.status_code != 200:
+                    # A non-200 means SearXNG is down, rate-limiting, or — as we
+                    # once hit — SEARXNG_URL points at the wrong service entirely
+                    # (a 404 from whatever else grabbed the port). Never silent:
+                    # a misconfigured search backend should be loud, not yield [].
+                    log.warning(
+                        "scout_web: SearXNG at %s returned HTTP %d for %r — "
+                        "web discovery degraded (check SEARXNG_URL / container)",
+                        _SEARXNG_URL, resp.status_code, topic,
+                    )
+                    continue
+                results = resp.json().get("results", [])
             except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
-                log.warning("scout_web: topic %r failed: %s", topic, e)
+                log.warning("scout_web: topic %r failed (%s): %s", topic, _SEARXNG_URL, e)
                 continue
             for r in results[:per_topic]:
                 url = r.get("url")
