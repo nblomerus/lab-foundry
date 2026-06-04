@@ -108,10 +108,27 @@ async def test_default_sweep_topics_track_active_claims(db, monkeypatch):
     from agents.mimir.collectors import default_sweep_topics
 
     monkeypatch.delenv("LIBRARY_TOPICS", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_CORE_ONLY", raising=False)  # Ariadne active -> tracks agenda
     await db.create_claim("speculative decoding for faster LLM inference", 0.6)
     topics = await default_sweep_topics(db)
     assert any("speculative decoding" in t for t in topics)  # agenda steers discovery
     assert len(topics) > 1  # frontier defaults still present
+
+
+async def test_plan_sweep_aggressive_when_ariadne_dark(monkeypatch):
+    """KNOWLEDGE_CORE_ONLY (Ariadne dark) -> broad, deep, agenda-free sweep."""
+    from agents.mimir.collectors import _AGGRESSIVE_PER_TOPIC, _AGGRESSIVE_TOPICS, plan_sweep
+
+    monkeypatch.delenv("LIBRARY_TOPICS", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_CORE_ONLY", "1")
+
+    class _NoState:  # the aggressive branch never queries the DB
+        pass
+
+    topics, per_topic = await plan_sweep(_NoState())
+    assert len(topics) == _AGGRESSIVE_TOPICS
+    assert per_topic == _AGGRESSIVE_PER_TOPIC
+    assert len(set(topics)) == len(topics)  # no dupes in the rotating slice
 
 
 def test_discovery_topics_default(monkeypatch):

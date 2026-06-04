@@ -18,7 +18,7 @@ BLOCKED_LICENSES = frozenset({"none", "all-rights-reserved", "noindex"})
 # Reputable reference hosts: a curated subset of fetcher._TTL_RULES. The social/
 # news hosts there (reddit, HN, x) are caching rules, not trust signals, so they
 # stay web_unknown. *.gov / *.edu suffixes are reputable by rule.
-REPUTABLE_HOSTS = ("wikipedia.org", "docs.python.org", "developer.mozilla.org")
+REPUTABLE_HOSTS = ("wikipedia.org", "docs.python.org", "developer.mozilla.org", "huggingface.co")
 REPUTABLE_SUFFIXES = (".gov", ".edu")
 GITHUB_ACTIVE_DAYS = 365
 

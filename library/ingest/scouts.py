@@ -34,6 +34,7 @@ THE SCOUT PATTERN (copy this for github/openml/…):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -47,7 +48,13 @@ log = logging.getLogger(__name__)
 
 _SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8081")
 _GITHUB_API = "https://api.github.com"
+_HF_API = "https://huggingface.co"
 _SCOUT_UA = "labfoundry-scout"
+# Courtesy delay (seconds) between successive per-topic API calls within one
+# scout run. arXiv and GitHub rate-limit aggressive bursts; an aggressive sweep
+# fans over many topics, so we space the calls. Self-hosted SearXNG and the HF
+# hub are generous and don't pace.
+_SCOUT_TOPIC_DELAY = float(os.environ.get("SCOUT_TOPIC_DELAY", "2.5"))
 
 
 # -------------------------------------------------------------------------
@@ -81,23 +88,28 @@ class SourceDescriptor(BaseModel):
 async def scout_arxiv(
     topics: list[str],
     per_topic: int = 5,
+    *,
+    start: int = 0,
 ) -> list[SourceDescriptor]:
     """Scout arXiv for papers matching `topics`.
 
-    Queries arXiv once per topic (up to `per_topic` results each), dedupes by
-    arXiv id across topics (first topic to surface a paper wins, and its topic
-    is recorded in `why`), and returns `SourceDescriptor`s with kind='paper',
-    source_kind='arxiv', canonical_key=<arxiv_id>.
+    Queries arXiv once per topic (up to `per_topic` results each, newest-first),
+    dedupes by arXiv id across topics (first topic to surface a paper wins, and
+    its topic is recorded in `why`), and returns `SourceDescriptor`s with
+    kind='paper', source_kind='arxiv', canonical_key=<arxiv_id>. `start` pages
+    deeper into each topic's back catalogue (the sweep can rotate it).
 
     PURE: returns descriptors only. It does NOT emit `source.discovered` events
     and does NOT touch the DB — the Librarian handler wires emission + dedupe
     against already-ingested docs. That keeps this scout testable and decoupled.
     """
     seen: dict[str, SourceDescriptor] = {}
-    for topic in topics:
+    for i, topic in enumerate(topics):
+        if i:
+            await asyncio.sleep(_SCOUT_TOPIC_DELAY)  # space arXiv calls across topics
         query = topic if ":" in topic else f"all:{topic}"
         try:
-            results = await search_arxiv(query, max_results=per_topic)
+            results = await search_arxiv(query, max_results=per_topic, start=start)
         except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
             log.warning("scout_arxiv: topic %r failed: %s", topic, e)
             continue
@@ -183,7 +195,9 @@ async def scout_github(topics: list[str], per_topic: int = 5) -> list[SourceDesc
 
     seen: dict[str, SourceDescriptor] = {}
     async with httpx.AsyncClient(timeout=8.0, headers=headers) as client:
-        for topic in topics:
+        for i, topic in enumerate(topics):
+            if i:
+                await asyncio.sleep(_SCOUT_TOPIC_DELAY)  # GitHub search is rate-limited
             try:
                 resp = await client.get(
                     f"{_GITHUB_API}/search/repositories",
@@ -204,5 +218,47 @@ async def scout_github(topics: list[str], per_topic: int = 5) -> list[SourceDesc
                     url=it.get("html_url"),
                     title=full,
                     why=f"github topic: {topic}",
+                )
+    return list(seen.values())
+
+
+# -------------------------------------------------------------------------
+# Dataset scout — HuggingFace hub (kind='dataset'). The lab's read on the DATA
+# landscape: which datasets exist for a topic and which are trending (ranked by
+# downloads). canonical_key is the HF dataset id ('owner/name'); the descriptor
+# url is the dataset page, which Mimir ingests via the normal web-fetch path
+# (the dataset card becomes the document text). PURE: returns descriptors only.
+# -------------------------------------------------------------------------
+
+
+async def scout_dataset(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
+    """Scout the HuggingFace dataset hub for datasets matching `topics`, ranked
+    by downloads (popularity = the field's current data landscape). canonical_key
+    is the HF dataset id; url is the dataset page. PURE: returns descriptors only.
+    Best-effort: empty list on any failure, one bad topic never sinks the sweep."""
+    seen: dict[str, SourceDescriptor] = {}
+    async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": _SCOUT_UA}) as client:
+        for topic in topics:
+            try:
+                resp = await client.get(
+                    f"{_HF_API}/api/datasets",
+                    params={"search": topic, "sort": "downloads", "direction": -1, "limit": per_topic},
+                )
+                items = resp.json() if resp.status_code == 200 else []
+            except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
+                log.warning("scout_dataset: topic %r failed: %s", topic, e)
+                continue
+            for it in items[:per_topic]:
+                ds_id = it.get("id")
+                if not ds_id or ds_id in seen:
+                    continue
+                downloads = it.get("downloads")
+                seen[ds_id] = SourceDescriptor(
+                    kind="dataset",
+                    source_kind="dataset",
+                    canonical_key=ds_id,
+                    url=f"{_HF_API}/datasets/{ds_id}",
+                    title=ds_id,
+                    why=f"dataset topic: {topic} (HF downloads={downloads})",
                 )
     return list(seen.values())

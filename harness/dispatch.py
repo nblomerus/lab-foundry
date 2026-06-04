@@ -454,19 +454,22 @@ class Dispatcher:
 
     async def _sweep_library_if_due(self) -> None:
         """Kick Mimir's data collectors periodically by emitting
-        `library.sweep_requested`. Gated on MIMIR_LOOP; throttled to
-        LIBRARIAN_SWEEP_HOURS (default 6h) so the 5-min watchdog doesn't spam it.
+        `library.sweep_requested`. Gated on MIMIR_LOOP. The interval is ADAPTIVE:
+        while Ariadne (the PI) has set no agenda the lab is in aggressive
+        base-building mode and sweeps often (LIBRARIAN_AGGRESSIVE_SWEEP_MINUTES,
+        default 45m) to fill the Library broadly; once active claims exist it
+        relaxes to the steady-state cadence (LIBRARIAN_SWEEP_HOURS, default 6h).
         The Mimir handler turns the event into scout runs -> source.discovered."""
         if os.environ.get("MIMIR_LOOP", "").lower() not in {"v1", "on"}:
             return
         now = datetime.now(UTC)
-        try:
-            hours = float(os.environ.get("LIBRARIAN_SWEEP_HOURS", "6"))
-        except ValueError:
-            hours = 6.0
-        if self._last_sweep_tick is not None and (now - self._last_sweep_tick).total_seconds() < hours * 3600:
+        interval_s = self._sweep_interval_seconds()
+        if self._last_sweep_tick is not None and (now - self._last_sweep_tick).total_seconds() < interval_s:
             return
         self._last_sweep_tick = now
+        # dedup_key keyed to the interval window (not just the hour) so a sub-hour
+        # aggressive cadence isn't collapsed by the ON CONFLICT guard.
+        window = str(int(now.timestamp() // interval_s))
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -474,9 +477,24 @@ class Dispatcher:
                 VALUES ('library.sweep_requested', 'ingest_source', '{}'::jsonb, 'sweep-' || $1)
                 ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
                 """,
-                now.strftime("%Y-%m-%d-%H"),
+                window,
             )
-        log.info("library: emitted library.sweep_requested (every %sh)", hours)
+        log.info("library: emitted library.sweep_requested (interval=%ss)", int(interval_s))
+
+    def _sweep_interval_seconds(self) -> float:
+        """Aggressive base-building cadence while Ariadne (the PI) is dark — i.e.
+        KNOWLEDGE_CORE_ONLY mode — relaxing to the steady-state interval once the
+        research workflow is running. Leftover claims don't make her active."""
+        try:
+            hours = float(os.environ.get("LIBRARIAN_SWEEP_HOURS", "6"))
+        except ValueError:
+            hours = 6.0
+        try:
+            agg_minutes = float(os.environ.get("LIBRARIAN_AGGRESSIVE_SWEEP_MINUTES", "45"))
+        except ValueError:
+            agg_minutes = 45.0
+        core_only = os.environ.get("KNOWLEDGE_CORE_ONLY", "").lower() in {"1", "true", "on", "yes"}
+        return agg_minutes * 60 if core_only else hours * 3600
 
     async def _reconcile_lessons_if_due(self) -> None:
         """

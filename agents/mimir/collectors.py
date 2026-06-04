@@ -16,60 +16,185 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from datetime import UTC, datetime
 
-from library.ingest.scouts import scout_arxiv, scout_github, scout_web
+from library.ingest.scouts import scout_arxiv, scout_dataset, scout_github, scout_web
 
 log = logging.getLogger(__name__)
 
 # Which scouts the sweep runs (LIBRARY_SCOUTS env, comma-separated; default arxiv
-# only — web/github hit external APIs and may need keys/infra). Tests patch this
-# dict (monkeypatch.setitem) to inject a fake scout.
-_SCOUTS = {"arxiv": scout_arxiv, "web": scout_web, "github": scout_github}
+# only — web/github/dataset hit external APIs and may need keys/infra). Tests
+# patch this dict (monkeypatch.setitem) to inject a fake scout.
+_SCOUTS = {
+    "arxiv": scout_arxiv,
+    "web": scout_web,
+    "github": scout_github,
+    "dataset": scout_dataset,
+}
 
 
-def _enabled_scouts() -> list:
+def _enabled_scout_names() -> list[str]:
     names = [n.strip() for n in os.environ.get("LIBRARY_SCOUTS", "arxiv").split(",") if n.strip()]
-    chosen = [_SCOUTS[n] for n in names if n in _SCOUTS]
-    return chosen or [_SCOUTS["arxiv"]]
+    chosen = [n for n in names if n in _SCOUTS]
+    return chosen or ["arxiv"]
 
 
-# Fallback discovery topics when LIBRARY_TOPICS is unset.
-_DEFAULT_TOPICS = (
+# Per-scout cap on results/topic. Papers (arXiv) are the base — sweep them as
+# deep as the plan asks. Web/GitHub/dataset are bounded supplements: each web
+# hit costs a fetch, and 25/topic of marketing blogs is noise, so cap them low
+# even when the arXiv depth is high.
+_PER_TOPIC_CAP = {"web": 6, "github": 6, "dataset": 8}
+
+
+# Broad AI/ML FRONTIER — the standing taxonomy swept when no agenda is set
+# (Ariadne/PI inactive). Deliberately wide: in that phase the lab's job is to
+# build a strong, diverse base across the field before research begins. Override
+# wholesale with LIBRARY_TOPICS (comma-separated).
+_AIML_FRONTIER = (
     "large language models",
+    "transformer architectures",
     "retrieval augmented generation",
-    "ai agents",
+    "in-context learning",
+    "instruction tuning",
+    "parameter efficient fine-tuning",
+    "model quantization",
+    "mixture of experts",
+    "long context language models",
+    "reasoning in language models",
+    "chain of thought prompting",
+    "llm agents",
+    "tool use in language models",
+    "multi-agent systems",
+    "reinforcement learning from human feedback",
+    "ai alignment",
+    "language model safety",
+    "mechanistic interpretability",
+    "hallucination in language models",
+    "language model evaluation benchmarks",
+    "deep reinforcement learning",
+    "offline reinforcement learning",
+    "diffusion models",
+    "text to image generation",
+    "vision transformers",
+    "vision language models",
+    "multimodal learning",
+    "video understanding",
+    "speech recognition",
+    "text to speech",
+    "graph neural networks",
+    "knowledge graphs",
+    "self-supervised learning",
+    "contrastive learning",
+    "transfer learning",
+    "meta learning",
+    "federated learning",
+    "continual learning",
+    "neural architecture search",
+    "knowledge distillation",
+    "state space models",
+    "time series forecasting",
+    "recommender systems",
+    "generative adversarial networks",
+    "scaling laws for neural networks",
+    "efficient transformers",
+    "ai for science",
+    "robot learning",
 )
+_DEFAULT_TOPICS = _AIML_FRONTIER  # discovery_topics() default when LIBRARY_TOPICS unset
+
+# Sweep sizing (all env-overridable). Aggressive (no-agenda) base-building fans
+# wide and deep; agenda mode tracks the active claims with a light frontier top.
+_AGGRESSIVE_TOPICS = int(os.environ.get("LIBRARY_AGGRESSIVE_TOPICS", "16"))
+_AGGRESSIVE_PER_TOPIC = int(os.environ.get("LIBRARY_AGGRESSIVE_PER_TOPIC", "25"))
+_AGENDA_FRONTIER = int(os.environ.get("LIBRARY_AGENDA_FRONTIER", "4"))
+_AGENDA_PER_TOPIC = int(os.environ.get("LIBRARY_PER_TOPIC", "8"))
+_MAX_AGENDA_TOPICS = 10
+# Rotation advances one slice per ~30 min so successive aggressive sweeps cover
+# fresh subfields instead of re-hitting the same head of the taxonomy.
+_ROTATION_PERIOD_S = 1800
 
 
 def discovery_topics() -> list[str]:
-    """The standing FRONTIER topics (LIBRARY_TOPICS env, else default) — broad
-    field coverage so the sweep still catches movement beyond the active agenda."""
+    """The standing FRONTIER topics (LIBRARY_TOPICS env, else the broad AI/ML
+    taxonomy) — wide field coverage for base-building and for catching movement
+    beyond the active agenda."""
     raw = os.environ.get("LIBRARY_TOPICS", "")
     topics = [t.strip() for t in raw.split(",") if t.strip()]
     return topics or list(_DEFAULT_TOPICS)
 
 
-async def default_sweep_topics(state) -> list[str]:
-    """Topics that TRACK THE AGENDA: the active claims' statements (what the lab
-    is working on now) merged with the standing frontier set. This is how the PI
-    steers discovery *implicitly* — by framing claims — without ever touching the
-    collectors. Falls back to the frontier set alone when there are no claims yet.
-    """
-    claim_topics: list[str] = []
+def _rotation_index() -> int:
+    """A monotonically advancing index (one step per _ROTATION_PERIOD_S) used to
+    rotate which slice of the frontier a sweep covers, so coverage walks the
+    whole taxonomy over time rather than re-hitting the same head."""
+    return int(datetime.now(UTC).timestamp() // _ROTATION_PERIOD_S)
+
+
+def _rotate(seq: list[str], rot: int, k: int) -> list[str]:
+    """A length-k window into `seq` starting at offset (rot*k), wrapping around."""
+    n = len(seq)
+    if n == 0:
+        return []
+    k = min(k, n)
+    start = (rot * k) % n
+    return [seq[(start + i) % n] for i in range(k)]
+
+
+async def _active_claim_topics(state) -> list[str]:
+    """The active claims' statements — what the lab is working on now. Empty when
+    no agenda is set."""
     try:
         claims = await state.get_active_claims(limit=6)
-        claim_topics = [c.statement.strip() for c in claims if (c.statement or "").strip()]
+        return [c.statement.strip() for c in claims if (c.statement or "").strip()]
     except Exception:  # noqa: BLE001 — claim steering is best-effort, never blocks the sweep
         log.exception("collectors: get_active_claims failed; sweeping frontier only")
+        return []
 
-    merged: list[str] = []
-    seen: set[str] = set()
-    for t in [*claim_topics, *discovery_topics()]:
-        key = t.lower()
-        if key and key not in seen:
-            seen.add(key)
-            merged.append(t)
-    return merged[:10]
+
+def ariadne_active() -> bool:
+    """True when the research workflow — Ariadne, the PI — is running, i.e. NOT
+    in KNOWLEDGE_CORE_ONLY mode. This is the gate for sweep behaviour: when
+    Ariadne is dark the sweep runs in aggressive base-building mode (broad AI/ML
+    frontier); when she's steering it tracks her agenda (the active claims).
+    Leftover claims from an earlier run do NOT count as Ariadne being active."""
+    core_only = os.environ.get("KNOWLEDGE_CORE_ONLY", "").lower() in {"1", "true", "on", "yes"}
+    return not core_only
+
+
+async def plan_sweep(state) -> tuple[list[str], int]:
+    """Decide WHAT to sweep and HOW HARD, by whether Ariadne (the PI) is active:
+
+    - ARIADNE ACTIVE (research workflow running): track her agenda — the active
+      claim statements plus a light rotating frontier slice — at a gentle
+      per-topic depth. This is how the PI steers discovery implicitly.
+    - ARIADNE DARK (KNOWLEDGE_CORE_ONLY): aggressive base-building — a wide
+      rotating slice of the AI/ML frontier at high per-topic depth, so the lab
+      fills the Library broadly across the field before research begins.
+
+    Returns (topics, per_topic).
+    """
+    frontier = discovery_topics()
+    rot = _rotation_index()
+
+    if ariadne_active():
+        claim_topics = await _active_claim_topics(state)
+        merged: list[str] = []
+        seen: set[str] = set()
+        for t in [*claim_topics, *_rotate(frontier, rot, _AGENDA_FRONTIER)]:
+            key = t.lower()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(t)
+        return merged[:_MAX_AGENDA_TOPICS], _AGENDA_PER_TOPIC
+
+    return _rotate(frontier, rot, _AGGRESSIVE_TOPICS), _AGGRESSIVE_PER_TOPIC
+
+
+async def default_sweep_topics(state) -> list[str]:
+    """The topics for the next sweep (see `plan_sweep`); thin wrapper returning
+    just the topic list."""
+    topics, _ = await plan_sweep(state)
+    return topics
 
 
 def _source_target_id(canonical_key: str) -> int:
@@ -81,20 +206,31 @@ def _source_target_id(canonical_key: str) -> int:
     return int.from_bytes(hashlib.blake2b(canonical_key.encode(), digest_size=7).digest(), "big")
 
 
-async def run_discovery_sweep(topics: list[str] | None, state, *, per_topic: int = 5) -> dict:
+async def run_discovery_sweep(topics: list[str] | None, state, *, per_topic: int | None = None) -> dict:
     """Run the scouts over `topics` and emit `source.discovered` for sources NOT
     already in the corpus (skip-if-exists avoids a wasted re-fetch every sweep).
 
+    With no `topics`, plans the sweep from the agenda (see `plan_sweep`): that
+    also picks `per_topic` (aggressive when Ariadne is dark, gentle when she's
+    steering) unless an explicit `per_topic` is given.
+
     Returns {"scanned": <descriptors found>, "discovered": <new emitted>, "topics": [...]}.
     """
-    topics = topics or await default_sweep_topics(state)
+    if topics is None:
+        topics, planned_per_topic = await plan_sweep(state)
+        if per_topic is None:
+            per_topic = planned_per_topic
+    if per_topic is None:
+        per_topic = _AGENDA_PER_TOPIC
 
     descriptors = []
-    for scout in _enabled_scouts():
+    for name in _enabled_scout_names():
+        scout = _SCOUTS[name]  # looked up live so tests can monkeypatch _SCOUTS
+        scout_per_topic = min(per_topic, _PER_TOPIC_CAP.get(name, per_topic))
         try:
-            descriptors.extend(await scout(topics, per_topic=per_topic))
+            descriptors.extend(await scout(topics, per_topic=scout_per_topic))
         except Exception:  # noqa: BLE001 — one scout failing must not sink the sweep
-            log.exception("collectors: scout %s failed", getattr(scout, "__name__", scout))
+            log.exception("collectors: scout %s failed", name)
 
     new: list[dict] = []
     for d in descriptors:
