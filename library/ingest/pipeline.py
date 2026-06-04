@@ -49,6 +49,7 @@ _MIN_FULLTEXT_CHARS = 1_000
 _GITHUB_API = "https://api.github.com"
 _HF_API = "https://huggingface.co"
 _HF_DATASETS_SERVER = "https://datasets-server.huggingface.co"
+_OPENML_API = "https://www.openml.org/api/v1/json"
 
 # Embed in batches so a 60-chunk paper doesn't open 60 concurrent HTTP calls.
 # The embedder itself serializes on the GPULock; this just bounds how much we
@@ -269,6 +270,51 @@ async def _resolve_dataset_fulltext(desc: SourceDescriptor, state) -> tuple[str,
     return "\n\n".join(parts).strip(), f"{_HF_API}/datasets/{ds_id}"
 
 
+async def _resolve_openml_fulltext(desc: SourceDescriptor, state) -> tuple[str, str | None]:
+    """Resolve an OpenML benchmark dataset via the v1 JSON API: its description +
+    qualities (instances / features / classes / target). The landscape signal for
+    classical-ML datasets — what it is and its shape — rather than the raw data."""
+    did = desc.canonical_key.split(":", 1)[-1]
+    meta: dict = {}
+    quals: dict = {}
+    async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
+        try:
+            r = await client.get(f"{_OPENML_API}/data/{did}")
+            if r.status_code == 200:
+                meta = (r.json() or {}).get("data_set_description", {}) or {}
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning("ingest: openml data %s failed: %s", did, e)
+        try:
+            q = await client.get(f"{_OPENML_API}/data/qualities/{did}")
+            if q.status_code == 200:
+                for item in (q.json() or {}).get("data_qualities", {}).get("quality", []):
+                    quals[item.get("name")] = item.get("value")
+        except Exception as e:  # noqa: BLE001 — qualities are optional
+            log.info("ingest: openml qualities %s unavailable: %s", did, e)
+
+    parts = [f"# OpenML dataset: {meta.get('name', did)}"]
+    if meta.get("description"):
+        parts.append(str(meta["description"]).strip())
+    facts = []
+    for label, key in (
+        ("Instances", "NumberOfInstances"),
+        ("Features", "NumberOfFeatures"),
+        ("Classes", "NumberOfClasses"),
+        ("Missing values", "NumberOfMissingValues"),
+    ):
+        if quals.get(key):
+            facts.append(f"{label}: {quals[key]}")
+    if meta.get("default_target_attribute"):
+        facts.append(f"Target: {meta['default_target_attribute']}")
+    if meta.get("format"):
+        facts.append(f"Format: {meta['format']}")
+    if meta.get("upload_date"):
+        facts.append(f"Uploaded: {meta['upload_date']}")
+    if facts:
+        parts.append("\n".join(facts))
+    return "\n\n".join(parts).strip(), f"https://www.openml.org/d/{did}"
+
+
 async def _resolve_fulltext(
     desc: SourceDescriptor,
     state,
@@ -276,14 +322,17 @@ async def _resolve_fulltext(
     """Dispatch full-text resolution by source_kind. Returns (text, fetched_url).
 
     arXiv -> ar5iv full body; github -> repo metadata + README via the API;
-    dataset -> HF hub metadata + schema + sample rows. Everything else (web, the
-    test path) falls back to a plain `web_fetch` of the descriptor url."""
+    dataset -> HF hub metadata + schema + sample rows; openml -> dataset
+    description + qualities. Everything else (web, the test path) falls back to a
+    plain `web_fetch` of the descriptor url."""
     if desc.source_kind == "arxiv":
         return await _resolve_arxiv_fulltext(desc, state)
     if desc.source_kind == "github":
         return await _resolve_github_fulltext(desc, state)
     if desc.source_kind == "dataset":
         return await _resolve_dataset_fulltext(desc, state)
+    if desc.source_kind == "openml":
+        return await _resolve_openml_fulltext(desc, state)
 
     if desc.url:
         page = await web_fetch(desc.url, state)
