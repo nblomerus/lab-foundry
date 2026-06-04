@@ -370,6 +370,15 @@ export interface MimirPanel {
   requests: { requester: string; ask: string | null; status: string; at: string | null }[];
 }
 
+export interface ScoutPanel {
+  status: "ok" | "planned" | "error";
+  source_kind: string;
+  in_corpus: number;
+  added_today: number;
+  last_searched: { topics: string[]; at: string | null };
+  recent: { title: string | null; source_url: string | null; arxiv_id: string | null; canonical_key: string | null; status: string; snippet: string | null; at: string | null }[];
+}
+
 export interface CorpusHit {
   document_id: number;
   title: string | null;
@@ -441,6 +450,7 @@ export const api = {
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
   recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),
   mimirPanel: () => jget<MimirPanel>("/knowledge/mimir"),
+  scoutPanel: (kind: string) => jget<ScoutPanel>(`/knowledge/scout?kind=${encodeURIComponent(kind)}`),
   corpusSearch: (q: string, k = 6) => jget<CorpusSearchResult>(`/knowledge/search?q=${encodeURIComponent(q)}&k=${k}`),
   agentCatalog: () => jget<AgentCatalog>("/agentlab/agents"),
   agentRun: (body: { agent: string; mode: string; claim_id?: number | null; inputs?: Record<string, string> }) =>
