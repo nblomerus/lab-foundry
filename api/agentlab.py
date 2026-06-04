@@ -212,9 +212,15 @@ async def run(request: Request, req: RunRequest) -> dict:
         return {"status": "error", "error": f"unknown agent/mode {req.agent}/{req.mode}"}
     _agent, mode = found
 
-    if mode["kind"] == LLM:
-        return await _run_llm(request.app, mode, req.claim_id)
-    return await _run_mimir(request.app, mode, req.inputs)
+    # Never 500: the Agent Lab should always return a structured result the page
+    # can render, even on an unexpected failure.
+    try:
+        if mode["kind"] == LLM:
+            return await _run_llm(request.app, mode, req.claim_id)
+        return await _run_mimir(request.app, mode, req.inputs)
+    except Exception as e:  # noqa: BLE001
+        log.exception("agentlab run failed: %s/%s", req.agent, req.mode)
+        return {"status": "error", "kind": mode.get("kind"), "error": f"{type(e).__name__}: {str(e)[:300]}"}
 
 
 async def _run_llm(app, mode: dict, claim_id: int | None) -> dict:

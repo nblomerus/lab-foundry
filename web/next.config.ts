@@ -10,6 +10,10 @@ const API_URL =
   process.env.LABFOUNDRY_API_URL || process.env.BOARDROOM_API_URL || "http://localhost:8503";
 
 const nextConfig: NextConfig = {
+  // Some upstream calls are slow on purpose: an LLM dry-run (Agent Lab) or a
+  // Mimir ingest can take 30–60s. The dev rewrite-proxy's default timeout (~30s)
+  // returns a 500 before they finish, so raise it.
+  experimental: { proxyTimeout: 180_000 },
   async rewrites() {
     return [
       {
