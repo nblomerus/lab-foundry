@@ -35,6 +35,7 @@ from library.graph.tools import merge_paper
 from library.ingest.chunker import PaperChunker
 from library.ingest.fetcher import USER_AGENT, search_arxiv, web_fetch
 from library.ingest.parser import parse_paper
+from library.ingest.quality import assess_quality
 from library.ingest.scouts import SourceDescriptor
 
 log = logging.getLogger(__name__)
@@ -44,11 +45,6 @@ log = logging.getLogger(__name__)
 # challenge page (ar5iv occasionally has no HTML rendering for very new papers),
 # so we fall back to the arXiv abstract rather than ingest a near-empty body.
 _MIN_FULLTEXT_CHARS = 1_000
-
-# A source must resolve to at least this much text to be worth a document. Below
-# it (a JS-walled page, a repo with no README, a thin dataset card) we skip
-# rather than create a hollow, unretrievable, but "queryable" row.
-_MIN_DOC_CHARS = 250
 
 _GITHUB_API = "https://api.github.com"
 _HF_API = "https://huggingface.co"
@@ -294,14 +290,18 @@ async def stage_source(
     desc = _as_descriptor(source)
 
     text, fetched_url = await _resolve_fulltext(desc, state)
-    if not text or len(text.strip()) < _MIN_DOC_CHARS:
+
+    # QUALITY gate — applied to every source before we do any work. Thin stubs,
+    # error/wall pages, and non-content remnants never become documents.
+    quality = assess_quality(text, desc.source_kind)
+    if not quality.ok:
         log.info(
-            "ingest stage: insufficient content (%d chars) for %s/%s — skipping",
-            len(text or ""),
+            "ingest stage: quality gate rejected %s/%s — %s",
             desc.source_kind,
             desc.canonical_key,
+            quality.reason,
         )
-        return {"skipped": True, "reason": "insufficient content"}
+        return {"skipped": True, "reason": f"low_quality: {quality.reason}"}
 
     # Parse (deterministic, no LLM).
     parsed = parse_paper(
