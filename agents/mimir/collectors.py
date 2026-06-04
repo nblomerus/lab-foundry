@@ -102,16 +102,19 @@ _AIML_FRONTIER = (
 )
 _DEFAULT_TOPICS = _AIML_FRONTIER  # discovery_topics() default when LIBRARY_TOPICS unset
 
-# Sweep sizing (all env-overridable). Aggressive (no-agenda) base-building fans
-# wide and deep; agenda mode tracks the active claims with a light frontier top.
-_AGGRESSIVE_TOPICS = int(os.environ.get("LIBRARY_AGGRESSIVE_TOPICS", "16"))
-_AGGRESSIVE_PER_TOPIC = int(os.environ.get("LIBRARY_AGGRESSIVE_PER_TOPIC", "25"))
+# Sweep sizing (all env-overridable). Aggressive (no-agenda) base-building runs
+# CONTINUOUSLY via the harness's backpressure pump, so each sweep is a small,
+# fast slice (not a big periodic burst) — the pump just keeps firing the next
+# slice whenever intake runs low. Agenda mode tracks active claims with a light
+# frontier top.
+_AGGRESSIVE_TOPICS = int(os.environ.get("LIBRARY_AGGRESSIVE_TOPICS", "6"))
+_AGGRESSIVE_PER_TOPIC = int(os.environ.get("LIBRARY_AGGRESSIVE_PER_TOPIC", "20"))
 _AGENDA_FRONTIER = int(os.environ.get("LIBRARY_AGENDA_FRONTIER", "4"))
 _AGENDA_PER_TOPIC = int(os.environ.get("LIBRARY_PER_TOPIC", "8"))
 _MAX_AGENDA_TOPICS = 10
-# Rotation advances one slice per ~30 min so successive aggressive sweeps cover
-# fresh subfields instead of re-hitting the same head of the taxonomy.
-_ROTATION_PERIOD_S = 1800
+# Rotation advances a slice every ~90s so back-to-back pump sweeps cover fresh
+# subfields (instead of re-requesting the same slice and finding nothing new).
+_ROTATION_PERIOD_S = int(os.environ.get("LIBRARY_ROTATION_PERIOD_S", "90"))
 
 
 def discovery_topics() -> list[str]:
