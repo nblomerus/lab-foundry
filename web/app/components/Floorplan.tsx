@@ -40,7 +40,7 @@ const ROOMS: Room[] = [
   { id: "web",    x: 60,  y: 96, w: 186, h: 202, title: "Web Scout",    sub: "Web monitoring & discovery",   active: true,  door: { side: "bottom", at: 0.62 } },
   { id: "arxiv",  x: 252, y: 96, w: 180, h: 202, title: "arXiv Scout",  sub: "Scientific papers monitoring", active: true,  door: { side: "bottom", at: 0.62 } },
   { id: "github", x: 438, y: 96, w: 182, h: 202, title: "GitHub Scout", sub: "Code repositories monitoring", active: true,  door: { side: "bottom", at: 0.62 } },
-  { id: "openml", x: 626, y: 96, w: 180, h: 202, title: "OpenML Scout", sub: "ML datasets & benchmarks",     active: false, door: { side: "bottom", at: 0.62 } },
+  { id: "openml", x: 626, y: 96, w: 180, h: 202, title: "OpenML Scout", sub: "ML datasets & benchmarks",     active: true,  door: { side: "bottom", at: 0.62 } },
   // --- RESEARCH & DISCOVERY (north-east wing) ---
   { id: "ariadne",     x: 852,  y: 96, w: 188, h: 202, title: "Ariadne",     sub: "Principal investigator / scientific direction", active: false, door: { side: "bottom", at: 0.6 } },
   { id: "planner",     x: 1046, y: 96, w: 144, h: 202, title: "Planner",     sub: "Schedules & goals planning",                    active: false, door: { side: "bottom", at: 0.6 } },
@@ -84,8 +84,8 @@ const ROOM_INFO: Record<RoomId, RoomInfo> = {
     triggers: "a scheduled discovery sweep.", emits: ["source.discovered"], pipeline: "arXiv → Mimir → Library." },
   github: { what: "Tracks code repositories on GitHub and surfaces them to Mimir, capturing each repo's license.", events: ["source.discovered"], sourceKind: "github",
     triggers: "a scheduled discovery sweep.", emits: ["source.discovered"], pipeline: "GitHub → Mimir → Library." },
-  openml: { what: "Will monitor OpenML for ML datasets & benchmarks and feed them to Mimir.", events: [], gate: "scout not built yet",
-    triggers: "planned scout — will monitor OpenML datasets.", emits: ["source.discovered"], pipeline: "OpenML → Mimir." },
+  openml: { what: "Monitors OpenML for benchmark datasets — tracking their instances, features and classes — and hands newly discovered datasets to Mimir.", events: ["source.discovered", "library.trends"], sourceKind: "openml",
+    triggers: "a scheduled discovery sweep.", emits: ["source.discovered", "library.trends"], pipeline: "OpenML → Mimir → Library." },
   ariadne:     { what: "The Principal Investigator — frames research directions and decides what to pursue or kill.", events: ["claim.created", "claim.confidence_changed", "phase.transition_proposed", "phase.budget_exceeded"], role: "pi", gate: "research workflow (KNOWLEDGE_CORE_ONLY)",
     triggers: "exploration kickoff; a claim's confidence shifts or is invalidated; a phase budget is exceeded.", emits: ["claim.created", "phase.transition_proposed"], pipeline: "Sets direction → Planner → Researchers → Critic → Gate." },
   planner:     { what: "Turns research directions into concrete, falsifiable tasks.", events: ["queue.empty", "task.created"], role: "planner", gate: "research workflow",
@@ -111,17 +111,35 @@ const ROOM_INFO: Record<RoomId, RoomInfo> = {
 };
 
 // Each scout's cumulative footprint in the corpus, keyed by documents_by_kind.
-const SCOUT_KIND: Record<"web" | "arxiv" | "github" | "dataset", string> = {
-  web: "web", arxiv: "paper", github: "code", dataset: "dataset",
+const SCOUT_KIND: Record<"web" | "arxiv" | "github" | "dataset" | "openml", string> = {
+  web: "web", arxiv: "paper", github: "code", dataset: "dataset", openml: "dataset",
+};
+
+// Scout rooms that carry a per-door gate marker. Each room's id doubles as its
+// source_kind (web/arxiv/github/dataset/openml), so the gate id is `gate:<id>`.
+const SCOUT_DOOR_GATE = new Set<RoomId>(["web", "arxiv", "github", "dataset", "openml"]);
+
+// Side-panel title for a gate, derived from its scope.
+const GATE_TITLE: Record<string, string> = {
+  web: "Web Scout · gate", arxiv: "arXiv Scout · gate", github: "GitHub Scout · gate",
+  dataset: "Dataset Scout · gate", openml: "OpenML Scout · gate", all: "Mimir · intake gate",
 };
 
 // --- Flows (the animated arrows between agents) -------------------------
-interface Flow { id: string; d: string; active: boolean; kind: "intake" | "knowledge" | "seed" | "workflow"; hotEvents: string[]; sourceKind?: string }
+interface Flow { id: string; d: string; active: boolean; kind: "intake" | "knowledge" | "seed" | "workflow" | "focus"; hotEvents: string[]; sourceKind?: string }
 const MIMIR = roomById("mimir");
 function intake(fromId: RoomId, toX: number): string {
   const a = anchor(fromId, "bottom", 0.62);
   const dropY = MIMIR.y - 54;
   return `M ${a.x} ${a.y} C ${a.x} ${a.y + 36}, ${toX} ${dropY - 22}, ${toX} ${MIMIR.y}`;
+}
+// The "focus" channel: Mimir tells each scout what to focus on. Routed from
+// Mimir's top edge up to the scout's bottom door, mirrored off the intake
+// curve so it reads as a separate "direction" lane (not data).
+function focus(fromX: number, toId: RoomId): string {
+  const b = anchor(toId, "bottom", 0.38);
+  const riseY = MIMIR.y - 54;
+  return `M ${fromX} ${MIMIR.y} C ${fromX} ${riseY - 22}, ${b.x} ${b.y + 36}, ${b.x} ${b.y}`;
 }
 const SCOUT_EVENTS = ["source.discovered", "library.sweep_requested", "library.trends", "document.parsed"];
 const LIB_EVENTS = ["document.ingested", "document.parsed"];
@@ -134,10 +152,15 @@ const FLOWS: Flow[] = [
   { id: "f-web",    d: intake("web",    MIMIR.x + 72),  active: true,  kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "web" },
   { id: "f-arxiv",  d: intake("arxiv",  MIMIR.x + 144), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "arxiv" },
   { id: "f-github", d: intake("github", MIMIR.x + 216), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "github" },
-  { id: "f-openml", d: intake("openml", MIMIR.x + 252), active: false, kind: "intake", hotEvents: [] },
+  { id: "f-openml", d: intake("openml", MIMIR.x + 252), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "openml" },
   { id: "f-dataset", active: true, kind: "intake", hotEvents: SCOUT_EVENTS, sourceKind: "dataset", d: `M ${datasetAnchor.x} ${datasetAnchor.y} L ${MIMIR.x} ${datasetAnchor.y}` },
   { id: "f-mimir-lib", active: true, kind: "knowledge", hotEvents: LIB_EVENTS, d: `M ${mimirBottom.x} ${mimirBottom.y} L ${libraryTop.x} ${libraryTop.y}` },
   { id: "f-workflow", active: false, kind: "workflow", hotEvents: [], d: `M ${libraryRight.x} ${libraryRight.y} L 742 ${libraryRight.y}` },
+  // Mimir → scouts "focus" channel (direction, not data). Subtle, static.
+  { id: "f-focus-web",    active: true, kind: "focus", hotEvents: [], d: focus(MIMIR.x + 30,  "web") },
+  { id: "f-focus-arxiv",  active: true, kind: "focus", hotEvents: [], d: focus(MIMIR.x + 60,  "arxiv") },
+  { id: "f-focus-github", active: true, kind: "focus", hotEvents: [], d: focus(MIMIR.x + 90,  "github") },
+  { id: "f-focus-openml", active: true, kind: "focus", hotEvents: [], d: focus(MIMIR.x + 120, "openml") },
 ];
 
 // =========================================================================
@@ -253,6 +276,54 @@ function DoorArc({ room }: { room: Room }) {
   return <path d={`M ${x} ${y - r} A ${r} ${r} 0 0 0 ${x + dir * r} ${y + r}`} fill="none" stroke={C.wall} strokeWidth={2} opacity={0.5} />;
 }
 
+// A small clickable gate marker sitting at a scout room's door. It is a
+// SEPARATE hotspot from the room body — clicking it opens that scout's scoped
+// gate (gate:<sourceKind>) rather than the scout's findings panel.
+// pointerEvents:"all" on the hit rect is REQUIRED: a transparent fill alone
+// lets the click fall through to the SVG's deselect handler.
+function DoorGate({ room, selected, onSelect }: { room: Room; selected: boolean; onSelect: () => void }) {
+  if (!room.door || room.door.side !== "bottom") return null;
+  // North scouts hand off through their bottom door; the dataset scout instead
+  // flows out its right edge toward Mimir (and its bottom sits over the DATA
+  // INTAKE legend), so anchor its gate on the right edge where its data leaves.
+  const onRight = room.id === "dataset";
+  const cx = onRight ? room.x + room.w + 26 : room.x + room.w * room.door.at;
+  const cy = onRight ? room.y + room.h * 0.5 : room.y + room.h + 30;
+  const w = 46, h = 20;
+  const stroke = selected ? C.active : C.intake;
+  return (
+    <g style={{ cursor: "pointer", pointerEvents: "all" }} role="button" aria-label={`${room.title} — open its gate`}
+      onClick={(e) => { e.stopPropagation(); onSelect(); }}>
+      <rect x={cx - w / 2} y={cy - h / 2} width={w} height={h} rx={9}
+        fill={selected ? "rgba(16,185,129,0.12)" : "rgba(44,95,184,0.08)"} stroke={stroke}
+        strokeWidth={selected ? 2 : 1.4} />
+      <ShieldCheck x={cx - 23} y={cy - 8} width={16} height={16} color={stroke} />
+      <text x={cx + 6} y={cy + 4} textAnchor="middle" fontSize={10} fontWeight={600} fill={stroke}>gate</text>
+    </g>
+  );
+}
+
+// Mimir is the Warden: its gate is the FULL intake gate (gate:all). Mimir has
+// no door, so its gate sits as a small tab on the top edge where the scout
+// flows arrive. Separate hotspot from the Mimir body (which opens the Warden).
+function MimirGate({ selected, onSelect }: { selected: boolean; onSelect: () => void }) {
+  const m = MIMIR;
+  const cx = m.x + m.w / 2;
+  const cy = m.y - 3;
+  const w = 58, h = 22;
+  const stroke = selected ? C.active : C.intake;
+  return (
+    <g style={{ cursor: "pointer", pointerEvents: "all" }} role="button" aria-label="Mimir — open the intake gate"
+      onClick={(e) => { e.stopPropagation(); onSelect(); }}>
+      <rect x={cx - w / 2} y={cy - h / 2} width={w} height={h} rx={11}
+        fill={selected ? "rgba(16,185,129,0.12)" : "rgba(44,95,184,0.08)"} stroke={stroke}
+        strokeWidth={selected ? 2 : 1.4} />
+      <ShieldCheck x={cx - 25} y={cy - 8} width={16} height={16} color={stroke} />
+      <text x={cx + 7} y={cy + 4} textAnchor="middle" fontSize={10.5} fontWeight={600} fill={stroke}>Gate</text>
+    </g>
+  );
+}
+
 function RoomBox({ room, phase, activeClaims, selected, onSelect }: {
   room: Room; phase: string | null; activeClaims: number | null; selected: boolean; onSelect: () => void;
 }) {
@@ -307,6 +378,15 @@ function RoomBox({ room, phase, activeClaims, selected, onSelect }: {
 }
 
 function FlowPath({ flow, hot }: { flow: Flow; hot: boolean }) {
+  // The "focus" channel is direction, not data: a faint dashed violet line
+  // pointing toward the scouts, with no travelling particles, so it stays
+  // subordinate to the live scouts→Mimir intake flows.
+  if (flow.kind === "focus") {
+    return (
+      <path d={flow.d} fill="none" stroke={C.seed} strokeWidth={1.4} strokeDasharray="2 6" strokeLinecap="round"
+        opacity={0.34} markerEnd="url(#fp-arrow-focus)" />
+    );
+  }
   const color = flow.kind === "seed" ? C.seed : flow.active ? C.intake : C.plan;
   const particleColor = flow.kind === "seed" ? C.seed : C.active;
   const markerId = flow.kind === "seed" ? "seed" : flow.active ? "active" : "plan";
@@ -961,6 +1041,27 @@ function ScoutRow({ kind, it }: { kind: string; it: ScoutItem }) {
     );
   }
 
+  if (kind === "openml") {
+    // canonical_key looks like "openml:123" → link to https://www.openml.org/d/123
+    const id = it.canonical_key || it.title || "dataset";
+    const numId = it.canonical_key?.startsWith("openml:") ? it.canonical_key.slice("openml:".length) : null;
+    const href = it.source_url || (numId ? `https://www.openml.org/d/${numId}` : null);
+    return (
+      <li className="rounded-2xl border border-slate-200 bg-white p-2 text-xs">
+        <div className="flex items-start justify-between gap-2">
+          {href ? (
+            <a href={href} target="_blank" rel="noreferrer" className="line-clamp-2 min-w-0 flex-1 font-medium text-emerald-700 hover:underline">{it.title || id}</a>
+          ) : (
+            <div className="line-clamp-2 min-w-0 flex-1 font-medium text-slate-800">{it.title || id}</div>
+          )}
+          {at}
+        </div>
+        <div className="mt-1 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">{id}</div>
+        {it.snippet && <p className="mt-1 line-clamp-2 text-slate-500">{it.snippet}</p>}
+      </li>
+    );
+  }
+
   // dataset
   const id = it.canonical_key || it.title || "dataset";
   return (
@@ -980,7 +1081,7 @@ function ScoutRow({ kind, it }: { kind: string; it: ScoutItem }) {
 
 function ScoutPanelView({ kind, panel }: { kind: string; panel: ScoutPanel }) {
   const topics = panel.last_searched?.topics ?? [];
-  const recentTitle = kind === "dataset" ? "Top datasets · recently surfaced" : "Recently found";
+  const recentTitle = (kind === "dataset" || kind === "openml") ? "Top datasets · recently surfaced" : "Recently found";
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-2">
@@ -1082,7 +1183,7 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
 
       {roomId === "library" && <LibraryInspector knowledge={knowledge} snapshot={snapshot} />}
 
-      {(roomId === "web" || roomId === "arxiv" || roomId === "github" || roomId === "dataset") && (
+      {(roomId === "web" || roomId === "arxiv" || roomId === "github" || roomId === "dataset" || roomId === "openml") && (
         <ScoutInspector kind={info.sourceKind ?? roomId} corpus={corpus} />
       )}
 
@@ -1107,28 +1208,32 @@ const GATE_BADGE: Record<string, string> = {
   quality: "border-violet-200 bg-violet-50 text-violet-700",
 };
 
-function GateInspector({ onClose }: { onClose: () => void }) {
+function GateInspector({ scope, title, onClose }: { scope: string; title: string; onClose: () => void }) {
   const [panel, setPanel] = useState<GatePanel | null>(null);
   const [loading, setLoading] = useState(true);
+  const scoped = scope !== "all";
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api.gatePanel()
+    setPanel(null);
+    api.gatePanel(scope === "all" ? undefined : scope)
       .then((p) => { if (!cancelled) setPanel(p); })
       .catch(() => { if (!cancelled) setPanel(null); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [scope]);
 
   const header = (
     <div className="mb-3 flex items-start justify-between gap-2">
       <div>
         <div className="flex items-center gap-2">
-          <h3 className="text-lg font-semibold tracking-tight text-slate-950">The Gate</h3>
+          <h3 className="text-lg font-semibold tracking-tight text-slate-950">{title}</h3>
           <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">Live</span>
         </div>
-        <div className="mt-0.5 text-xs text-slate-500">Every source clears trust + quality here</div>
+        <div className="mt-0.5 text-xs text-slate-500">
+          {scoped ? "This scout's sources clear trust + quality here" : "Every source clears trust + quality here"}
+        </div>
       </div>
       <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50">Close</button>
     </div>
@@ -1152,11 +1257,12 @@ function GateInspector({ onClose }: { onClose: () => void }) {
       </p>
 
       <SubHead label="At a glance" />
-      <div className="grid grid-cols-2 gap-2">
+      <div className={`grid gap-2 ${scoped ? "grid-cols-3" : "grid-cols-2"}`}>
         <StatTile label="Admitted" value={t.admitted} tone="emerald" />
         <StatTile label="Blocked · trust" value={t.blocked_trust} tone="amber" />
         <StatTile label="Rejected · quality" value={t.rejected_quality} tone="slate" />
         <StatTile label="Quarantined" value={panel.quarantined} tone="red" />
+        {scoped && <StatTile label="In corpus" value={panel.in_corpus} tone="violet" />}
       </div>
       <div className="mt-2 text-[11px] text-slate-400">Discovered today · {t.discovered.toLocaleString()}</div>
 
@@ -1227,7 +1333,7 @@ function GateInspector({ onClose }: { onClose: () => void }) {
 
 export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
   const { hot, connected, events } = useFloorplanLive();
-  const [selected, setSelected] = useState<RoomId | "entrance" | null>(null);
+  const [selected, setSelected] = useState<RoomId | `gate:${string}` | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeStats | null>(null);
 
   useEffect(() => {
@@ -1265,7 +1371,7 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
       <div className="relative overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-white to-slate-50/60 p-6 shadow-sm backdrop-blur sm:p-10">
         <svg viewBox={`0 0 ${VW} ${VH}`} className="h-auto w-full" onClick={() => setSelected(null)}>
           <defs>
-            {([["active", C.active], ["plan", C.plan], ["seed", C.seed]] as const).map(([id, col]) => (
+            {([["active", C.active], ["plan", C.plan], ["seed", C.seed], ["focus", C.seed]] as const).map(([id, col]) => (
               <marker key={id} id={`fp-arrow-${id}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                 <path d="M0,0 L10,5 L0,10 z" fill={col} />
               </marker>
@@ -1275,41 +1381,12 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
           <rect x={16} y={48} width={1468} height={872} rx={16} fill="none" stroke={C.wall} strokeWidth={5} />
           {/* divider wall between the two north wings */}
           <line x1={829} y1={48} x2={829} y2={300} stroke={C.wall} strokeWidth={3} opacity={0.5} />
-          {/* main entrance (south wall, under the knowledge core) — clickable: opens the Gate drill-down */}
-          <g
-            style={{ cursor: "pointer" }}
-            role="button"
-            aria-label="Open the Gate — what's admitted vs turned away, with reasons"
-            onClick={(e) => { e.stopPropagation(); setSelected("entrance"); }}
-          >
-            {selected === "entrance" && (
-              <rect x={426} y={884} width={278} height={58} rx={12}
-                fill="none" stroke={C.active} strokeWidth={3} opacity={0.9} />
-            )}
-            {(() => {
-              const arcStroke = selected === "entrance" ? C.active : C.wall;
-              const arcW = selected === "entrance" ? 3 : 2.5;
-              return (
-                <>
-                  <path d="M 438 920 A 30 30 0 0 1 498 920" fill="none" stroke={arcStroke} strokeWidth={arcW} />
-                  <path d="M 498 920 A 30 30 0 0 1 558 920" fill="none" stroke={arcStroke} strokeWidth={arcW} />
-                </>
-              );
-            })()}
-            <text x={588} y={916} fontSize={12} letterSpacing="1.2" fill={selected === "entrance" ? C.active : C.faint}>MAIN ENTRANCE</text>
-            <text x={588} y={932} fontSize={10} letterSpacing="0.8" fill={selected === "entrance" ? "#0f9b6e" : C.faint} opacity={0.85}>the Gate · click to inspect</text>
-            {/* transparent hotspot covering the arcs + label. pointerEvents:"all"
-                is required — a transparent fill alone lets the click fall through
-                to the SVG's deselect onClick, so the entrance never opened. */}
-            <rect
-              x={418}
-              y={882}
-              width={292}
-              height={64}
-              fill="transparent"
-              style={{ pointerEvents: "all" }}
-              onClick={(e) => { e.stopPropagation(); setSelected("entrance"); }}
-            />
+          {/* main entrance (south wall, under the knowledge core) — purely
+              decorative now; gates live on each agent's door, not here. */}
+          <g aria-hidden="true">
+            <path d="M 438 920 A 30 30 0 0 1 498 920" fill="none" stroke={C.wall} strokeWidth={2.5} />
+            <path d="M 498 920 A 30 30 0 0 1 558 920" fill="none" stroke={C.wall} strokeWidth={2.5} />
+            <text x={588} y={916} fontSize={12} letterSpacing="1.2" fill={C.faint}>MAIN ENTRANCE</text>
           </g>
           <text x={946} y={476} textAnchor="middle" fontSize={17} fontWeight={700} letterSpacing="1.6" fill="#aab2bd">RESEARCH WORKFLOW</text>
 
@@ -1319,7 +1396,13 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
           <ZoneBracket x1={300} x2={700} y={858} label="KNOWLEDGE CORE" />
 
           {FLOWS.map((f) => <FlowPath key={f.id} flow={f} hot={hot.has(f.id)} />)}
+          {/* "focus" label — marks the Mimir→scouts direction channel */}
+          <text x={MIMIR.x + 4} y={MIMIR.y - 88} fontSize={10} letterSpacing="0.8" fill={C.seed} opacity={0.6}>focus</text>
           {ROOMS.map((r) => <RoomBox key={r.id} room={r} phase={phase} activeClaims={activeClaims} selected={selected === r.id} onSelect={() => setSelected(r.id)} />)}
+          {ROOMS.filter((r) => r.active && r.door && SCOUT_DOOR_GATE.has(r.id)).map((r) => (
+            <DoorGate key={`gate-${r.id}`} room={r} selected={selected === `gate:${r.id}`} onSelect={() => setSelected(`gate:${r.id}`)} />
+          ))}
+          <MimirGate selected={selected === "gate:all"} onSelect={() => setSelected("gate:all")} />
 
           <g>
             <rect x={60} y={590} width={210} height={98} rx={12} fill="rgba(255,255,255,0.8)" stroke="#e2e8ef" strokeWidth={1} />
@@ -1350,10 +1433,10 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
               transition={{ type: "spring", stiffness: 280, damping: 32 }}
               className="absolute right-0 top-0 z-20 h-full w-full max-w-[440px] overflow-y-auto border-l border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur"
             >
-              {selected === "entrance" ? (
-                <GateInspector onClose={() => setSelected(null)} />
+              {selected.startsWith("gate:") ? (
+                <GateInspector scope={selected.slice(5)} title={GATE_TITLE[selected.slice(5)] ?? "Gate"} onClose={() => setSelected(null)} />
               ) : (
-                <RoomInspector roomId={selected} snapshot={snapshot} knowledge={knowledge} events={events} onClose={() => setSelected(null)} />
+                <RoomInspector roomId={selected as RoomId} snapshot={snapshot} knowledge={knowledge} events={events} onClose={() => setSelected(null)} />
               )}
             </motion.aside>
           )}
