@@ -22,8 +22,10 @@ fire the hard-gate. arXiv's API exposes no license, so papers stay license-None
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import urlparse
@@ -32,6 +34,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from agents.mimir.collectors import run_discovery_sweep
+from library.ingest.fetcher import search_arxiv
 from library.ingest.pipeline import embed_and_finalize, stage_source
 from library.trust import DocMeta, classify_trust
 
@@ -121,10 +124,52 @@ async def _github_repo_signals(url: str | None) -> tuple[bool | None, int | None
         return None, None, None
 
 
+# A withdrawn arXiv paper's abstract is replaced with a withdrawal notice; that
+# text is the reliable signal (the API exposes no structured "withdrawn" flag).
+_WITHDRAWN_RE = re.compile(
+    r"(this (paper|submission|manuscript|article|work) has been withdrawn|withdrawn by the author)",
+    re.IGNORECASE,
+)
+
+
+async def _arxiv_withdrawn(arxiv_id: str) -> bool:
+    """True if the arXiv abstract carries a withdrawal notice. Retries once on an
+    empty result (arXiv 429s often clear on a short backoff) so a real retraction
+    isn't missed; any persistent failure returns False — never block on a miss."""
+    for attempt in range(2):
+        try:
+            results = await search_arxiv(f"id:{arxiv_id}", max_results=1)
+        except Exception:  # noqa: BLE001 — best-effort probe
+            results = []
+        if results:
+            return bool(_WITHDRAWN_RE.search(results[0].abstract or ""))
+        if attempt == 0:
+            await asyncio.sleep(2.0)
+    return False
+
+
+async def _doi_retracted(doi: str) -> bool:
+    """Best-effort Crossref retraction check (update-to type 'retraction' or a
+    'is-retracted-by' relation). Crossref coverage is partial, so a False here is
+    NOT proof a paper is clean — it's a cheap, additive signal for journal DOIs."""
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, headers={"User-Agent": "labfoundry-mimir"}) as client:
+            resp = await client.get(f"https://api.crossref.org/works/{doi}")
+            if resp.status_code != 200:
+                return False
+            msg = resp.json().get("message", {})
+            if any((u.get("type") or "").lower() == "retraction" for u in msg.get("update-to", []) or []):
+                return True
+            return "is-retracted-by" in (msg.get("relation") or {})
+    except Exception:  # noqa: BLE001 — best-effort probe
+        return False
+
+
 async def _resolve_signals(meta: DocMeta) -> None:
     """Best-effort network probes that fill the signals classify_trust needs for
     the top tiers (peer_reviewed via a resolving DOI, official_repo via an active
-    GitHub repo). Mutates `meta`; any failure leaves the conservative default."""
+    GitHub repo) and the retraction/withdrawal hard-gate. Mutates `meta`; any
+    failure leaves the conservative default."""
     if meta.doi:
         meta.doi_resolves = await _doi_resolves(meta.doi)
     host = (urlparse(meta.source_url or "").hostname or "").lower()
@@ -134,6 +179,10 @@ async def _resolve_signals(meta: DocMeta) -> None:
         # overwrite when the probe actually found one.
         if license_spdx:
             meta.license = license_spdx
+    # Retraction/withdrawal — arXiv withdrawal notice (reliable) + a best-effort
+    # Crossref check for DOIs. Feeds the hard-gate in classify_trust.
+    if meta.arxiv_id and await _arxiv_withdrawn(meta.arxiv_id) or meta.doi and await _doi_retracted(meta.doi):
+        meta.retracted = True
 
 
 async def _block(state, doc_id: int, *, signals: dict, reason: str, used_llm: bool) -> dict:
