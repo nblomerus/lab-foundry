@@ -144,7 +144,9 @@ async def scout_web(topics: list[str], per_topic: int = 5) -> list[SourceDescrip
                     log.warning(
                         "scout_web: SearXNG at %s returned HTTP %d for %r — "
                         "web discovery degraded (check SEARXNG_URL / container)",
-                        _SEARXNG_URL, resp.status_code, topic,
+                        _SEARXNG_URL,
+                        resp.status_code,
+                        topic,
                     )
                     continue
                 results = resp.json().get("results", [])

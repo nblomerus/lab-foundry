@@ -242,9 +242,7 @@ async def _render_with_playwright(url: str) -> str | None:
             try:
                 ctx = await browser.new_context(user_agent=USER_AGENT)
                 page = await ctx.new_page()
-                await page.goto(
-                    url, wait_until="domcontentloaded", timeout=_PLAYWRIGHT_NAV_TIMEOUT_MS
-                )
+                await page.goto(url, wait_until="domcontentloaded", timeout=_PLAYWRIGHT_NAV_TIMEOUT_MS)
                 # networkidle can hang on pages with long-poll/analytics, so cap
                 # it and ignore the timeout — domcontentloaded already ran the JS.
                 with contextlib.suppress(Exception):  # settle is best-effort
@@ -337,9 +335,7 @@ async def web_fetch(
             r_content, _ = _extract(rendered, "text/html")
             if not _looks_blocked(r_content):
                 content, extractor = r_content, "playwright"
-                log.info(
-                    "web_fetch: rung-2 (playwright) rescued %s (%d chars)", url, len(content)
-                )
+                log.info("web_fetch: rung-2 (playwright) rescued %s (%d chars)", url, len(content))
 
     # Detect known bot-challenge / blocked pages and don't pass them downstream.
     # We still cache the result with a 'blocked' extractor + empty content so
