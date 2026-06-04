@@ -46,7 +46,7 @@ const ROOMS: Room[] = [
   { id: "planner",     x: 1046, y: 96, w: 144, h: 202, title: "Planner",     sub: "Schedules & goals planning",                    active: false, door: { side: "bottom", at: 0.6 } },
   { id: "researchers", x: 1196, y: 96, w: 224, h: 202, title: "Researchers", sub: "Investigate directions & gather findings",      active: false, door: { side: "bottom", at: 0.55 } },
   // --- KNOWLEDGE CORE (centre-west) ---
-  { id: "dataset", x: 60,  y: 404, w: 188, h: 160, title: "Dataset Scout", sub: "External data monitoring", active: false, door: { side: "bottom", at: 0.78 } },
+  { id: "dataset", x: 60,  y: 404, w: 188, h: 160, title: "Dataset Scout", sub: "External data monitoring", active: true, door: { side: "bottom", at: 0.78 } },
   { id: "mimir",   x: 360, y: 388, w: 288, h: 196, title: "Mimir",   sub: "AI Curator of Knowledge",   active: true },
   { id: "library", x: 324, y: 612, w: 348, h: 222, title: "Library", sub: "Queryable research memory", active: true },
   // --- RESEARCH WORKFLOW (east column) ---
@@ -76,7 +76,7 @@ const ROOM_INFO: Record<RoomId, RoomInfo> = {
   ariadne:     { what: "The Principal Investigator — frames research directions and decides what to pursue or kill.", events: [], role: "pi", gate: "research workflow (KNOWLEDGE_CORE_ONLY)" },
   planner:     { what: "Turns research directions into concrete, falsifiable tasks.", events: [], role: "planner", gate: "research workflow" },
   researchers: { what: "Investigate directions, gather evidence from the Library, and produce findings.", events: [], role: "researcher", gate: "research workflow" },
-  dataset: { what: "Will monitor external dataset sources and feed Mimir.", events: [], gate: "scout not built yet" },
+  dataset: { what: "Tracks the AI/ML data landscape on the HuggingFace datasets hub, follows emerging trends, and hands newly discovered datasets to Mimir.", events: ["source.discovered", "library.trends"], sourceKind: "dataset" },
   mimir:   { what: "The Warden — one agent ingests every source and gates its trust (deterministic ladder + an LLM tie-breaker), then certifies it into the Library or quarantines it.", events: ["source.discovered", "document.parsed", "document.ingested", "mimir.ingest_blocked", "library.sweep_requested", "library.trends", "acquire.requested", "acquire.fulfilled", "acquire.rejected"] },
   library: { what: "The queryable research memory — certified documents in a pgvector (768-d) corpus plus a Neo4j knowledge graph.", events: ["document.ingested"] },
   critic:  { what: "Will challenge claims and probe their weaknesses before they advance.", events: [], role: "critic", gate: "research workflow" },
@@ -107,7 +107,7 @@ const FLOWS: Flow[] = [
   { id: "f-arxiv",  d: intake("arxiv",  MIMIR.x + 144), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS },
   { id: "f-github", d: intake("github", MIMIR.x + 216), active: true,  kind: "intake", hotEvents: SCOUT_EVENTS },
   { id: "f-openml", d: intake("openml", MIMIR.x + 252), active: false, kind: "intake", hotEvents: [] },
-  { id: "f-dataset", active: false, kind: "intake", hotEvents: [], d: `M ${datasetAnchor.x} ${datasetAnchor.y} L ${MIMIR.x} ${datasetAnchor.y}` },
+  { id: "f-dataset", active: true, kind: "intake", hotEvents: SCOUT_EVENTS, d: `M ${datasetAnchor.x} ${datasetAnchor.y} L ${MIMIR.x} ${datasetAnchor.y}` },
   { id: "f-mimir-lib", active: true, kind: "knowledge", hotEvents: LIB_EVENTS, d: `M ${mimirBottom.x} ${mimirBottom.y} L ${libraryTop.x} ${libraryTop.y}` },
   { id: "f-seed", active: true, kind: "seed", hotEvents: [], d: `M 170 824 C 220 806, 350 ${librarySeedIn.y + 4}, ${librarySeedIn.x} ${librarySeedIn.y}` },
   { id: "f-workflow", active: false, kind: "workflow", hotEvents: [], d: `M ${libraryRight.x} ${libraryRight.y} L 742 ${libraryRight.y}` },
@@ -273,18 +273,29 @@ function RoomBox({ room, phase, activeClaims, selected, onSelect }: {
 function FlowPath({ flow, hot }: { flow: Flow; hot: boolean }) {
   const color = flow.kind === "seed" ? C.seed : flow.active ? C.intake : C.plan;
   const particleColor = flow.kind === "seed" ? C.seed : C.active;
-  const count = !flow.active ? 0 : hot ? 3 : 1;
-  const dur = hot ? 1.5 : flow.kind === "seed" ? 5 : 3.4;
   const markerId = flow.kind === "seed" ? "seed" : flow.active ? "active" : "plan";
+  // Motion is activity-gated: particles only travel while the flow is HOT (a
+  // matching live event arrived recently). When cold, only the static path
+  // renders — no <animateMotion>, so the lab is still unless something happens.
+  const active = flow.active && hot;
+  const count = active ? 3 : 0;
+  const dur = 1.5;
   return (
     <g>
       <path d={flow.d} fill="none" stroke={color}
         strokeWidth={flow.active ? 2.4 : 1.6} strokeDasharray={flow.active ? undefined : "6 5"} strokeLinecap="round"
-        opacity={flow.active ? (hot ? 1 : 0.85) : 0.5} markerEnd={`url(#fp-arrow-${markerId})`}
-        style={flow.active && hot ? { filter: "drop-shadow(0 0 1.4px rgba(16,185,129,0.55))" } : undefined} />
+        style={{
+          opacity: flow.active ? (hot ? 1 : 0.85) : 0.5,
+          filter: active ? "drop-shadow(0 0 1.4px rgba(16,185,129,0.55))" : "none",
+          transition: "opacity 0.5s ease, filter 0.5s ease",
+        }}
+        markerEnd={`url(#fp-arrow-${markerId})`} />
       {Array.from({ length: count }).map((_, i) => (
-        <circle key={i} r={i === 0 ? 4.2 : 3} fill={particleColor} opacity={i === 0 ? 1 : 0.7} style={{ filter: `drop-shadow(0 0 2px ${particleColor})` }}>
-          <animateMotion dur={`${dur}s`} repeatCount="indefinite" begin={`${(i * dur) / Math.max(count, 1)}s`} path={flow.d} />
+        // key includes `hot` so the particles mount fresh on each hot→cold→hot
+        // transition; the <animateMotion> then begins cleanly from t=0 rather
+        // than resuming a stale animation.
+        <circle key={`hot-${i}`} r={i === 0 ? 4.2 : 3} fill={particleColor} opacity={i === 0 ? 1 : 0.7} style={{ filter: `drop-shadow(0 0 2px ${particleColor})` }}>
+          <animateMotion dur={`${dur}s`} repeatCount="indefinite" begin={`${(i * dur) / count}s`} path={flow.d} />
         </circle>
       ))}
     </g>
@@ -694,7 +705,7 @@ function RoomInspector({ roomId, snapshot, knowledge, events, onClose }: {
 
       {roomId === "library" && <LibraryInspector knowledge={knowledge} snapshot={snapshot} />}
 
-      {(roomId === "web" || roomId === "arxiv" || roomId === "github") && (
+      {(roomId === "web" || roomId === "arxiv" || roomId === "github" || roomId === "dataset") && (
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-2">
             <StatTile label="Discovered (live feed)" value={roomEvents.length} tone="emerald" />
@@ -795,7 +806,7 @@ export function Floorplan({ snapshot }: { snapshot: Snapshot | null }) {
 
           <g>
             <rect x={64} y={820} width={196} height={54} rx={12} fill="rgba(124,92,214,0.07)" stroke={C.seed} strokeWidth={1.6} />
-            <text x={162} y={843} textAnchor="middle" fontSize={13.5} fontWeight={700} fill="#5a3fa0">rag-bench base</text>
+            <text x={162} y={843} textAnchor="middle" fontSize={13.5} fontWeight={700} fill="#5a3fa0">Base corpus</text>
             <text x={162} y={861} textAnchor="middle" fontSize={11.5} fill={C.muted}>21,800 arXiv papers · seed</text>
           </g>
 
