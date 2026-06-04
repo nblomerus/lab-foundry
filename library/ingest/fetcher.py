@@ -70,7 +70,9 @@ def _looks_blocked(content: str) -> bool:
 DOMAIN_DELAY = 1.0
 
 HTTP_TIMEOUT = 30.0
-USER_AGENT = "labfoundry-research/0.1 (autonomous research agent; contact: see project README)"
+# A descriptive bot UA with a real contact URL — several high-value sources
+# (Wikipedia among them) 403 a vague/placeholder UA but 200 a contactable bot.
+USER_AGENT = "labfoundry-research/0.1 (autonomous research agent; +https://github.com/nblomerus/lab-foundry)"
 
 
 # -------------------------------------------------------------------------

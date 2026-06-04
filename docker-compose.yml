@@ -23,9 +23,9 @@ services:
     image: searxng/searxng:latest
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8081:8080"
     environment:
-      SEARXNG_BASE_URL: http://localhost:8080/
+      SEARXNG_BASE_URL: http://localhost:8081/
       SEARXNG_SECRET:   ${SEARXNG_SECRET:-please-change-me}
     volumes:
       - ./infra/searxng:/etc/searxng:rw
