@@ -18,7 +18,7 @@ import logging
 import os
 from datetime import UTC, datetime
 
-from library.ingest.scouts import scout_arxiv, scout_dataset, scout_github, scout_web
+from library.ingest.scouts import scout_arxiv, scout_dataset, scout_github, scout_openml, scout_web
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ _SCOUTS = {
     "web": scout_web,
     "github": scout_github,
     "dataset": scout_dataset,
+    "openml": scout_openml,
 }
 
 
@@ -43,7 +44,7 @@ def _enabled_scout_names() -> list[str]:
 # deep as the plan asks. Web/GitHub/dataset are bounded supplements: each web
 # hit costs a fetch, and 25/topic of marketing blogs is noise, so cap them low
 # even when the arXiv depth is high.
-_PER_TOPIC_CAP = {"web": 6, "github": 6, "dataset": 8}
+_PER_TOPIC_CAP = {"web": 6, "github": 6, "dataset": 8, "openml": 6}
 
 
 # Broad AI/ML FRONTIER — the standing taxonomy swept when no agenda is set

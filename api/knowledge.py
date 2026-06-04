@@ -269,7 +269,7 @@ async def mimir_panel(request: Request) -> dict:
     }
 
 
-_SCOUT_KINDS = {"arxiv", "web", "github", "dataset"}
+_SCOUT_KINDS = {"arxiv", "web", "github", "dataset", "openml"}
 
 
 @router.get("/scout")
@@ -354,41 +354,81 @@ def _payload(p) -> dict:
 
 
 @router.get("/gate")
-async def gate_panel(request: Request) -> dict:
-    """The intake gate (the lab's 'entrance'): who was admitted and who was turned
-    away, with reasons. Two gates feed it — TRUST blocks (mimir.ingest_blocked:
-    license / retraction / untrusted) and QUALITY rejections
-    (library.ingest_rejected: too thin / non-content page). Plus today's tallies
-    and a recent-admitted list so decisions can be audited both ways."""
+async def gate_panel(request: Request, kind: str | None = None) -> dict:
+    """The intake gate: who was admitted and who was turned away, with reasons —
+    TRUST blocks (mimir.ingest_blocked) + QUALITY rejections
+    (library.ingest_rejected), plus today's tallies and a recent-admitted list.
+
+    With `kind` (a scout source kind), the gate is SCOPED to that scout's sources
+    — what it surfaced and how it fared. No kind = the full gate (all sources)."""
+    kind = (kind or "").strip().lower() or None
+    if kind and kind not in _SCOUT_KINDS:
+        return {"status": "error", "error": f"unknown kind {kind!r}"}
+    # Optional " AND <col> = $1" filters, applied only when scoped to a kind.
+    args = [kind] if kind else []
+    doc_f = " AND d.source_kind = $1" if kind else ""
+    docs_f = " AND source_kind = $1" if kind else ""
+    rej_f = " AND payload->>'source_kind' = $1" if kind else ""
+    disc_f = " AND payload->'source'->>'source_kind' = $1" if kind else ""
     pool = request.app.state.pool
     try:
         async with pool.acquire() as conn:
-            ev_today = {
-                r["e"]: r["c"]
-                for r in await conn.fetch(
-                    "SELECT event_type e, COUNT(*) c FROM events "
-                    "WHERE emitted_at >= date_trunc('day', now()) GROUP BY event_type"
+            today = {
+                "admitted": await conn.fetchval(
+                    "SELECT COUNT(*) FROM documents d WHERE d.status='certified'"
+                    + doc_f
+                    + " AND COALESCE(d.certified_at, d.ingested_at) >= date_trunc('day', now())",
+                    *args,
                 )
+                or 0,
+                "blocked_trust": await conn.fetchval(
+                    "SELECT COUNT(*) FROM events e JOIN documents d ON d.id = e.target_id "
+                    "WHERE e.event_type='mimir.ingest_blocked'" + doc_f + " AND e.emitted_at >= date_trunc('day', now())",
+                    *args,
+                )
+                or 0,
+                "rejected_quality": await conn.fetchval(
+                    "SELECT COUNT(*) FROM events WHERE event_type='library.ingest_rejected'"
+                    + rej_f
+                    + " AND emitted_at >= date_trunc('day', now())",
+                    *args,
+                )
+                or 0,
+                "discovered": await conn.fetchval(
+                    "SELECT COUNT(*) FROM events WHERE event_type='source.discovered'"
+                    + disc_f
+                    + " AND emitted_at >= date_trunc('day', now())",
+                    *args,
+                )
+                or 0,
             }
-            quarantined = await conn.fetchval("SELECT COUNT(*) FROM documents WHERE status = 'blocked'") or 0
+            in_corpus = await conn.fetchval("SELECT COUNT(*) FROM documents d WHERE TRUE" + doc_f, *args) or 0
+            quarantined = (
+                await conn.fetchval("SELECT COUNT(*) FROM documents WHERE status='blocked'" + docs_f, *args) or 0
+            )
             blocked = await conn.fetch(
                 "SELECT e.emitted_at, e.payload, d.title, d.source_kind, d.source_url "
-                "FROM events e LEFT JOIN documents d ON d.id = e.target_id "
-                "WHERE e.event_type = 'mimir.ingest_blocked' ORDER BY e.emitted_at DESC LIMIT 15"
+                "FROM events e JOIN documents d ON d.id = e.target_id "
+                "WHERE e.event_type='mimir.ingest_blocked'" + doc_f + " ORDER BY e.emitted_at DESC LIMIT 15",
+                *args,
             )
             rejected = await conn.fetch(
-                "SELECT emitted_at, payload FROM events WHERE event_type = 'library.ingest_rejected' "
-                "ORDER BY emitted_at DESC LIMIT 15"
+                "SELECT emitted_at, payload FROM events WHERE event_type='library.ingest_rejected'"
+                + rej_f
+                + " ORDER BY emitted_at DESC LIMIT 15",
+                *args,
             )
             admitted = await conn.fetch(
                 "SELECT title, source_kind, arxiv_id, canonical_key, trust_tier, "
-                "COALESCE(certified_at, ingested_at) at FROM documents WHERE status = 'certified' "
-                "ORDER BY COALESCE(certified_at, ingested_at) DESC NULLS LAST LIMIT 8"
+                "COALESCE(certified_at, ingested_at) at FROM documents d WHERE status='certified'"
+                + doc_f
+                + " ORDER BY COALESCE(certified_at, ingested_at) DESC NULLS LAST LIMIT 8",
+                *args,
             )
     except asyncpg.UndefinedTableError:
         return {"status": "planned"}
     except Exception as e:  # noqa: BLE001 — never 500 the dashboard
-        log.warning("gate panel failed: %s", e)
+        log.warning("gate panel (kind=%s) failed: %s", kind, e)
         return {"status": "error", "error": str(e)}
 
     turned_away = []
@@ -420,12 +460,9 @@ async def gate_panel(request: Request) -> dict:
 
     return {
         "status": "ok",
-        "today": {
-            "admitted": ev_today.get("document.ingested", 0),
-            "blocked_trust": ev_today.get("mimir.ingest_blocked", 0),
-            "rejected_quality": ev_today.get("library.ingest_rejected", 0),
-            "discovered": ev_today.get("source.discovered", 0),
-        },
+        "scope": kind or "all",
+        "in_corpus": in_corpus,
+        "today": today,
         "quarantined": quarantined,
         "turned_away": turned_away[:16],
         "admitted": [

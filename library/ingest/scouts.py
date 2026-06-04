@@ -49,6 +49,7 @@ log = logging.getLogger(__name__)
 _SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8081")
 _GITHUB_API = "https://api.github.com"
 _HF_API = "https://huggingface.co"
+_OPENML_API = "https://www.openml.org/api/v1/json"
 _SCOUT_UA = "labfoundry-scout"
 # Courtesy delay (seconds) between successive per-topic API calls within one
 # scout run. arXiv and GitHub rate-limit aggressive bursts; an aggressive sweep
@@ -260,5 +261,53 @@ async def scout_dataset(topics: list[str], per_topic: int = 5) -> list[SourceDes
                     url=f"{_HF_API}/datasets/{ds_id}",
                     title=ds_id,
                     why=f"dataset topic: {topic} (HF downloads={downloads})",
+                )
+    return list(seen.values())
+
+
+# -------------------------------------------------------------------------
+# OpenML scout — benchmark datasets (kind='dataset', source_kind='openml'). The
+# classical-ML dataset landscape: tabular/benchmark datasets used across many
+# experiments. OpenML's free-text search is weak, so we match the topic against
+# dataset NAMES (data_name filter) and fall back to active datasets; the ingest
+# resolver enriches each with its description + qualities (instances/features/
+# classes). canonical_key='openml:<did>'. PURE: returns descriptors only.
+# -------------------------------------------------------------------------
+
+
+async def scout_openml(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
+    """Scout OpenML for benchmark datasets matching `topics` by name. Best-effort:
+    empty list on any failure, one bad topic never sinks the sweep."""
+    seen: dict[str, SourceDescriptor] = {}
+    async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": _SCOUT_UA}) as client:
+        for topic in topics:
+            # OpenML datasets are named things (mnist, cifar, …), not abstract
+            # subfields, so match the topic's most distinctive word against names.
+            kw = next((w for w in topic.split() if w.isalpha() and len(w) > 3), "")
+            url = (
+                f"{_OPENML_API}/data/list/data_name/{kw}/status/active/limit/{per_topic}"
+                if kw
+                else f"{_OPENML_API}/data/list/status/active/limit/{per_topic}"
+            )
+            try:
+                resp = await client.get(url)
+                rows = resp.json().get("data", {}).get("dataset", []) if resp.status_code == 200 else []
+            except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
+                log.warning("scout_openml: topic %r failed: %s", topic, e)
+                continue
+            for d in rows[:per_topic]:
+                did = d.get("did")
+                if did is None:
+                    continue
+                key = f"openml:{did}"
+                if key in seen:
+                    continue
+                seen[key] = SourceDescriptor(
+                    kind="dataset",
+                    source_kind="openml",
+                    canonical_key=key,
+                    url=f"https://www.openml.org/d/{did}",
+                    title=d.get("name"),
+                    why=f"openml dataset (topic: {topic})",
                 )
     return list(seen.values())
