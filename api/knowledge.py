@@ -13,6 +13,7 @@ the Knowledge nodes in a planned state rather than 500-ing.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import asyncpg
@@ -154,6 +155,117 @@ async def knowledge_recent(request: Request, limit: int = 8) -> dict:
             }
             for r in rows
         ],
+    }
+
+
+def _acquire_row(r) -> dict:
+    """Collapse an acquire.* event into a request-feed row (requester + ask +
+    resolution status), defensively reading the payload."""
+    payload = r["payload"]
+    if isinstance(payload, str):
+        payload = json.loads(payload) if payload else {}
+    payload = payload or {}
+    status = {
+        "acquire.requested": "requested",
+        "acquire.fulfilled": "fulfilled",
+        "acquire.rejected": "rejected",
+    }.get(r["event_type"], r["event_type"])
+    ask = payload.get("query") or payload.get("topic") or payload.get("reason") or payload.get("gap")
+    requester = payload.get("requested_by") or payload.get("requester") or payload.get("agent") or "—"
+    return {
+        "requester": str(requester),
+        "ask": (str(ask)[:120] if ask else None),
+        "status": status,
+        "at": r["emitted_at"].isoformat() if r["emitted_at"] else None,
+    }
+
+
+@router.get("/mimir")
+async def mimir_panel(request: Request) -> dict:
+    """Rich panel for the Warden (Mimir): at-a-glance counts with today's deltas,
+    the trust ladder, today's intake funnel (from events), the corpus source mix,
+    recent certifications, and the acquire-request feed. All real data; degrades
+    to status='planned'/'error' rather than 500-ing the dashboard."""
+    pool = request.app.state.pool
+    try:
+        async with pool.acquire() as conn:
+            by_status = {
+                r["s"]: r["c"]
+                for r in await conn.fetch("SELECT status::text s, COUNT(*) c FROM documents GROUP BY status")
+            }
+            by_tier = {
+                r["t"]: r["c"]
+                for r in await conn.fetch("SELECT trust_tier::text t, COUNT(*) c FROM documents GROUP BY trust_tier")
+            }
+            mix = await conn.fetch("SELECT source_kind, COUNT(*) c FROM documents GROUP BY source_kind ORDER BY c DESC")
+            ev_today = {
+                r["e"]: r["c"]
+                for r in await conn.fetch(
+                    "SELECT event_type e, COUNT(*) c FROM events "
+                    "WHERE emitted_at >= date_trunc('day', now()) GROUP BY event_type"
+                )
+            }
+            ingested_yday = (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM events WHERE event_type = 'document.ingested' "
+                    "AND emitted_at >= date_trunc('day', now()) - interval '1 day' "
+                    "AND emitted_at < date_trunc('day', now())"
+                )
+                or 0
+            )
+            pending = (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM documents WHERE status NOT IN ('certified', 'quarantined', 'blocked')"
+                )
+                or 0
+            )
+            recent_cert = await conn.fetch(
+                "SELECT title, source_kind, arxiv_id, canonical_key, COALESCE(certified_at, ingested_at) at "
+                "FROM documents WHERE status = 'certified' "
+                "ORDER BY COALESCE(certified_at, ingested_at) DESC NULLS LAST LIMIT 6"
+            )
+            requests = await conn.fetch(
+                "SELECT event_type, payload, emitted_at FROM events "
+                "WHERE event_type IN ('acquire.requested', 'acquire.fulfilled', 'acquire.rejected') "
+                "ORDER BY emitted_at DESC LIMIT 6"
+            )
+    except asyncpg.UndefinedTableError:
+        return {"status": "planned"}
+    except Exception as e:  # noqa: BLE001 — never 500 the dashboard
+        log.warning("mimir panel stats failed: %s", e)
+        return {"status": "error", "error": str(e)}
+
+    total_mix = sum(r["c"] for r in mix) or 1
+    return {
+        "status": "ok",
+        "at_a_glance": {
+            "certified": by_status.get("certified", 0),
+            "certified_today": ev_today.get("document.ingested", 0),
+            "quarantined": by_status.get("quarantined", 0) + by_status.get("blocked", 0),
+            "quarantined_today": ev_today.get("mimir.ingest_blocked", 0),
+            "pending": pending,
+            "ingested_today": ev_today.get("document.ingested", 0),
+            "ingested_yesterday": ingested_yday,
+        },
+        "trust_ladder": by_tier,
+        "pipeline_today": {
+            "discovered": ev_today.get("source.discovered", 0),
+            "parsed": ev_today.get("document.parsed", 0),
+            "ingested": ev_today.get("document.ingested", 0),
+            "quarantined": ev_today.get("mimir.ingest_blocked", 0),
+        },
+        "source_mix": [{"kind": r["source_kind"], "count": r["c"], "pct": round(100 * r["c"] / total_mix)} for r in mix],
+        "recent_certifications": [
+            {
+                "title": r["title"],
+                "source_kind": r["source_kind"],
+                "arxiv_id": r["arxiv_id"],
+                "canonical_key": r["canonical_key"],
+                "at": r["at"].isoformat() if r["at"] else None,
+            }
+            for r in recent_cert
+        ],
+        "requests": [_acquire_row(r) for r in requests],
     }
 
 
