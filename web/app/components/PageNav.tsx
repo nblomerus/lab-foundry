@@ -8,6 +8,7 @@ import { cx } from "./ui";
 export const PAGE_ORDER = [
   { href: "/",       label: "Research OS" },
   { href: "/flow",   label: "Floorplan" },
+  { href: "/agents", label: "Agent Lab" },
   { href: "/claims", label: "Claims" },
   { href: "/events", label: "Events" },
   { href: "/org",    label: "Org" },
