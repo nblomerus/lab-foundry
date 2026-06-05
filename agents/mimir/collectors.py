@@ -117,6 +117,14 @@ _MAX_AGENDA_TOPICS = 10
 # subfields (instead of re-requesting the same slice and finding nothing new).
 _ROTATION_PERIOD_S = int(os.environ.get("LIBRARY_ROTATION_PERIOD_S", "90"))
 
+# Stateful discovery (migration 003). A per-source pagination cursor walks the
+# back-catalogue: re-grab the newest every _REFRESH_AFTER_S, otherwise page
+# deeper, wrapping past _MAX_OFFSET. The seen-ledger retries a source that failed
+# to ingest only after _RETRY_AFTER_S (not every sweep, not never).
+_REFRESH_AFTER_S = float(os.environ.get("LIBRARY_REFRESH_AFTER_S", "7200"))  # 2h
+_MAX_OFFSET = int(os.environ.get("LIBRARY_MAX_OFFSET", "1000"))
+_RETRY_AFTER_S = float(os.environ.get("LIBRARY_RETRY_AFTER_S", "43200"))  # 12h
+
 
 def discovery_topics() -> list[str]:
     """The standing FRONTIER topics (LIBRARY_TOPICS env, else the broad AI/ML
@@ -211,8 +219,10 @@ def _source_target_id(canonical_key: str) -> int:
 
 
 async def run_discovery_sweep(topics: list[str] | None, state, *, per_topic: int | None = None) -> dict:
-    """Run the scouts over `topics` and emit `source.discovered` for sources NOT
-    already in the corpus (skip-if-exists avoids a wasted re-fetch every sweep).
+    """Run the scouts over `topics` and emit `source.discovered` for genuinely-new
+    sources. Each scout pages deeper via a per-source cursor (so it doesn't keep
+    re-fetching the same newest-N), and a novelty gate — corpus check + seen-ledger
+    — surfaces only new or retry-due sources (migration 003).
 
     With no `topics`, plans the sweep from the agenda (see `plan_sweep`): that
     also picks `per_topic` (aggressive when Ariadne is dark, gentle when she's
@@ -227,19 +237,47 @@ async def run_discovery_sweep(topics: list[str] | None, state, *, per_topic: int
     if per_topic is None:
         per_topic = _AGENDA_PER_TOPIC
 
+    # FETCH — each scout pages deeper via its own cursor (so it never re-fetches
+    # the same newest-N). The cursor is per-source; the scout keeps its internal
+    # per-topic pacing by taking the whole topic list at one offset.
     descriptors = []
     for name in _enabled_scout_names():
         scout = _SCOUTS[name]  # looked up live so tests can monkeypatch _SCOUTS
         scout_per_topic = min(per_topic, _PER_TOPIC_CAP.get(name, per_topic))
         try:
-            descriptors.extend(await scout(topics, per_topic=scout_per_topic))
+            offset = await state.discovery_offset(
+                name, "*", page_size=scout_per_topic, refresh_after_s=_REFRESH_AFTER_S, max_offset=_MAX_OFFSET
+            )
+        except Exception:  # noqa: BLE001 — a cursor failure must not stop discovery
+            log.exception("collectors: discovery cursor for %s failed", name)
+            offset = 0
+        try:
+            descriptors.extend(await scout(topics, per_topic=scout_per_topic, start=offset))
         except Exception:  # noqa: BLE001 — one scout failing must not sink the sweep
             log.exception("collectors: scout %s failed", name)
 
+    # NOVELTY GATE — drop anything already in the corpus, then ask the seen-ledger
+    # which of the rest are new or retry-due (recording the attempt). Only those
+    # are surfaced, so we stop re-emitting sources that keep failing to ingest.
+    fresh = [d for d in descriptors if not await state.document_exists(d.source_kind, d.canonical_key)]
+    by_kind: dict[str, list[str]] = {}
+    for d in fresh:
+        by_kind.setdefault(d.source_kind, []).append(d.canonical_key)
+    surfaceable: dict[str, set[str]] = {}
+    for sk, keys in by_kind.items():
+        try:
+            surfaceable[sk] = await state.discovery_filter_new(sk, keys, retry_after_s=_RETRY_AFTER_S)
+        except Exception:  # noqa: BLE001 — if the ledger fails, don't block discovery
+            log.exception("collectors: novelty ledger for %s failed", sk)
+            surfaceable[sk] = set(keys)
+
     new: list[dict] = []
-    for d in descriptors:
-        if await state.document_exists(d.source_kind, d.canonical_key):
+    emitted: set[tuple[str, str]] = set()
+    for d in fresh:
+        key = (d.source_kind, d.canonical_key)
+        if key in emitted or d.canonical_key not in surfaceable.get(d.source_kind, set()):
             continue
+        emitted.add(key)
         await state.emit_corpus_event(
             "source.discovered",
             target_type="source",
