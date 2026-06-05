@@ -1,27 +1,69 @@
 @import "tailwindcss";
 
+/* =========================================================================
+   LabFoundry design tokens (Tailwind v4, CSS-first).
+   Tokens defined here generate utilities: --color-* -> bg-/text-/border-*,
+   --shadow-* -> shadow-*, --radius-* -> rounded-*. New surfaces consume these
+   so the airy "floorplan" aesthetic has a single source of truth.
+   ========================================================================= */
 @theme {
-  /* Light slate palette — matches the command-console mockup */
-  --color-bg-from: #e2e8f0;
-  --color-bg-to:   #eef2f7;
+  /* Canvas + surfaces */
+  --color-canvas:   #f5f8fc;
+  --color-surface:  #ffffff;
 
-  --color-text:        #0f172a;       /* slate-900 */
-  --color-text-dim:    #64748b;       /* slate-500 */
-  --color-text-faint:  #94a3b8;       /* slate-400 */
+  /* Ink */
+  --color-text:        #0f172a;       /* slate-900 — kept: referenced by html/body */
+  --color-ink:         #0f172a;
+  --color-ink-dim:     #64748b;       /* slate-500 */
+  --color-ink-faint:   #94a3b8;       /* slate-400 */
 
-  --color-pass:   #059669;            /* emerald-600 */
-  --color-warn:   #d97706;            /* amber-600  */
-  --color-info:   #2563eb;            /* blue-600   */
-  --color-slop:   #dc2626;            /* red-600    */
+  /* Semantic status accents. "live" green is the brand accent. */
+  --color-live:        #10b981;       /* emerald-500 */
+  --color-live-strong: #059669;       /* emerald-600 */
+  --color-warn:        #d97706;       /* amber-600  */
+  --color-info:        #2563eb;       /* blue-600   */
+  --color-danger:      #dc2626;       /* red-600    */
+  --color-idle:        #94a3b8;       /* slate-400  */
+  --color-seed:        #7c5cd6;       /* violet — direction/focus flows */
+
+  /* Elevation scale — soft, layered, never harsh. */
+  --shadow-card:   0 1px 2px rgb(15 23 42 / 0.04), 0 6px 18px rgb(15 23 42 / 0.05);
+  --shadow-panel:  0 8px 30px rgb(15 23 42 / 0.10);
+  --shadow-float:  0 16px 48px rgb(15 23 42 / 0.18);
+
+  /* Radii */
+  --radius-node:   1rem;
+  --radius-card:   1.25rem;
+  --radius-wing:   1.5rem;
 }
 
 html, body {
-  background: linear-gradient(180deg, #f8fafc, #eef2f7);
+  background: var(--color-canvas);
   background-image:
-    radial-gradient(circle at top left, #e2e8f0, transparent 32%),
+    radial-gradient(circle at 0% 0%, #e7eef8, transparent 38%),
+    radial-gradient(circle at 100% 0%, #eef1f7, transparent 34%),
     linear-gradient(180deg, #f8fafc, #eef2f7);
   color: var(--color-text);
   min-height: 100%;
+}
+
+/* Signature blueprint grid for the floorplan canvas (subtle, behind content). */
+.bg-blueprint {
+  background-color: #f6f9fd;
+  background-image:
+    linear-gradient(to right,  rgb(15 23 42 / 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(15 23 42 / 0.035) 1px, transparent 1px),
+    linear-gradient(to right,  rgb(15 23 42 / 0.05)  1px, transparent 1px),
+    linear-gradient(to bottom, rgb(15 23 42 / 0.05)  1px, transparent 1px);
+  background-size: 28px 28px, 28px 28px, 140px 140px, 140px 140px;
+}
+
+/* Frosted floating panel (legends, activity feed, controls over the canvas). */
+.glass-panel {
+  background: rgb(255 255 255 / 0.82);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-panel);
+  border: 1px solid rgb(226 232 240 / 0.9);
 }
 
 /* Pulsing dot for live indicators */
@@ -31,7 +73,17 @@ html, body {
 }
 .pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
 
+/* Gentle entrance for streaming list items (activity feed). */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.rise-in { animation: rise-in 0.35s ease-out both; }
+
 ::-webkit-scrollbar         { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track   { background: transparent; }
 ::-webkit-scrollbar-thumb   { background: #cbd5e1; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* React Flow: keep the canvas transparent so our blueprint grid shows through. */
+.react-flow__attribution { display: none; }

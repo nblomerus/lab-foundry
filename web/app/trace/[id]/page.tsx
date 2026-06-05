@@ -482,19 +482,17 @@ export default function TraceDetailPage({ params }: { params: Promise<{ id: stri
 
   if (!data) {
     return (
-      <main className="mx-auto max-w-7xl px-6 py-10 xl:pl-28">
-        <div className="text-sm text-slate-500">Loading session #{sessionId}…</div>
-      </main>
+      <div className="text-sm text-slate-500">Loading session #{sessionId}…</div>
     );
   }
   if (!data.session) {
     return (
-      <main className="mx-auto max-w-7xl px-6 py-10 xl:pl-28">
+      <div>
         <div className="text-sm text-slate-500">Session #{sessionId} not found.</div>
         <Link href="/trace" className="mt-4 inline-flex items-center gap-2 text-sm text-blue-700 hover:underline">
           <ArrowLeft className="h-4 w-4" /> Back to sessions
         </Link>
-      </main>
+      </div>
     );
   }
 
@@ -505,7 +503,7 @@ export default function TraceDetailPage({ params }: { params: Promise<{ id: stri
     s.status === "failed" ? "red" : "default";
 
   return (
-    <main className="mx-auto max-w-7xl space-y-6 px-6 py-10 xl:pl-28">
+    <div className="space-y-6">
       <div className="flex items-end justify-between gap-6">
         <div>
           <Link href="/trace" className="mb-2 inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-950">
@@ -576,6 +574,6 @@ export default function TraceDetailPage({ params }: { params: Promise<{ id: stri
           onClose={() => setSelected(null)}
         />
       )}
-    </main>
+    </div>
   );
 }

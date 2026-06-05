@@ -20,6 +20,7 @@ python-dotenv
 fastapi
 uvicorn[standard]
 websockets
+psutil  # /ops/host gauges (CPU/memory/disk) for the Operations wing
 
 # Dev
 ruff

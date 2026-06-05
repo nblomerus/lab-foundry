@@ -3,18 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { StreamMessage } from "./types";
 
-// Live event stream. We connect straight to the FastAPI backend's WS port:
-// Next.js dev rewrites proxy HTTP but NOT WebSocket upgrades, so a same-origin
-// /ws/events through :8088 silently fails to connect (the floorplan then looks
-// idle even while the lab is busy). Connecting to the API host:port directly
-// sidesteps the broken proxy. Override with NEXT_PUBLIC_WS_URL for other setups
-// (a real WS-proxying server, or a remote host); NEXT_PUBLIC_WS_PORT defaults
-// to the API's 8503.
-const WS_PORT = process.env.NEXT_PUBLIC_WS_PORT || "8503";
+// Live event stream — connect SAME-ORIGIN through the Next.js `/ws/events`
+// rewrite (next.config proxies the WebSocket upgrade to the API). This works
+// wherever the page is served — localhost, a LAN IP, or behind a single
+// forwarded/TLS-terminating port — without the browser needing to reach :8503
+// directly (which fails cross-origin and leaves the floorplan idle / "stream
+// offline"). Override with NEXT_PUBLIC_WS_URL for setups without the proxy.
 const WS_URL =
   typeof window !== "undefined"
     ? process.env.NEXT_PUBLIC_WS_URL ||
-      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${WS_PORT}/ws/events`
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/events`
     : "";
 
 /**

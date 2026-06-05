@@ -366,6 +366,7 @@ export interface MimirPanel {
   trust_ladder: Record<string, number>;               // e.g. { preprint, official_repo, web_reputable, web_unknown, quarantined }
   pipeline_today: { discovered: number; parsed: number; ingested: number; quarantined: number };
   source_mix: { kind: string; count: number; pct: number }[];   // kinds: arxiv, web, github, dataset
+  focus_topics?: string[];                                       // the lab's global research agenda (latest library.trends)
   recent_certifications: { title: string | null; source_kind: string; arxiv_id: string | null; canonical_key: string | null; at: string | null }[];
   requests: { requester: string; ask: string | null; status: string; at: string | null }[];
 }
@@ -401,6 +402,33 @@ export interface CorpusSearchResult {
   status: string;
   query: string;
   hits: CorpusHit[];
+  error?: string;
+}
+
+// ---- Activity timeseries (sparklines + 24h deltas) ----
+export type TimeseriesMetric = "discovered" | "parsed" | "ingested" | "certified" | "quarantined";
+export interface TimeseriesPoint { t: string; value: number }
+export interface TimeseriesResult {
+  status: string;
+  metric: string;
+  kind: string | null;
+  bucket: "hour" | "day";
+  points: TimeseriesPoint[];
+  error?: string;
+}
+
+// ---- Host / ops gauges ----
+export interface HostStats {
+  status: "ok" | "unavailable";
+  cpu_percent?: number;
+  cpu_count?: number;
+  load_avg?: number[];
+  memory_percent?: number;
+  memory_used_gb?: number;
+  memory_total_gb?: number;
+  disk_percent?: number;
+  disk_used_gb?: number;
+  disk_total_gb?: number;
   error?: string;
 }
 
@@ -463,6 +491,14 @@ export const api = {
   scoutPanel: (kind: string) => jget<ScoutPanel>(`/knowledge/scout?kind=${encodeURIComponent(kind)}`),
   gatePanel: (kind?: string) => jget<GatePanel>(kind ? `/knowledge/gate?kind=${encodeURIComponent(kind)}` : "/knowledge/gate"),
   corpusSearch: (q: string, k = 6) => jget<CorpusSearchResult>(`/knowledge/search?q=${encodeURIComponent(q)}&k=${k}`),
+  timeseries: (metric: TimeseriesMetric, opts: { kind?: string; bucket?: "hour" | "day"; points?: number } = {}) => {
+    const q = new URLSearchParams({ metric });
+    if (opts.kind) q.set("kind", opts.kind);
+    if (opts.bucket) q.set("bucket", opts.bucket);
+    if (opts.points) q.set("points", String(opts.points));
+    return jget<TimeseriesResult>(`/knowledge/timeseries?${q.toString()}`);
+  },
+  hostStats: () => jget<HostStats>("/ops/host"),
   agentCatalog: () => jget<AgentCatalog>("/agentlab/agents"),
   agentRun: (body: { agent: string; mode: string; claim_id?: number | null; inputs?: Record<string, string> }) =>
     jpost<AgentRunResult>("/agentlab/run", body),
