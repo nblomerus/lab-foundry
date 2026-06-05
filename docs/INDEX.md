@@ -3,6 +3,11 @@
 Reading order for understanding LabFoundry's design. These are working design
 documents (dense, opinionated); the code is the source of truth where they differ.
 
+## Current-state reference (read this first)
+0. [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) — what is **actually built and
+   running** today (scouts → Mimir's gates → the Library, the dashboard, the API,
+   the data model). The docs below are *design intent*; this one is current truth.
+
 ## Start here
 1. [REAL_LAB_OPERATING_MODEL.md](REAL_LAB_OPERATING_MODEL.md) — the lab operating model: PI decomposition, the deliberative planner, the novelty/quality gate + peer-review panel, the shared termination model, and the expectation→outcome→lessons loop.
 2. [AGENT_OPERATING_MODEL.md](AGENT_OPERATING_MODEL.md) — the two interaction planes (ungated knowledge vs gated delegation) and the common multi-step agent contract.
