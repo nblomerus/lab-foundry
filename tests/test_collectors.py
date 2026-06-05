@@ -38,12 +38,16 @@ def _descriptors() -> list[SourceDescriptor]:
 async def _clean(db):
     async with db.pool.acquire() as conn:
         await conn.execute("DELETE FROM documents WHERE source_kind = 'test_arxiv'")
+        # isolate the stateful-discovery tables so the seen-ledger / cursors from
+        # one test don't suppress another's emissions.
+        await conn.execute("DELETE FROM discovery_seen")
+        await conn.execute("DELETE FROM discovery_cursors")
 
 
 async def test_sweep_emits_source_discovered_for_new(db, monkeypatch):
     import agents.mimir.collectors as collectors
 
-    async def _fake_scout(topics, per_topic=5):
+    async def _fake_scout(topics, per_topic=5, **_):
         return _descriptors()
 
     monkeypatch.setitem(collectors._SCOUTS, "arxiv", _fake_scout)
@@ -66,7 +70,7 @@ async def test_sweep_emits_source_discovered_for_new(db, monkeypatch):
 async def test_sweep_skips_already_ingested(db, monkeypatch):
     import agents.mimir.collectors as collectors
 
-    async def _fake_scout(topics, per_topic=5):
+    async def _fake_scout(topics, per_topic=5, **_):
         return _descriptors()
 
     monkeypatch.setitem(collectors._SCOUTS, "arxiv", _fake_scout)
@@ -88,7 +92,7 @@ async def test_sweep_skips_already_ingested(db, monkeypatch):
 async def test_sweep_emits_trends_digest(db, monkeypatch):
     import agents.mimir.collectors as collectors
 
-    async def _fake_scout(topics, per_topic=5):
+    async def _fake_scout(topics, per_topic=5, **_):
         return _descriptors()
 
     monkeypatch.setitem(collectors._SCOUTS, "arxiv", _fake_scout)

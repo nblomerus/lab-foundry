@@ -602,7 +602,10 @@ async def search_arxiv(
         owns_client = client is None
         if owns_client:
             client = httpx.AsyncClient(
-                timeout=HTTP_TIMEOUT,
+                # Short timeout: when arXiv is rate-limiting us it tarpits the
+                # connection (hangs), so fail fast rather than blocking the sweep
+                # ~30s per topic before the cooldown engages.
+                timeout=httpx.Timeout(8.0),
                 headers={"User-Agent": USER_AGENT},
                 follow_redirects=True,
             )

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 import asyncpg
@@ -1316,6 +1316,82 @@ class PostgresClient:
                 source_kind,
                 canonical_key,
             )
+
+    async def discovery_offset(
+        self,
+        source_kind: str,
+        topic: str,
+        *,
+        page_size: int,
+        refresh_after_s: float,
+        max_offset: int,
+    ) -> int:
+        """The pagination offset a scout should fetch THIS sweep for (source, topic),
+        and advance the cursor (migration 003). Alternates two modes so a scout
+        never re-fetches the same slice:
+
+          REFRESH — if we haven't grabbed the newest in `refresh_after_s`, fetch
+          offset 0 (catch new submissions) and stamp last_refreshed_at.
+          DEEPEN  — otherwise fetch the stored offset and advance it by
+          `page_size`, wrapping to 0 past `max_offset` (walk the back-catalogue).
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT offset_n, last_refreshed_at FROM discovery_cursors "
+                "WHERE source_kind = $1 AND topic = $2 FOR UPDATE",
+                source_kind,
+                topic,
+            )
+            offset_n = row["offset_n"] if row else 0
+            last_ref = row["last_refreshed_at"] if row else None
+            refresh = last_ref is None or (datetime.now(UTC) - last_ref).total_seconds() >= refresh_after_s
+            if refresh:
+                use_offset, new_offset_n, new_last_ref = 0, offset_n, datetime.now(UTC)
+            else:
+                use_offset = offset_n
+                new_offset_n = 0 if (offset_n + page_size) > max_offset else offset_n + page_size
+                new_last_ref = last_ref
+            await conn.execute(
+                "INSERT INTO discovery_cursors (source_kind, topic, offset_n, last_refreshed_at, updated_at) "
+                "VALUES ($1, $2, $3, $4, now()) "
+                "ON CONFLICT (source_kind, topic) DO UPDATE SET "
+                "offset_n = EXCLUDED.offset_n, last_refreshed_at = EXCLUDED.last_refreshed_at, updated_at = now()",
+                source_kind,
+                topic,
+                new_offset_n,
+                new_last_ref,
+            )
+            return use_offset
+
+    async def discovery_filter_new(self, source_kind: str, keys: list[str], *, retry_after_s: float) -> set[str]:
+        """The novelty gate (migration 003). Given candidate canonical_keys (already
+        known absent from the corpus), return the subset worth surfacing — never
+        seen, or last attempted longer than `retry_after_s` ago — and record the
+        attempt. Sources attempted within the window are skipped, so a source that
+        failed to ingest retries on a schedule rather than spinning every sweep."""
+        if not keys:
+            return set()
+        async with self.pool.acquire() as conn:
+            recent = {
+                r["canonical_key"]
+                for r in await conn.fetch(
+                    "SELECT canonical_key FROM discovery_seen WHERE source_kind = $1 "
+                    "AND canonical_key = ANY($2) "
+                    "AND last_attempt_at > now() - ($3 * interval '1 second')",
+                    source_kind,
+                    keys,
+                    retry_after_s,
+                )
+            }
+            due = [k for k in keys if k not in recent]
+            if due:
+                await conn.executemany(
+                    "INSERT INTO discovery_seen (source_kind, canonical_key) VALUES ($1, $2) "
+                    "ON CONFLICT (source_kind, canonical_key) DO UPDATE SET "
+                    "attempts = discovery_seen.attempts + 1, last_attempt_at = now()",
+                    [(source_kind, k) for k in due],
+                )
+            return set(due)
 
     async def count_acquires_today(self, requester: str) -> int:
         """Count `acquire.requested` events from `requester` since midnight UTC —

@@ -138,16 +138,17 @@ async def scout_arxiv(
 # -------------------------------------------------------------------------
 
 
-async def scout_web(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
+async def scout_web(topics: list[str], per_topic: int = 5, *, start: int = 0) -> list[SourceDescriptor]:
     """Scout the open web (SearXNG) for pages on `topics`. canonical_key is the
-    URL. PURE: returns descriptors only (the collector emits/dedupes)."""
+    URL. `start` pages deeper (SearXNG `pageno`). PURE: returns descriptors only."""
     seen: dict[str, SourceDescriptor] = {}
+    pageno = start // max(per_topic, 1) + 1
     async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": _SCOUT_UA}) as client:
         for topic in topics:
             try:
                 resp = await client.get(
                     f"{_SEARXNG_URL}/search",
-                    params={"q": topic, "format": "json", "categories": "general"},
+                    params={"q": topic, "format": "json", "categories": "general", "pageno": pageno},
                 )
                 if resp.status_code != 200:
                     # A non-200 means SearXNG is down, rate-limiting, or — as we
@@ -186,15 +187,17 @@ async def scout_web(topics: list[str], per_topic: int = 5) -> list[SourceDescrip
 # -------------------------------------------------------------------------
 
 
-async def scout_github(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
+async def scout_github(topics: list[str], per_topic: int = 5, *, start: int = 0) -> list[SourceDescriptor]:
     """Scout GitHub for repos matching `topics` (sorted by stars). canonical_key
-    is 'owner/repo'. PURE: returns descriptors only. Best-effort."""
+    is 'owner/repo'. `start` pages deeper (GitHub `page`). PURE: returns
+    descriptors only. Best-effort."""
     headers = {"Accept": "application/vnd.github+json", "User-Agent": _SCOUT_UA}
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     seen: dict[str, SourceDescriptor] = {}
+    page = start // max(per_topic, 1) + 1
     async with httpx.AsyncClient(timeout=8.0, headers=headers) as client:
         for i, topic in enumerate(topics):
             if i:
@@ -202,7 +205,7 @@ async def scout_github(topics: list[str], per_topic: int = 5) -> list[SourceDesc
             try:
                 resp = await client.get(
                     f"{_GITHUB_API}/search/repositories",
-                    params={"q": topic, "sort": "stars", "per_page": per_topic},
+                    params={"q": topic, "sort": "stars", "per_page": per_topic, "page": page},
                 )
                 items = resp.json().get("items", []) if resp.status_code == 200 else []
             except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
@@ -232,11 +235,14 @@ async def scout_github(topics: list[str], per_topic: int = 5) -> list[SourceDesc
 # -------------------------------------------------------------------------
 
 
-async def scout_dataset(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
+async def scout_dataset(topics: list[str], per_topic: int = 5, *, start: int = 0) -> list[SourceDescriptor]:
     """Scout the HuggingFace dataset hub for datasets matching `topics`, ranked
     by downloads (popularity = the field's current data landscape). canonical_key
-    is the HF dataset id; url is the dataset page. PURE: returns descriptors only.
-    Best-effort: empty list on any failure, one bad topic never sinks the sweep."""
+    is the HF dataset id; url is the dataset page. `start` is accepted for a
+    uniform scout interface but the HF list API has no stable offset, so this
+    scout stays refresh-oriented (top-by-downloads). PURE: returns descriptors
+    only. Best-effort: empty list on any failure, one bad topic never sinks it."""
+    _ = start  # HF list API doesn't paginate by offset; cursor stays at refresh
     seen: dict[str, SourceDescriptor] = {}
     async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": _SCOUT_UA}) as client:
         for topic in topics:
@@ -275,19 +281,21 @@ async def scout_dataset(topics: list[str], per_topic: int = 5) -> list[SourceDes
 # -------------------------------------------------------------------------
 
 
-async def scout_openml(topics: list[str], per_topic: int = 5) -> list[SourceDescriptor]:
-    """Scout OpenML for benchmark datasets matching `topics` by name. Best-effort:
-    empty list on any failure, one bad topic never sinks the sweep."""
+async def scout_openml(topics: list[str], per_topic: int = 5, *, start: int = 0) -> list[SourceDescriptor]:
+    """Scout OpenML for benchmark datasets matching `topics` by name. `start` pages
+    deeper (OpenML `offset`). Best-effort: empty list on any failure, one bad topic
+    never sinks the sweep."""
     seen: dict[str, SourceDescriptor] = {}
+    off = f"/offset/{start}" if start else ""
     async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": _SCOUT_UA}) as client:
         for topic in topics:
             # OpenML datasets are named things (mnist, cifar, …), not abstract
             # subfields, so match the topic's most distinctive word against names.
             kw = next((w for w in topic.split() if w.isalpha() and len(w) > 3), "")
             url = (
-                f"{_OPENML_API}/data/list/data_name/{kw}/status/active/limit/{per_topic}"
+                f"{_OPENML_API}/data/list/data_name/{kw}/status/active/limit/{per_topic}{off}"
                 if kw
-                else f"{_OPENML_API}/data/list/status/active/limit/{per_topic}"
+                else f"{_OPENML_API}/data/list/status/active/limit/{per_topic}{off}"
             )
             try:
                 resp = await client.get(url)
