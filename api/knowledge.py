@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import asyncpg
 from fastapi import APIRouter, Request
@@ -229,6 +230,9 @@ async def mimir_panel(request: Request) -> dict:
                 "WHERE event_type IN ('acquire.requested', 'acquire.fulfilled', 'acquire.rejected') "
                 "ORDER BY emitted_at DESC LIMIT 6"
             )
+            trends_row = await conn.fetchrow(
+                "SELECT payload FROM events WHERE event_type = 'library.trends' ORDER BY emitted_at DESC LIMIT 1"
+            )
     except asyncpg.UndefinedTableError:
         return {"status": "planned"}
     except Exception as e:  # noqa: BLE001 — never 500 the dashboard
@@ -255,6 +259,7 @@ async def mimir_panel(request: Request) -> dict:
             "quarantined": ev_today.get("mimir.ingest_blocked", 0),
         },
         "source_mix": [{"kind": r["source_kind"], "count": r["c"], "pct": round(100 * r["c"] / total_mix)} for r in mix],
+        "focus_topics": (_payload(trends_row["payload"]).get("topics") if trends_row else []) or [],
         "recent_certifications": [
             {
                 "title": r["title"],
@@ -270,6 +275,22 @@ async def mimir_panel(request: Request) -> dict:
 
 
 _SCOUT_KINDS = {"arxiv", "web", "github", "dataset", "openml"}
+
+
+# Each discovered source records the topic that surfaced it in `why`, formatted
+# per scout (e.g. "arxiv topic: continual learning", "openml dataset (topic: X)",
+# "dataset topic: Y (HF downloads=N)"). Pull out the clean topic; drop claim-like
+# sentences and noise (anything without "topic:" or longer than a short phrase).
+def _parse_topic(why: str | None) -> str | None:
+    if not why:
+        return None
+    m = re.search(r"topic:\s*(.+)", why)
+    if not m:
+        return None
+    topic = re.sub(r"\s*\(.*?\)\s*$", "", m.group(1)).strip().rstrip(")").strip()
+    if not topic or len(topic) > 48:
+        return None
+    return topic
 
 
 @router.get("/scout")
@@ -307,9 +328,14 @@ async def scout_panel(request: Request, kind: str) -> dict:
                 """,
                 kind,
             )
-            trends = await conn.fetchrow(
-                "SELECT payload, emitted_at FROM events WHERE event_type = 'library.trends' "
-                "ORDER BY emitted_at DESC LIMIT 1"
+            # Per-scout topics: the distinct topics THIS scout recently surfaced
+            # (from its own source.discovered events), not the global agenda.
+            searched = await conn.fetch(
+                "SELECT payload->'source'->>'why' AS why, emitted_at FROM events "
+                "WHERE event_type = 'source.discovered' "
+                "AND payload->'source'->>'source_kind' = $1 "
+                "ORDER BY emitted_at DESC LIMIT 80",
+                kind,
             )
     except asyncpg.UndefinedTableError:
         return {"status": "planned", "source_kind": kind}
@@ -318,20 +344,22 @@ async def scout_panel(request: Request, kind: str) -> dict:
         return {"status": "error", "error": str(e), "source_kind": kind}
 
     topics: list[str] = []
-    searched_at = None
-    if trends:
-        payload = trends["payload"]
-        if isinstance(payload, str):
-            payload = json.loads(payload) if payload else {}
-        topics = (payload or {}).get("topics") or []
-        searched_at = trends["emitted_at"].isoformat() if trends["emitted_at"] else None
+    seen_lower: set[str] = set()
+    for r in searched:
+        topic = _parse_topic(r["why"])
+        if topic and topic.lower() not in seen_lower:
+            seen_lower.add(topic.lower())
+            topics.append(topic)
+        if len(topics) >= 8:
+            break
+    searched_at = searched[0]["emitted_at"].isoformat() if searched and searched[0]["emitted_at"] else None
 
     return {
         "status": "ok",
         "source_kind": kind,
         "in_corpus": in_corpus,
         "added_today": added_today,
-        "last_searched": {"topics": topics[:12], "at": searched_at},
+        "last_searched": {"topics": topics, "at": searched_at},
         "recent": [
             {
                 "title": r["title"],
@@ -506,4 +534,99 @@ async def knowledge_search(q: str = "", k: int = 6) -> dict:
             }
             for h in hits
         ],
+    }
+
+
+# Each displayable metric maps to the bus event whose hourly count is the trend.
+# 'certified' is an alias of document.ingested (Mimir certifies on ingest).
+_METRIC_EVENT = {
+    "discovered": "source.discovered",
+    "parsed": "document.parsed",
+    "ingested": "document.ingested",
+    "certified": "document.ingested",
+    "quarantined": "mimir.ingest_blocked",
+}
+# Document-centric metrics scope by kind via a join on target_id (the document);
+# 'discovered' scopes via the nested payload source kind (like the gate panel).
+_DOC_JOIN_METRICS = {"parsed", "ingested", "certified", "quarantined"}
+
+
+@router.get("/timeseries")
+async def knowledge_timeseries(
+    request: Request,
+    metric: str = "ingested",
+    kind: str | None = None,
+    bucket: str = "hour",
+    points: int = 24,
+) -> dict:
+    """Gap-filled activity series from the events table — backs the scout
+    sparklines and the KPI/storage 24h deltas. Buckets (hour|day) are
+    generated continuously so empty hours render as zeros, not gaps. Optional
+    `kind` scopes to one scout's sources. Real data; degrades to
+    status='error'/[] rather than 500-ing the dashboard.
+
+        GET /knowledge/timeseries?metric=ingested&kind=arxiv&bucket=hour&points=24
+    """
+    metric = (metric or "").strip().lower()
+    if metric not in _METRIC_EVENT:
+        return {"status": "error", "error": f"unknown metric {metric!r}", "points": []}
+    bucket = (bucket or "hour").strip().lower()
+    if bucket not in ("hour", "day"):
+        return {"status": "error", "error": f"unknown bucket {bucket!r}", "points": []}
+    kind = (kind or "").strip().lower() or None
+    if kind and kind not in _SCOUT_KINDS:
+        return {"status": "error", "error": f"unknown kind {kind!r}", "points": []}
+
+    n = min(max(points, 2), 168)
+    event_type = _METRIC_EVENT[metric]
+    unit = bucket  # validated to 'hour' | 'day' — safe to inline below
+
+    join = ""
+    kind_clause = ""
+    args: list = []
+    if kind:
+        if metric in _DOC_JOIN_METRICS:
+            join = "JOIN documents d ON d.id = e.target_id"
+            kind_clause = "AND d.source_kind = $1"
+        else:  # discovered — kind lives in the event payload
+            kind_clause = "AND e.payload->'source'->>'source_kind' = $1"
+        args.append(kind)
+
+    # Only `kind` is user-controlled (bound as $1); metric/bucket/points are
+    # validated against allowlists / clamped, so inlining them is injection-safe.
+    sql = f"""
+        WITH buckets AS (
+            SELECT generate_series(
+                date_trunc('{unit}', now()) - ({n} - 1) * interval '1 {unit}',
+                date_trunc('{unit}', now()),
+                interval '1 {unit}'
+            ) AS t
+        ),
+        hits AS (
+            SELECT date_trunc('{unit}', e.emitted_at) AS t, COUNT(*) AS c
+            FROM events e {join}
+            WHERE e.event_type = '{event_type}'
+              AND e.emitted_at >= date_trunc('{unit}', now()) - ({n} - 1) * interval '1 {unit}'
+              {kind_clause}
+            GROUP BY 1
+        )
+        SELECT b.t AS t, COALESCE(h.c, 0)::int AS value
+        FROM buckets b LEFT JOIN hits h ON h.t = b.t
+        ORDER BY b.t
+    """
+    pool = request.app.state.pool
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+    except asyncpg.UndefinedTableError:
+        return {"status": "planned", "metric": metric, "kind": kind, "bucket": bucket, "points": []}
+    except Exception as e:  # noqa: BLE001 — never 500 the dashboard
+        log.warning("knowledge timeseries (metric=%s kind=%s) failed: %s", metric, kind, e)
+        return {"status": "error", "error": str(e), "metric": metric, "kind": kind, "bucket": bucket, "points": []}
+    return {
+        "status": "ok",
+        "metric": metric,
+        "kind": kind,
+        "bucket": bucket,
+        "points": [{"t": r["t"].isoformat(), "value": r["value"]} for r in rows],
     }

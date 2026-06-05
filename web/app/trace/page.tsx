@@ -63,7 +63,7 @@ export default function TracePage() {
   }, [data]);
 
   return (
-    <main className="mx-auto max-w-7xl space-y-8 px-6 py-10 xl:pl-28">
+    <div className="space-y-8">
       <div className="flex items-end justify-between gap-6">
         <div>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Trace</h1>
@@ -153,7 +153,7 @@ export default function TracePage() {
           </table>
         </div>
       </Card>
-    </main>
+    </div>
   );
 }
 

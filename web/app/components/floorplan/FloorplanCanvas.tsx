@@ -1,0 +1,218 @@
+"use client";
+
+// The floorplan centerpiece, rebuilt on React Flow: wings + agent/storage/ops
+// nodes + activity-gated flow edges, with click-to-open inspectors and chrome
+// overlays (flow legend, status legend, zoom controls, live-activity feed).
+// Must be rendered inside <EventStreamProvider> (it reads the shared stream).
+
+import { useCallback, useMemo, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { ReactFlow, ReactFlowProvider, Controls, Panel, type Node } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import type { Snapshot } from "../../lib/types";
+import { cx } from "../ui";
+import { ActivityFeed } from "../ActivityFeed";
+import { NODE_DEFS, EDGE_DEFS, type NodeDef } from "./topology";
+import { NODE_TYPES, type FloorNodeData, type Selected } from "./nodes";
+import { EDGE_TYPES } from "./FlowEdge";
+import { type FloorData } from "./useFloorData";
+import { useFlowHeat } from "./useFlowHeat";
+import { GateInspector, LibraryInspector, MimirInspector, ScoutInspector } from "./inspectors";
+
+function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: (s: Selected) => void): FloorNodeData {
+  const base: FloorNodeData = { def, onOpen };
+  switch (def.type) {
+    case "scout":
+      return { ...base, panel: fd.scouts[def.sourceKind ?? ""] ?? null, series: fd.scoutSeries[def.sourceKind ?? ""] ?? [] };
+    case "mimir":
+      return { ...base, mimir: fd.pulse.mimir, stats: fd.pulse.stats, priority };
+    case "storage":
+      return { ...base, stats: fd.pulse.stats };
+    case "ops":
+      return { ...base, host: fd.pulse.host, costs: fd.costs, mimir: fd.pulse.mimir };
+    default:
+      return base;
+  }
+}
+
+function FlowLegend({ connected }: { connected: boolean }) {
+  const flows: [string, string][] = [["Intake", "#2c5fb8"], ["Knowledge", "#10b981"], ["Planned", "#9aa3ad"]];
+  const statuses: [string, string][] = [["Live", "bg-emerald-500"], ["Busy", "bg-amber-500"], ["Idle", "bg-slate-400"], ["Offline", "bg-slate-300"]];
+  return (
+    <div className="glass-panel rounded-card px-3 py-2.5 text-[10px]">
+      <div className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Flows</div>
+      <div className="flex flex-col gap-1">
+        {flows.map(([label, c]) => (
+          <span key={label} className="flex items-center gap-1.5 text-slate-500">
+            <span className="inline-block h-0.5 w-5 rounded-full" style={{ background: c }} /> {label}
+          </span>
+        ))}
+      </div>
+      <div className="mt-2 mb-1 font-semibold uppercase tracking-wide text-slate-400">Status</div>
+      <div className="flex flex-wrap gap-x-2.5 gap-y-1">
+        {statuses.map(([label, c]) => (
+          <span key={label} className="flex items-center gap-1 text-slate-500">
+            <span className={cx("inline-block h-1.5 w-1.5 rounded-full", c)} /> {label}
+          </span>
+        ))}
+      </div>
+      <div className="mt-2 flex items-center gap-1 text-slate-400">
+        <span className={cx("inline-block h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 pulse-dot" : "bg-slate-300")} />
+        {connected ? "stream live" : "stream offline"}
+      </div>
+    </div>
+  );
+}
+
+function InspectorShell({ title, planned, onClose, children }: { title: string; planned?: boolean; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-semibold tracking-tight text-slate-950">{title}</h3>
+          <span className={cx("rounded-full border px-2 py-0.5 text-[11px] font-semibold", planned ? "border-slate-200 bg-slate-50 text-slate-500" : "border-emerald-200 bg-emerald-50 text-emerald-700")}>
+            {planned ? "Planned" : "Live"}
+          </span>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50">Close</button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot | null; floorData: FloorData; className?: string }) {
+  const { hot, connected, events } = useFlowHeat();
+  const [selected, setSelected] = useState<Selected | null>(null);
+  const stats = floorData.pulse.stats;
+
+  const priority = useMemo(() => {
+    const focus = floorData.pulse.mimir?.focus_topics;
+    return focus && focus.length ? focus.slice(0, 2).join(", ") : null;
+  }, [floorData.pulse.mimir]);
+
+  const onOpen = useCallback((s: Selected) => setSelected(s), []);
+
+  const nodes = useMemo<Node<FloorNodeData>[]>(
+    () =>
+      NODE_DEFS.map((def) => {
+        // Backdrops (wings + the Library container) sit behind and don't capture
+        // pointer events, so the storage cards on top stay clickable and the
+        // canvas still pans over them.
+        const backdrop = def.type === "wing" || def.type === "librarybox";
+        return {
+          id: def.id,
+          type: def.type,
+          position: { x: def.x, y: def.y },
+          style: backdrop ? { width: def.w, height: def.h, pointerEvents: "none" as const } : { width: def.w, height: def.h },
+          draggable: false,
+          selectable: !backdrop,
+          connectable: false,
+          zIndex: backdrop ? 0 : 1,
+          data: nodeData(def, floorData, priority, onOpen),
+        };
+      }),
+    [floorData, priority, onOpen],
+  );
+
+  const edges = useMemo(
+    () =>
+      EDGE_DEFS.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        sourceHandle: e.sourceHandle,
+        targetHandle: e.targetHandle,
+        type: "flow",
+        data: { kind: e.kind, live: e.live, hot: hot.has(e.id) },
+      })),
+    [hot],
+  );
+
+  const onNodeClick = useCallback((_: React.MouseEvent, node: Node<FloorNodeData>) => {
+    const def = node.data?.def;
+    if (!def?.inspector) return;
+    switch (def.inspector) {
+      case "scout": setSelected({ kind: "scout", sourceKind: def.sourceKind ?? "", title: def.title ?? "Scout" }); break;
+      case "mimir": setSelected({ kind: "mimir", title: def.title ?? "Mimir" }); break;
+      case "library": setSelected({ kind: "library", title: "Library" }); break;
+      case "info": setSelected({ kind: "info", title: def.title ?? "", sub: def.sub, description: def.description }); break;
+      case "gate": setSelected({ kind: "gate", scope: "all", title: def.title ?? "Gate" }); break;
+    }
+  }, []);
+
+  return (
+    <div className={cx("bg-blueprint relative overflow-hidden rounded-wing border border-slate-200 shadow-card", className ?? "h-[calc(100vh-15rem)] min-h-[620px]")}>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={NODE_TYPES}
+        edgeTypes={EDGE_TYPES}
+        onNodeClick={onNodeClick as never}
+        onPaneClick={() => setSelected(null)}
+        fitView
+        fitViewOptions={{ padding: 0.1 }}
+        minZoom={0.3}
+        maxZoom={1.6}
+        proOptions={{ hideAttribution: true }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        zoomOnScroll={false}
+        panOnScroll={false}
+        preventScrolling={false}
+        panOnDrag
+        zoomOnPinch
+        elementsSelectable
+      >
+        <Controls showInteractive={false} position="bottom-left" className="!shadow-panel !rounded-xl" />
+        <Panel position="top-left"><FlowLegend connected={connected} /></Panel>
+        <Panel position="bottom-right">
+          <div className="glass-panel flex h-72 w-80 flex-col rounded-card p-3">
+            <ActivityFeed limit={12} className="h-full" />
+          </div>
+        </Panel>
+      </ReactFlow>
+
+      <AnimatePresence>
+        {selected && (
+          <motion.aside
+            key="inspector"
+            initial={{ x: "100%", opacity: 0.6 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: "100%", opacity: 0.4 }}
+            transition={{ type: "spring", stiffness: 280, damping: 32 }}
+            className="absolute right-0 top-0 z-20 h-full w-full max-w-[440px] overflow-y-auto border-l border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur"
+          >
+            {selected.kind === "gate" ? (
+              <GateInspector scope={selected.scope} title={selected.title} onClose={() => setSelected(null)} />
+            ) : selected.kind === "mimir" ? (
+              <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
+                <MimirInspector knowledge={stats} events={events} />
+              </InspectorShell>
+            ) : selected.kind === "library" ? (
+              <InspectorShell title="Library" onClose={() => setSelected(null)}>
+                <LibraryInspector knowledge={stats} snapshot={snapshot} />
+              </InspectorShell>
+            ) : selected.kind === "scout" ? (
+              <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
+                <ScoutInspector kind={selected.sourceKind} corpus={stats?.corpus} />
+              </InspectorShell>
+            ) : (
+              <InspectorShell title={selected.title} planned onClose={() => setSelected(null)}>
+                <p className="text-sm leading-snug text-slate-600">{selected.description ?? "Planned — activates with the research workflow."}</p>
+              </InspectorShell>
+            )}
+          </motion.aside>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+export function FloorplanCanvas({ snapshot, floorData, className }: { snapshot: Snapshot | null; floorData: FloorData; className?: string }) {
+  return (
+    <ReactFlowProvider>
+      <FloorplanInner snapshot={snapshot} floorData={floorData} className={className} />
+    </ReactFlowProvider>
+  );
+}

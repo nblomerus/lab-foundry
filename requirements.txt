@@ -164,6 +164,8 @@ protobuf==6.33.6
     #   opentelemetry-proto
 pycparser==3.0
     # via cffi
+psutil==7.2.2
+    # via -r requirements.in
 pydantic==2.13.4
     # via
     #   -r requirements.in
