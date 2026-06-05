@@ -431,7 +431,19 @@ async def web_fetch_many(
 # query-keyed metadata and have a different shape/lifecycle.
 # -------------------------------------------------------------------------
 
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
+
+# arXiv's API is strict (~1 request / 3s) and tarpits sustained abuse — it drops
+# our HTTPS connections (curl shows HTTP 000 / hangs) once we exceed it. So:
+#   * serialize ALL arXiv calls behind one lock, spaced by _ARXIV_MIN_INTERVAL;
+#   * when it starts failing, back off for _ARXIV_COOLDOWN so it can unblock us
+#     (hammering a tarpit only extends the block).
+_ARXIV_MIN_INTERVAL = float(os.environ.get("ARXIV_MIN_INTERVAL_S", "3.5"))
+_ARXIV_COOLDOWN = float(os.environ.get("ARXIV_COOLDOWN_S", "900"))
+_arxiv_lock = asyncio.Lock()
+_arxiv_last_call = 0.0
+_arxiv_cooldown_until = 0.0
+_arxiv_fail_streak = 0
 
 # Atom + arXiv XML namespaces, used to resolve qualified element names.
 _ATOM_NS = {
@@ -577,20 +589,42 @@ async def search_arxiv(
     )
     url = f"{ARXIV_API_URL}?{params}"
 
-    owns_client = client is None
-    if owns_client:
-        client = httpx.AsyncClient(
-            timeout=HTTP_TIMEOUT,
-            headers={"User-Agent": USER_AGENT},
-            follow_redirects=True,
-        )
-    try:
-        resp = await client.get(url)
-    except (httpx.HTTPError, httpx.InvalidURL) as e:
-        log.warning("search_arxiv(%r) failed: %s", query, e)
+    global _arxiv_last_call, _arxiv_cooldown_until, _arxiv_fail_streak
+    if time.monotonic() < _arxiv_cooldown_until:
+        # Backing off — arXiv rate-limited us; hammering only extends the block.
         return []
-    finally:
+
+    async with _arxiv_lock:
+        gap = _ARXIV_MIN_INTERVAL - (time.monotonic() - _arxiv_last_call)
+        if gap > 0:
+            await asyncio.sleep(gap)
+        _arxiv_last_call = time.monotonic()
+        owns_client = client is None
         if owns_client:
-            await client.aclose()
+            client = httpx.AsyncClient(
+                timeout=HTTP_TIMEOUT,
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=True,
+            )
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
+            _arxiv_fail_streak += 1
+            if _arxiv_fail_streak >= 3:
+                _arxiv_cooldown_until = time.monotonic() + _ARXIV_COOLDOWN
+                log.warning(
+                    "search_arxiv: arXiv unreachable x%d (%s) — backing off %.0fs",
+                    _arxiv_fail_streak,
+                    e,
+                    _ARXIV_COOLDOWN,
+                )
+            else:
+                log.warning("search_arxiv(%r) failed: %s", query, e)
+            return []
+        finally:
+            if owns_client:
+                await client.aclose()
+        _arxiv_fail_streak = 0  # reachable again
 
     return _parse_arxiv_atom(resp.text)
