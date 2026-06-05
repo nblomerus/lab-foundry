@@ -14,35 +14,39 @@ sharpen the next round. You set the mission and watch.
 Everything runs locally on Ollama by default; the model router swaps to cloud
 tiers per-invocation without touching agent code.
 
-> Status: actively evolving. The research loop (Researcher / Evaluation / Critic /
-> Planner) and the knowledge substrate (the Library + Librarian ingest) are built;
-> the full PI harness, the novelty/peer-review gate, and **Mimir** (the Library's
-> trust warden) are partially built — see the design docs in [`docs/`](docs/).
+> **Status (v0.1.15).** The *knowledge substrate* is live and continuous: a fleet
+> of discovery **scouts** feeds **Mimir** (the Warden), which trust- and
+> quality-gates every source into the **Library** (pgvector corpus + Neo4j graph).
+> The research workflow (PI/Planner/Researcher/Critic/…) is **built but dormant**,
+> gated off by `KNOWLEDGE_CORE_ONLY=1` so the lab fills a strong base first.
+> Full current-state reference: **[docs/TECHNICAL_OVERVIEW.md](docs/TECHNICAL_OVERVIEW.md)**.
 
 ## How it works
 
-The harness is an event-driven loop over a Postgres event bus (`LISTEN/NOTIFY`).
-Stateless agents react to events; every high-signal result clears a
-novelty/quality gate before it advances, and dissent feeds the lessons store.
+The harness is an **event-driven loop over a Postgres event bus** (`LISTEN/NOTIFY`).
+Async agents react to events; mutations and the events they emit share a
+transaction so consumers wake reliably.
 
-| Lab role | Agent | Owns |
+**Knowledge intake (live now).** Scouts discover sources; a backpressure **pump**
+keeps the pipeline fed continuously; Mimir gates and certifies; the Library
+stores and serves them.
+
+| Stage | Component | Owns |
 |---|---|---|
-| Principal Investigator | **PI** | the agenda: mission → directions → hypotheses (claims) + per-claim goals |
-| Lab manager | **Planner** | the deliberative schedule — what to work on next |
-| Methods reviewer | **Evaluation** | substance + groundedness; the entry gate (kills slop) |
-| Adversarial reviewer | **Critic** | "can I break this claim?" |
-| Related-work reviewer | **Novelty** | "has someone already shown this?" |
-| Area chair | **Reviewer** | applies panel consensus; owns the single promotion write |
-| Phase chair | **Adjudicator** | advances the phase only when evidence warrants |
-| Head librarian | **Mimir** | governs the Library: source/document provenance + trust + certification |
-| Data curator | **Librarian** | ingests papers/datasets into the corpus (chunk → embed → graph) |
+| Discovery | **Scouts** (arXiv · Web · GitHub · HF-datasets · OpenML) | find new sources; each pages its own cursor + a novelty ledger so it never re-fetches the same data |
+| The Warden | **Mimir** | two gates — **trust** (peer-reviewed > preprint > official-repo > reputable > unknown; + license/retraction; one LLM tie-breaker) and **quality** (substance, no error-walls) — then certify → embed |
+| Knowledge store | **Library** | pgvector corpus (chunks, 768-d) + Neo4j context graph; semantic `corpus_search` |
 
-Phases: **frame → hypothesize → experiment → validate → write → submit** — each
-budgeted; a watchdog forces a transition past 1.5× budget.
+**Research workflow (built, dormant).** PI (**Ariadne**) frames directions and
+hypotheses (**claims**); **Planner** schedules; **Researchers** gather evidence;
+**Evaluation/Critic/Novelty** review; **Reviewer/Adjudicator** promote and advance
+phases (**frame → hypothesize → experiment → validate → write → submit**, each
+budgeted). Mimir can direct the scouts' focus toward Ariadne's agenda
+(`agents/mimir/focus.py`).
 
-**The Library** (the knowledge substrate) is a pgvector corpus + a Neo4j context
-graph, governed by Mimir. See [docs/MIMIR_WARDEN_SCOPE.md](docs/MIMIR_WARDEN_SCOPE.md)
-and [docs/REAL_LAB_OPERATING_MODEL.md](docs/REAL_LAB_OPERATING_MODEL.md).
+See [docs/TECHNICAL_OVERVIEW.md](docs/TECHNICAL_OVERVIEW.md),
+[docs/MIMIR_WARDEN_SCOPE.md](docs/MIMIR_WARDEN_SCOPE.md), and
+[docs/REAL_LAB_OPERATING_MODEL.md](docs/REAL_LAB_OPERATING_MODEL.md).
 
 ## Stack
 
@@ -52,29 +56,31 @@ and [docs/REAL_LAB_OPERATING_MODEL.md](docs/REAL_LAB_OPERATING_MODEL.md).
 | Memory | Zep (episodic narrative + Graphiti knowledge graph) |
 | Graph | Neo4j 5 (claims/findings + corpus context graph) |
 | Tracing | Langfuse |
+| Discovery | SearXNG (web search) + arXiv/GitHub/HuggingFace/OpenML APIs |
+| Web fetch | httpx + trafilatura, Playwright rung-2 for JS-only pages |
 | Local inference | Ollama (per-tier model routing in code) |
 | Embeddings | `nomic-embed-text` (768-d), local |
-| Tool protocol | MCP (Model Context Protocol) |
 | Backend | FastAPI + asyncpg + WebSocket |
 | Frontend | Next.js + React + Tailwind |
-| Packaging | pyenv + uv + Make; `src/` layout |
+| Packaging | pyenv + Make; top-level packages (`pythonpath=["."]`) |
 
 ## Repository layout
 
 ```
-src/labfoundry/          The Python package
-├── harness/             Event loop: dispatch, router, curator, session, main
-├── handlers/            One handler per event type
-├── research/            Researcher loop + librarian (ingest) + fetchers
-├── audit/ adversarial/ planner/   Evaluation / Critic / Planner loops
-├── state/ memory/ skills/         Postgres / Zep / lessons clients
-├── api/                 FastAPI command center
-└── mcp_servers/         labfoundry_state / _research / _knowledge / _corpus
-migrations/              SQL migrations (001 … 015_knowledge_corpus)
-docs/                    Design docs (start at docs/INDEX.md)
-deploy/systemd/          User units for unattended operation
-web/                     Next.js dashboard
-tests/                   pytest suite
+agents/        One package per agent: mimir (the Warden) + pi, planner,
+               researcher, critic, evaluation, novelty, reviewer, reflection
+library/       The knowledge layer: ingest/ (scouts, pipeline, fetcher, quality),
+               trust/ (the trust gate), corpus/ (pgvector search), graph/ (Neo4j)
+harness/       Event loop: dispatch (+ discovery pump), router, curator, main
+state/         Postgres client (the event bus + corpus + workflow state)
+memory/ skills/  Zep episodic memory + lessons store
+api/           FastAPI command center (knowledge, gate, scout, mimir, agentlab,
+               bench, trace, snapshot, stream/ws)
+ops/           bootstrap, corpus seeder, Mimir first-light runner
+migrations/    SQL migrations (001 baseline · 002 trigger fix · 003 discovery cursors)
+docs/          Design + this technical overview (start at docs/INDEX.md)
+web/           Next.js dashboard (the floorplan + inspectors)
+tests/         pytest suite
 ```
 
 ## Setup
@@ -82,30 +88,31 @@ tests/                   pytest suite
 ```bash
 # 0. pyenv + Node 20 (via nvm) installed.
 make pyenv          # creates the `labfoundry` virtualenv
-make install        # uv pip sync requirements.txt
-pip install -e .    # editable install of the src/ package
+make install        # pip sync requirements.txt (top-level packages on pythonpath)
+playwright install chromium   # once — rung-2 web fetch for JS-only pages
 
-cp .env.example .env # set ZEP_API_KEY etc.
-make infra          # docker compose up -d (Postgres+pgvector, Neo4j, SearXNG)
+cp .env.example .env # set ZEP_API_KEY, GITHUB_TOKEN, etc.
+make infra          # docker compose up -d (Postgres+pgvector, Neo4j, SearXNG:8081)
 make migrate        # apply SQL migrations into the labfoundry DB
-make web-install    # npm install in web/
+make web-install    # npm install in web/ (Node 20)
 
 # models
-ollama pull qwen2.5:14b           # CODE tier
-ollama pull nomic-embed-text      # corpus embeddings (768-d)
-# + your reasoning/workhorse/fast tier models (see src/labfoundry/harness/router.py)
+ollama pull nomic-embed-text      # corpus embeddings (768-d) — required
+# + your reasoning/workhorse/fast tier models (see harness/router.py)
 ```
 
 ## Run
 
 ```bash
-make bootstrap      # one-shot: seed the lab + kickoff
+make bootstrap      # one-shot: seed the lab
 make dev            # api on :8503 + web on :8088
-make harness        # the autonomous loop (separate terminal; runs forever)
+make harness        # the dispatcher loop (separate terminal; MIMIR_LOOP=on, runs forever)
 ```
 
-Unattended operation uses the systemd units in [`deploy/systemd/`](deploy/systemd/)
-(`labfoundry-api`, `labfoundry-harness`, `labfoundry-liveness`).
+Unattended operation uses systemd `--user` units — `labfoundry-api`,
+`labfoundry-harness`, `labfoundry-web` (auto-restart). The dashboard's live
+WebSocket connects straight to the API on `:8503` (Next dev rewrites don't proxy
+WS); override with `NEXT_PUBLIC_WS_URL` if needed.
 
 ## Quality
 
@@ -119,7 +126,12 @@ coverage. The `version` file is bumped on every PR.
 
 ## Docs
 
-Design docs live in [`docs/`](docs/) — start with [`docs/INDEX.md`](docs/INDEX.md).
+- **[docs/TECHNICAL_OVERVIEW.md](docs/TECHNICAL_OVERVIEW.md)** — current-state
+  engineering reference (architecture, scouts, Mimir's gates, the Library, API,
+  dashboard, data model). Start here.
+- Design docs (intent) live in [`docs/`](docs/) — index at
+  [`docs/INDEX.md`](docs/INDEX.md); e.g. [`MIMIR_WARDEN_SCOPE.md`](docs/MIMIR_WARDEN_SCOPE.md),
+  [`KNOWLEDGE_LAYER_SCOPE.md`](docs/KNOWLEDGE_LAYER_SCOPE.md).
 
 ## License
 
