@@ -256,6 +256,17 @@ async def test_mimir_certifies_and_ingests(monkeypatch):
 
     monkeypatch.setattr(corpus_tools, "_get_embedder", _fake_get_embedder)
 
+    # Retraction probes can't reach arXiv/Crossref in CI; stub them "verified clean" so the happy
+    # path isn't fail-closed (default MIMIR_RETRACTION_STRICT=on). test_retraction_failclosed.py
+    # covers the unverified→block path.
+    from agents.mimir import handler as mimir_handler
+
+    async def _not_retracted(*_a, **_k):
+        return False  # fetched, no withdrawal/retraction
+
+    monkeypatch.setattr(mimir_handler, "_arxiv_withdrawn", _not_retracted)
+    monkeypatch.setattr(mimir_handler, "_doi_retracted", _not_retracted)
+
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, init=_init_conn)
     state = PostgresClient(pool=pool)
 

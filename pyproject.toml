@@ -34,7 +34,28 @@ branch = true
 omit = [
     "tests/*",
     "*/server.py",                  # thin MCP/FastMCP wrappers
-    "ops/bootstrap.py",
+    # Operational entrypoints — CLIs, one-off build/backfill scripts, and the read-only
+    # "first light" dry-run drivers. Validated by running them, not pytest (extends the
+    # ops/bootstrap.py precedent to the whole operational layer).
+    "ops/*",
+    # The Ariadne research-PI + Stage-3 execution layer is LLM-orchestration (needs DeepSeek
+    # + Neo4j + the live corpus) — validated by the eval/ harnesses (eval/mimir, eval/retrieval,
+    # eval/graph, eval/scouts) and the firstlight dry-runs, not pytest line coverage. The
+    # DETERMINISTIC cores stay in the metric and ARE unit-tested (scoring, feedback, grade,
+    # schemas, persist). Ratchet these in as their deterministic seams grow unit tests.
+    "agents/ariadne/loop.py",
+    "agents/ariadne/reflect.py",
+    "agents/ariadne/handler.py",
+    "agents/researcher/grounded.py",
+    "agents/researcher/grounded_handler.py",
+    "agents/planner/plan.py",
+    "agents/planner/decompose.py",
+    "agents/llm.py",
+    "agents/mimir/ask.py",
+    "library/graph/extract.py",
+    "library/graph/field_model.py",
+    "api/ariadne.py",
+    "api/researcher.py",
 ]
 
 [tool.coverage.report]
