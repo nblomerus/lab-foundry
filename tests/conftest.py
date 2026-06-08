@@ -40,6 +40,20 @@ async def db():
         async with pool.acquire() as conn:
             if await conn.fetchval("SELECT to_regclass('public.claims')") is None:
                 pytest.skip("schema not applied (no claims table)")
+            # SAFETY GUARD: the TRUNCATE below is `... CASCADE`, and `documents` has a
+            # FK to `agent_runs`, so truncating agent_runs CASCADEs into documents+chunks
+            # — i.e. it would DELETE THE WHOLE CORPUS. This fixture is for a *disposable*
+            # test DB, never the live one. A populated corpus means DATABASE_URL points at
+            # production; refuse rather than wipe it. (Set LABFOUNDRY_ALLOW_DB_WIPE=1 to
+            # override for an intentional throwaway DB.)
+            if os.environ.get("LABFOUNDRY_ALLOW_DB_WIPE") != "1":
+                doc_count = await conn.fetchval("SELECT count(*) FROM documents") or 0
+                if doc_count > 100:
+                    pytest.skip(
+                        f"REFUSING to truncate: DATABASE_URL points at a populated corpus "
+                        f"({doc_count} documents) — looks like production. Use a disposable "
+                        f"test DB, or set LABFOUNDRY_ALLOW_DB_WIPE=1 if you really mean it."
+                    )
             await conn.execute(
                 "TRUNCATE claims, events, tasks, findings, critic_verdicts, "
                 "research_inquiries, evidence, experiment_runs, fetch_cache, agent_runs "

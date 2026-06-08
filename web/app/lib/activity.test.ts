@@ -27,6 +27,22 @@ describe("humanizeEvent", () => {
     expect(l!.tone).toBe("warn");
   });
 
+  it("humanizes Ariadne asking Mimir, with the question + capitalized asker", () => {
+    const l = humanizeEvent(ev("mimir.ask", { asker: "ariadne", question: "Where is uncertainty quantification thin?" }));
+    expect(l).not.toBeNull();
+    expect(l!.text).toContain("Ariadne asked Mimir");
+    expect(l!.text).toContain("uncertainty");
+    expect(l!.tone).toBe("info");
+  });
+
+  it("humanizes Mimir's answer with citation + gap counts", () => {
+    const l = humanizeEvent(ev("mimir.answered", { asker: "ariadne", citations: 3, gaps: ["a", "b"] }));
+    expect(l!.text).toContain("Mimir answered ariadne");
+    expect(l!.text).toContain("3 cited");
+    expect(l!.text).toContain("2 gaps flagged");
+    expect(l!.tone).toBe("live");
+  });
+
   it("drops noise events (no feed line)", () => {
     expect(humanizeEvent(ev("document.parsed"))).toBeNull();
     expect(humanizeEvent(ev("session.started"))).toBeNull();

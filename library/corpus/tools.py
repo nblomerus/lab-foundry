@@ -54,6 +54,17 @@ W_TRUST = 0.30
 W_RECENCY = 0.10
 RECENCY_HALFLIFE_DAYS = 180.0
 
+# Reciprocal Rank Fusion constant for hybrid (dense ⊕ BM25) retrieval. 60 is the
+# standard value (Cormack et al. 2009); larger flattens the rank weighting.
+RRF_K = 60
+
+# GIN can't return ts_rank-ordered results, so ranking the lexical arm costs one
+# ts_rank per matched row — unbounded for a common single token (e.g. "reinforcement"
+# matches ~50k chunks → ~1.7s). Cap the candidate scan before ranking: rare/distinctive
+# terms (the ones hybrid actually needs lexical for) match < cap so nothing is lost;
+# common terms get an approximate lexical arm, which is fine — dense already covers them.
+LEX_SCAN_CAP = 4000
+
 # trust_w lookup keyed by tier name. A missing tier (write race) defaults to 0.4
 # — treated as unverified, never as certified (§6).
 TRUST_WEIGHT: dict[str, float] = {
@@ -377,6 +388,108 @@ async def _search_by_vector(
     return out[:k]
 
 
+def _row_to_chunk(r) -> RetrievedChunk:
+    """Build a RetrievedChunk from a fetched row (score filled in by the caller)."""
+    sim, trust_w, recency, _ = _score_row(r["distance"], r["trust_tier"], r["ingested_at"])
+    return RetrievedChunk(
+        chunk_id=r["id"],
+        document_id=r["document_id"],
+        ordinal=r["ordinal"],
+        text=r["text"],
+        token_count=r["token_count"],
+        kind=r["kind"],
+        title=r["title"],
+        source_url=r["source_url"],
+        trust_tier=r["trust_tier"],
+        ingested_at=r["ingested_at"],
+        distance=float(r["distance"]),
+        sim=sim,
+        trust_w=trust_w,
+        recency=recency,
+        score=0.0,
+    )
+
+
+async def _search_hybrid(
+    vec: list[float],
+    query: str,
+    k: int = 8,
+    *,
+    kind: str | None = None,
+    min_trust: str | None = None,
+) -> list[RetrievedChunk]:
+    """
+    Hybrid retrieval: Reciprocal-Rank-Fuse a dense ANN ranking with a BM25 (Postgres
+    full-text, idx_chunks_fts) ranking over the SAME trust-gated candidate set.
+
+    Dense alone buries short / exact-token queries (eval/retrieval baseline:
+    exact-title R@20=0.27, rare-token ≈0.02) because the embedding ranks hundreds of
+    topically-similar chunks above the lexically-exact one. BM25 ranks the exact
+    token first; RRF (score = Σ 1/(RRF_K + rank_in_each_list)) combines the two with
+    no weight to tune. The certified/queryable + trust-floor gate applies to BOTH
+    arms. The lexical arm degrades to empty (→ pure dense) when the query has no FTS
+    match, so this is safe even before the GIN index exists (just slower).
+    """
+    n = max(4 * k, 64)
+    floor = min_trust if min_trust is not None else "quarantined"
+    # Shared trust gate (mirrors _search_by_vector); $1=vec $2=kind $3=floor $4=limit.
+    gate = """
+          AND d.status = 'certified' AND d.queryable
+          AND trust_rank(d.trust_tier) >= trust_rank($3::trust_tier)
+          AND d.trust_state NOT IN ('quarantined','decayed')
+          AND c.embedding IS NOT NULL
+    """
+    cols = """c.id, c.document_id, c.ordinal, c.text, c.token_count,
+              d.kind, d.title, d.source_url, d.trust_tier, d.ingested_at,
+              (c.embedding <=> $1) AS distance"""
+    dense_sql = f"""
+        SELECT {cols}
+        FROM chunks c JOIN documents d ON d.id = c.document_id
+        WHERE ($2::text IS NULL OR d.kind = $2::document_kind){gate}
+        ORDER BY c.embedding <=> $1
+        LIMIT $4
+    """
+    # $5 = raw query text for BM25 (websearch_to_tsquery tolerates arbitrary input);
+    # $6 = candidate-scan cap. c.tsv is the materialized to_tsvector('english', text)
+    # (migration 004, kept fresh by trg_chunks_tsv) so ts_rank reads it. The inner
+    # LIMIT $6 bounds how many matches we rank (see LEX_SCAN_CAP) — the GIN match is
+    # cheap; only the ts_rank sort is per-row, so we cap before ranking.
+    lexical_sql = f"""
+        SELECT id, document_id, ordinal, text, token_count, kind, title,
+               source_url, trust_tier, ingested_at, distance
+        FROM (
+            SELECT {cols}, c.tsv AS _tsv
+            FROM chunks c JOIN documents d ON d.id = c.document_id
+            WHERE ($2::text IS NULL OR d.kind = $2::document_kind){gate}
+              AND c.tsv @@ websearch_to_tsquery('english', $5)
+            LIMIT $6
+        ) lex
+        ORDER BY ts_rank(_tsv, websearch_to_tsquery('english', $5)) DESC
+        LIMIT $4
+    """
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        dense_rows = await conn.fetch(dense_sql, vec, kind, floor, n)
+        lex_rows = []
+        if query and query.strip():
+            lex_rows = await conn.fetch(lexical_sql, vec, kind, floor, n, query, LEX_SCAN_CAP)
+
+    fused: dict[int, RetrievedChunk] = {}
+    rrf: dict[int, float] = {}
+    for rows in (dense_rows, lex_rows):
+        for rank, r in enumerate(rows, start=1):
+            cid = r["id"]
+            if cid not in fused:
+                fused[cid] = _row_to_chunk(r)
+            rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank)
+
+    for cid, chunk in fused.items():
+        chunk.score = rrf[cid]
+    # score desc; ties broken by smaller cosine distance (closer wins).
+    out = sorted(fused.values(), key=lambda c: (c.score, -c.distance), reverse=True)
+    return out[:k]
+
+
 # =========================================================================
 # Public tools (registered over MCP in server.py AND imported in-process)
 # =========================================================================
@@ -388,18 +501,25 @@ async def corpus_search(
     *,
     kind: str | None = None,
     min_trust: str | None = None,
+    hybrid: bool = True,
     kg_expand: bool = False,
 ) -> list[RetrievedChunk]:
     """
-    Semantic search over the certified corpus. Pipeline (§6):
+    Search the certified corpus. Pipeline (§6):
       1. embed query -> 768-d vec via Ollama (GPULock-aware).
-      2. ANN over chunks (candidate pool N=max(4k,32)) honoring the trust floor.
-      3. Python rerank: 0.60*sim + 0.30*trust_w + 0.10*recency.
-    `kg_expand` is accepted for signature stability but is OFF by default and
-    NOT yet wired (it would cost a Neo4j hop — deferred past Phase 1).
+      2a. hybrid (default): RRF-fuse a dense ANN ranking with a BM25 (Postgres FTS)
+          ranking over the same trust-gated candidates — recovers short/exact-token
+          queries that pure dense buries (see _search_hybrid + eval/retrieval/).
+      2b. hybrid=False: dense ANN + the linear 0.60*sim+0.30*trust+0.10*recency
+          rerank (the legacy path; kept for A/B and tests).
+    The trust floor / certified+queryable gate is enforced in SQL either way.
+    `kg_expand` is accepted for signature stability but is OFF by default and NOT
+    yet wired (it would cost a Neo4j hop — deferred past Phase 1).
     """
     embedder = await _get_embedder()
     vec = await embedder.embed(query)
+    if hybrid:
+        return await _search_hybrid(vec, query, k, kind=kind, min_trust=min_trust)
     return await _search_by_vector(vec, k, kind=kind, min_trust=min_trust)
 
 

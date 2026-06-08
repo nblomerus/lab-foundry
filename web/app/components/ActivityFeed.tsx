@@ -13,7 +13,7 @@ const TONE_TEXT: Record<Accent, string> = {
 };
 
 // Humanized live feed over the shared WS stream — zero backend.
-export function ActivityFeed({ limit = 16, className = "" }: { limit?: number; className?: string }) {
+export function ActivityFeed({ limit = 16, className = "", hideHeader = false }: { limit?: number; className?: string; hideHeader?: boolean }) {
   const { recent, connected } = useSharedEvents();
   const lines = useMemo<ActivityLine[]>(
     () =>
@@ -27,13 +27,15 @@ export function ActivityFeed({ limit = 16, className = "" }: { limit?: number; c
 
   return (
     <div className={cx("flex flex-col", className)}>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Live Activity</span>
-        <span className="flex items-center gap-1.5 text-[10px] font-medium text-slate-400">
-          <span className={cx("inline-block h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 pulse-dot" : "bg-slate-300")} />
-          {connected ? "Live" : "Offline"}
-        </span>
-      </div>
+      {!hideHeader && (
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Live Activity</span>
+          <span className="flex items-center gap-1.5 text-[10px] font-medium text-slate-400">
+            <span className={cx("inline-block h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 pulse-dot" : "bg-slate-300")} />
+            {connected ? "Live" : "Offline"}
+          </span>
+        </div>
+      )}
       <ul className="flex-1 space-y-1 overflow-y-auto pr-1">
         {lines.length === 0 ? (
           <li className="px-1 py-2 text-xs text-slate-400">Waiting for events…</li>

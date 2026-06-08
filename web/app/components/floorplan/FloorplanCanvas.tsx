@@ -6,6 +6,7 @@
 // Must be rendered inside <EventStreamProvider> (it reads the shared stream).
 
 import { useCallback, useMemo, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ReactFlow, ReactFlowProvider, Controls, Panel, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -17,7 +18,7 @@ import { NODE_TYPES, type FloorNodeData, type Selected } from "./nodes";
 import { EDGE_TYPES } from "./FlowEdge";
 import { type FloorData } from "./useFloorData";
 import { useFlowHeat } from "./useFlowHeat";
-import { GateInspector, LibraryInspector, MimirInspector, ScoutInspector } from "./inspectors";
+import { AriadneInspector, GateInspector, LibraryInspector, MimirInspector, OpsInspector, PlannerInspector, QueueInspector, ResearcherInspector, ScoutInspector } from "./inspectors";
 
 function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: (s: Selected) => void): FloorNodeData {
   const base: FloorNodeData = { def, onOpen };
@@ -27,16 +28,16 @@ function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: 
     case "mimir":
       return { ...base, mimir: fd.pulse.mimir, stats: fd.pulse.stats, priority };
     case "storage":
-      return { ...base, stats: fd.pulse.stats };
+      return { ...base, stats: fd.pulse.stats, ariadne: fd.ariadne };
     case "ops":
       return { ...base, host: fd.pulse.host, costs: fd.costs, mimir: fd.pulse.mimir };
     default:
-      return base;
+      return { ...base, ariadne: fd.ariadne };
   }
 }
 
 function FlowLegend({ connected }: { connected: boolean }) {
-  const flows: [string, string][] = [["Intake", "#2c5fb8"], ["Knowledge", "#10b981"], ["Planned", "#9aa3ad"]];
+  const flows: [string, string][] = [["Intake", "#2c5fb8"], ["Knowledge", "#10b981"], ["Converse", "#8b5cf6"], ["Feedback", "#f59e0b"], ["Planned", "#9aa3ad"]];
   const statuses: [string, string][] = [["Live", "bg-emerald-500"], ["Busy", "bg-amber-500"], ["Idle", "bg-slate-400"], ["Offline", "bg-slate-300"]];
   return (
     <div className="glass-panel rounded-card px-3 py-2.5 text-[10px]">
@@ -84,6 +85,7 @@ function InspectorShell({ title, planned, onClose, children }: { title: string; 
 function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot | null; floorData: FloorData; className?: string }) {
   const { hot, connected, events } = useFlowHeat();
   const [selected, setSelected] = useState<Selected | null>(null);
+  const [activityOpen, setActivityOpen] = useState(true);
   const stats = floorData.pulse.stats;
 
   const priority = useMemo(() => {
@@ -136,6 +138,11 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
       case "scout": setSelected({ kind: "scout", sourceKind: def.sourceKind ?? "", title: def.title ?? "Scout" }); break;
       case "mimir": setSelected({ kind: "mimir", title: def.title ?? "Mimir" }); break;
       case "library": setSelected({ kind: "library", title: "Library" }); break;
+      case "ariadne": setSelected({ kind: "ariadne", title: def.title ?? "Ariadne" }); break;
+      case "queue": setSelected({ kind: "queue", title: def.title ?? "Request Queue" }); break;
+      case "planner": setSelected({ kind: "planner", title: def.title ?? "Planner" }); break;
+      case "researcher": setSelected({ kind: "researcher", title: def.title ?? "Researchers" }); break;
+      case "ops": setSelected({ kind: "ops", title: def.title ?? "Ops / Quartermaster" }); break;
       case "info": setSelected({ kind: "info", title: def.title ?? "", sub: def.sub, description: def.description }); break;
       case "gate": setSelected({ kind: "gate", scope: "all", title: def.title ?? "Gate" }); break;
     }
@@ -167,8 +174,22 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
         <Controls showInteractive={false} position="bottom-left" className="!shadow-panel !rounded-xl" />
         <Panel position="top-left"><FlowLegend connected={connected} /></Panel>
         <Panel position="bottom-right">
-          <div className="glass-panel flex h-72 w-80 flex-col rounded-card p-3">
-            <ActivityFeed limit={12} className="h-full" />
+          <div className={cx("glass-panel flex w-80 flex-col rounded-card p-3", activityOpen && "h-72")}>
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setActivityOpen((o) => !o)}
+                className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-600"
+              >
+                <ChevronDown className={cx("h-3 w-3 transition-transform", !activityOpen && "-rotate-90")} />
+                Live Activity
+              </button>
+              <span className="flex items-center gap-1.5 text-[10px] font-medium text-slate-400">
+                <span className={cx("inline-block h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 pulse-dot" : "bg-slate-300")} />
+                {connected ? "Live" : "Offline"}
+              </span>
+            </div>
+            {activityOpen && <ActivityFeed limit={12} className="mt-2 min-h-0 flex-1" hideHeader />}
           </div>
         </Panel>
       </ReactFlow>
@@ -196,6 +217,26 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
             ) : selected.kind === "scout" ? (
               <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
                 <ScoutInspector kind={selected.sourceKind} corpus={stats?.corpus} />
+              </InspectorShell>
+            ) : selected.kind === "ariadne" ? (
+              <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
+                <AriadneInspector ariadne={floorData.ariadne} />
+              </InspectorShell>
+            ) : selected.kind === "queue" ? (
+              <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
+                <QueueInspector />
+              </InspectorShell>
+            ) : selected.kind === "planner" ? (
+              <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
+                <PlannerInspector />
+              </InspectorShell>
+            ) : selected.kind === "researcher" ? (
+              <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
+                <ResearcherInspector />
+              </InspectorShell>
+            ) : selected.kind === "ops" ? (
+              <InspectorShell title={selected.title} onClose={() => setSelected(null)}>
+                <OpsInspector host={floorData.pulse.host} costs={floorData.costs} mimir={floorData.pulse.mimir} />
               </InspectorShell>
             ) : (
               <InspectorShell title={selected.title} planned onClose={() => setSelected(null)}>

@@ -154,57 +154,12 @@ class CloudProvider:
 
 
 def build_cloud_chain(env: dict) -> list[CloudProvider]:
-    """Assemble the ordered cloud chain from whichever keys are present.
-
-    Order = fastest-reliable first. Model per provider is overridable by env
-    (GEMINI_MODEL / GROQ_MODEL / NVIDIA_MODEL).
+    """The free-cloud chain — INTENTIONALLY EMPTY under the lab policy of "only DeepSeek
+    or local" (2026-06-08). Gemini / Groq / GitHub / NVIDIA are dropped; DeepSeek leads
+    via build_premium_chain (the high-stakes tiers), and every tier falls back to local
+    Ollama (MODELS[tier]). Volume tiers (FAST/CODE) therefore run local-only.
     """
-    chain: list[CloudProvider] = []
-    if env.get("GEMINI_API_KEY"):
-        chain.append(
-            CloudProvider(
-                Provider.GEMINI,
-                "https://generativelanguage.googleapis.com/v1beta/openai",
-                env["GEMINI_API_KEY"],
-                env.get("GEMINI_MODEL", "gemini-2.5-flash"),
-                "json_schema",
-            )
-        )
-    # Note: the gsk_ key is Groq (groq.com), not xAI Grok.
-    if env.get("GROK_API_KEY") or env.get("GROQ_API_KEY"):
-        chain.append(
-            CloudProvider(
-                Provider.GROQ,
-                "https://api.groq.com/openai/v1",
-                env.get("GROQ_API_KEY") or env["GROK_API_KEY"],
-                env.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                "json_object",
-            )
-        )
-    gh = env.get("GITHUB_MODELS_TOKEN") or env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
-    if gh:
-        chain.append(
-            CloudProvider(
-                Provider.GITHUB,
-                env.get("GITHUB_MODELS_URL", "https://models.github.ai/inference"),
-                gh,
-                env.get("GITHUB_MODEL", "openai/gpt-4o-mini"),
-                "json_schema",
-            )
-        )
-    # NVIDIA last among cloud — verified working with json_schema but slow
-    # (~17s), so it's the final cloud resort before local.
-    if env.get("NVA_API_KEY") or env.get("NVIDIA_API_KEY"):
-        chain.append(
-            CloudProvider(
-                Provider.NVIDIA,
-                "https://integrate.api.nvidia.com/v1",
-                env.get("NVIDIA_API_KEY") or env["NVA_API_KEY"],
-                env.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct"),
-                "json_schema",
-            )
-        )
-    return chain
+    return []
 
 
 # Tiers that lead with the premium chain (DeepSeek → OpenAI → GitHub) before the
@@ -216,18 +171,13 @@ PREMIUM_TIERS = {Tier.REASONING, Tier.WORKHORSE}
 
 
 def build_premium_chain(env: dict) -> list[CloudProvider]:
-    """Quality-first leads for PREMIUM_TIERS, tried before the free chain.
-
-    OpenAI direct (personal key) is preferred; GitHub's full gpt-4o is the
-    next-best that works on the free tier, so the chain still delivers a
-    frontier-class model even before OpenAI billing is set up.
+    """The high-stakes lead chain for PREMIUM_TIERS. Under the "only DeepSeek or local"
+    policy (2026-06-08) this is DeepSeek ONLY — OpenAI/GitHub dropped. PREMIUM_TIERS
+    (REASONING/WORKHORSE) run DeepSeek → local; everything else is local (build_cloud_chain
+    is empty). DeepSeek is cheap, reliable cloud; local Ollama is the always-up fallback.
     """
     chain: list[CloudProvider] = []
     if env.get("DEEPSEEK_API_KEY"):
-        # DeepSeek reasoning model (chain-of-thought, final answer in `content`).
-        # Cheap, reliable, cloud — leads the premium chain so the highest-stakes
-        # REASONING-tier decisions get a frontier reasoning model. json_object
-        # mode: schema goes in the prompt + our Pydantic validation/fallback.
         chain.append(
             CloudProvider(
                 Provider.DEEPSEEK,
@@ -235,32 +185,6 @@ def build_premium_chain(env: dict) -> list[CloudProvider]:
                 env["DEEPSEEK_API_KEY"],
                 env.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
                 "json_object",
-            )
-        )
-    if env.get("OPENAI_API_KEY"):
-        model = env.get("OPENAI_MODEL", "gpt-5.5")
-        # GPT-5.x / o-series reject custom temperature; only classic chat
-        # models (gpt-4o, gpt-4.1, …) accept it.
-        send_temp = not (model.startswith(("gpt-5", "o1", "o3", "o4")))
-        chain.append(
-            CloudProvider(
-                Provider.OPENAI,
-                "https://api.openai.com/v1",
-                env["OPENAI_API_KEY"],
-                model,
-                "json_schema",
-                send_temp,
-            )
-        )
-    gh = env.get("GITHUB_MODELS_TOKEN") or env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
-    if gh:
-        chain.append(
-            CloudProvider(
-                Provider.GITHUB,
-                env.get("GITHUB_MODELS_URL", "https://models.github.ai/inference"),
-                gh,
-                env.get("GITHUB_PREMIUM_MODEL", "openai/gpt-4o"),  # full gpt-4o, not mini
-                "json_schema",
             )
         )
     return chain

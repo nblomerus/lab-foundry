@@ -543,8 +543,22 @@ export default function TraceDetailPage({ params }: { params: Promise<{ id: stri
         />
         <div className="h-[640px] w-full border-t border-slate-200" style={{ minHeight: 640 }}>
           {nodes.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">
-              No steps recorded yet — waiting for the first model call…
+            <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center text-sm text-slate-400">
+              {s.status === "running" ? (
+                <span>Running — waiting for the first model call…</span>
+              ) : (
+                <>
+                  <span className="font-medium text-slate-600">No model calls in this session.</span>
+                  <span className="max-w-md">
+                    <span className="font-mono">{s.handler_name}</span> ran deterministically — no LLM step
+                    (e.g. Mimir&rsquo;s rule-based trust gate).
+                    {s.trigger_event_type ? <> Triggered by <span className="font-mono">{s.trigger_event_type}</span>.</> : null}
+                  </span>
+                  <span className="text-xs text-slate-400">
+                    Tip: the sessions list has a &ldquo;with model steps only&rdquo; filter to hide these.
+                  </span>
+                </>
+              )}
             </div>
           ) : (
             <ReactFlowProvider>

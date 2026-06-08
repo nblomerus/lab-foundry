@@ -5,16 +5,19 @@
 // upgrade) so the React Flow rebuild reuses the exact, working /knowledge/* panels.
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Boxes, CheckCircle2, Clock, Compass, Database, Download, FileCode, FileText,
   Github, Globe, Network, Search, ShieldAlert, ShieldCheck,
 } from "lucide-react";
 import {
-  api, type CorpusHit, type GatePanel, type KnowledgeStats, type MimirPanel,
-  type RecentIngest, type ScoutPanel,
+  api, type AcquireRequestRow, type AriadneOverview, type CorpusHit, type DebugCosts,
+  type GatePanel, type HostStats, type KnowledgeStats, type MimirPanel, type PlannerPanel,
+  type QueueHealth, type RecentIngest, type ResearcherOverview, type ScoutPanel,
 } from "../../lib/api";
 import type { LabFoundryEvent, Snapshot } from "../../lib/types";
 import { ago } from "../../lib/format";
+import { cx } from "../ui";
 
 // Corpus document-kind a scout's sources land under (fallback tile when the
 // per-scout panel is unavailable).
@@ -894,6 +897,336 @@ export function GateInspector({ scope, title, onClose }: { scope: string; title:
           })}
         </ul>
       )}
+    </div>
+  );
+}
+
+// --- Ariadne (PI) inspector — her live agenda --------------------------
+const ARIA_MODE_TONE: Record<string, string> = {
+  active: "bg-emerald-100 text-emerald-700", advisory: "bg-blue-100 text-blue-700",
+  shadow: "bg-amber-100 text-amber-700", off: "bg-slate-100 text-slate-500",
+};
+const ARIA_GATE_TONE: Record<string, string> = {
+  approved: "text-emerald-700", held: "text-amber-700", rejected: "text-red-600", pending: "text-slate-400",
+};
+
+export function AriadneInspector({ ariadne }: { ariadne: AriadneOverview | null }) {
+  if (!ariadne) return <p className="text-sm text-slate-500">Loading Ariadne…</p>;
+  const g = ariadne.at_a_glance;
+  return (
+    <div className="space-y-4 text-sm">
+      <div className="flex items-center gap-2">
+        <span className={cx("rounded-full px-2 py-0.5 text-[11px] font-semibold", ARIA_MODE_TONE[ariadne.mode] ?? "bg-slate-100 text-slate-500")}>{ariadne.mode}</span>
+        <span className="text-slate-500">{g.status}</span>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <StatTile label="Directions" value={g.active_directions} />
+        <StatTile label="Approved" value={`${g.approved}/${g.gate_budget}`} tone="emerald" />
+        <StatTile label="Lessons" value={g.lessons} />
+      </div>
+      {ariadne.mission && (
+        <div>
+          <SubHead label="Mission" />
+          <p className="mt-1 leading-snug text-slate-700">{ariadne.mission.statement}</p>
+        </div>
+      )}
+      <div>
+        <SubHead label="Directions · gate · composite" />
+        <div className="mt-1.5 space-y-1.5">
+          {ariadne.directions.map((d) => (
+            <div key={d.id} className="flex items-center gap-2">
+              <span className={cx("w-16 shrink-0 text-[11px] font-semibold", ARIA_GATE_TONE[d.gate] ?? "text-slate-400")}>{d.gate}</span>
+              <span className="w-8 shrink-0 font-mono text-[11px] text-slate-400">{d.composite ?? "—"}</span>
+              <span className="truncate text-slate-700">{d.title}</span>
+            </div>
+          ))}
+          {ariadne.directions.length === 0 && <p className="text-slate-400">No directions framed yet.</p>}
+        </div>
+      </div>
+      {g.focus.length > 0 && (
+        <div>
+          <SubHead label="Focus · hot & emerging" />
+          <div className="mt-1 flex flex-wrap gap-1">
+            {g.focus.map((f) => (<span key={f} className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-700">{f}</span>))}
+          </div>
+        </div>
+      )}
+      <Link href="/ariadne" className="inline-block text-[12px] font-medium text-violet-700 hover:underline">Open Ariadne dashboard →</Link>
+    </div>
+  );
+}
+
+// --- Request Queue inspector — recent acquire asks + resolution --------
+const ACQ_OUTCOME_TONE: Record<string, string> = {
+  fulfilled: "text-emerald-700", already_have: "text-blue-700", rejected: "text-red-600",
+  rate_limited: "text-amber-700", pending: "text-slate-400",
+};
+
+// How long the oldest unanswered ask may wait before the queue counts as "backing up". Most
+// acquires resolve in seconds (already_have) to ~1-2 min (fetch + ingest); past this, Mimir is
+// slow or the harness is down and the queue is draining slower than it fills.
+const QUEUE_LAG_THRESHOLD_S = 180;
+
+function fmtDur(s: number): string {
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+
+function QueueHealthBanner({ h }: { h: QueueHealth }) {
+  const age = h.oldest_pending_age_seconds;
+  const lagging = h.pending > 0 && age != null && age >= QUEUE_LAG_THRESHOLD_S;
+  const drained = h.pending === 0;
+  const dot = drained ? "bg-emerald-500" : lagging ? "bg-amber-500" : "bg-sky-500";
+  const label = drained
+    ? "Drained — no asks waiting"
+    : lagging
+      ? "Backing up — Mimir slow or not draining"
+      : "Flowing — asks in flight";
+  return (
+    <div className={cx("rounded-xl border p-2.5", lagging ? "border-amber-200 bg-amber-50/40" : "border-slate-100")}>
+      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600">
+        <span className={cx("inline-block h-2 w-2 rounded-full", dot, !drained && "pulse-dot")} />
+        {label}
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        <StatTile label="In queue" value={h.pending} tone={lagging ? "amber" : drained ? "emerald" : "blue"} />
+        <StatTile label="Oldest wait" value={age != null ? fmtDur(age) : "—"} tone={lagging ? "amber" : "slate"} />
+        <StatTile label="Resolved / h" value={h.resolved_1h} tone={h.resolved_1h > 0 ? "emerald" : "slate"} />
+      </div>
+      <p className="mt-1.5 text-[10px] text-slate-400">Last hour: {h.requested_1h} asked · {h.resolved_1h} resolved</p>
+    </div>
+  );
+}
+
+export function QueueInspector() {
+  const [data, setData] = useState<{ requests: AcquireRequestRow[]; counts: Record<string, number>; health?: QueueHealth } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.ariadneRequests(15).then((d) => { if (!cancelled) setData(d); }).catch(() => {});
+    load();
+    const id = setInterval(load, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  if (!data) return <p className="text-sm text-slate-500">Loading requests…</p>;
+  return (
+    <div className="space-y-3 text-sm">
+      <p className="leading-snug text-slate-500">Agents (PI / Researcher / Novelty) ask Mimir for specific evidence. Mimir resolves → dedupes → trust-gates the ingest.</p>
+      {data.health && <QueueHealthBanner h={data.health} />}
+      {Object.keys(data.counts).length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {Object.entries(data.counts).map(([k, n]) => (
+            <span key={k} className={cx("rounded-full bg-slate-50 px-2 py-0.5 text-[11px] font-medium", ACQ_OUTCOME_TONE[k] ?? "text-slate-500")}>{k} · {n}</span>
+          ))}
+        </div>
+      )}
+      {data.requests.length === 0 ? (
+        <p className="text-slate-400">No acquire requests yet — agents pull evidence here once they need a source the Library lacks.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {data.requests.map((r, i) => (
+            <div key={i} className="rounded-xl border border-slate-100 p-2">
+              <div className="flex items-center gap-2">
+                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{r.requester}</span>
+                <span className={cx("text-[11px] font-semibold", ACQ_OUTCOME_TONE[r.outcome] ?? "text-slate-500")}>{r.outcome}</span>
+                <span className="ml-auto text-[10px] text-slate-400">{r.at ? ago(r.at) : ""}</span>
+              </div>
+              <div className="mt-0.5 truncate text-slate-700">{r.subject}</div>
+              {r.reason && <div className="truncate text-[11px] text-slate-400">{r.reason}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Planner inspector — research tasks it produced + its backlog ---------
+const TASK_STATUS_TONE: Record<string, string> = {
+  pending: "text-amber-700", running: "text-blue-700", completed: "text-emerald-700",
+  failed: "text-red-600", halted: "text-red-600", cancelled: "text-slate-400",
+};
+
+export function PlannerInspector() {
+  const [data, setData] = useState<PlannerPanel | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.ariadnePlanner().then((d) => { if (!cancelled) setData(d); }).catch(() => {});
+    load();
+    const id = setInterval(load, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  if (!data) return <p className="text-sm text-slate-500">Loading planner…</p>;
+  const pending = data.by_status.pending ?? 0;
+  return (
+    <div className="space-y-3 text-sm">
+      <p className="leading-snug text-slate-500">
+        Turns Ariadne&apos;s <span className="font-medium">approved</span> directions into concrete,
+        falsifiable research tasks (<span className="font-mono text-[11px]">task.created</span> → the Researchers).
+      </p>
+      <div className="flex items-center gap-2">
+        <span className={cx("rounded-full px-2 py-0.5 text-[11px] font-semibold", ARIA_MODE_TONE[data.mode] ?? "bg-slate-100 text-slate-500")}>{data.mode}</span>
+        {data.last_plan_at && <span className="text-[11px] text-slate-400">last planned {ago(data.last_plan_at)}</span>}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <StatTile label="Tasks" value={data.tasks_total} />
+        <StatTile label="Pending" value={pending} tone={pending > 0 ? "amber" : "slate"} />
+        <StatTile label="Awaiting plan" value={data.awaiting_plan} tone={data.awaiting_plan > 0 ? "blue" : "emerald"} />
+      </div>
+      {data.awaiting_plan > 0 && (
+        <p className="-mt-1 text-[11px] text-slate-400">
+          {data.awaiting_plan} approved direction{data.awaiting_plan === 1 ? "" : "s"} still awaiting a plan — the planner runs them on the next tick.
+        </p>
+      )}
+      <div>
+        <SubHead label="Research tasks" />
+        {data.tasks.length === 0 ? (
+          <p className="text-slate-400">No tasks yet — they appear once Ariadne approves a direction and the planner runs.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {data.tasks.map((t) => (
+              <div key={t.id} className="rounded-xl border border-slate-100 p-2">
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{t.task_type}</span>
+                  <span className={cx("text-[11px] font-semibold", TASK_STATUS_TONE[t.status] ?? "text-slate-500")}>{t.status}</span>
+                  <span className="ml-auto text-[10px] text-slate-400">{t.at ? ago(t.at) : ""}</span>
+                </div>
+                <div className="mt-0.5 line-clamp-2 text-slate-700">{t.description}</div>
+                {t.direction && <div className="mt-0.5 truncate text-[11px] text-slate-400">← {t.direction}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Researcher inspector — grounded findings + dispositions --------------
+export const DISPOSITION_TONE: Record<string, string> = {
+  supported: "text-emerald-700", contradicted: "text-red-600",
+  corpus_exhausted: "text-amber-700", thin_corpus: "text-blue-700",
+  needs_experiment: "text-violet-700", inconclusive: "text-slate-500",
+};
+
+export function ResearcherInspector() {
+  const [data, setData] = useState<ResearcherOverview | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.researcherOverview(20).then((d) => { if (!cancelled) setData(d); }).catch(() => {});
+    load();
+    const id = setInterval(load, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  if (!data) return <p className="text-sm text-slate-500">Loading researcher…</p>;
+  const running = data.by_status.running ?? 0;
+  const findings = Object.values(data.by_disposition).reduce((a, b) => a + b, 0);
+  return (
+    <div className="space-y-3 text-sm">
+      <p className="leading-snug text-slate-500">
+        Executes the planner&apos;s tasks against the certified Library — grounded findings that steer each
+        direction (supports / contradicts / blocked), and self-healing acquires when the corpus is thin.
+      </p>
+      <div className="flex items-center gap-2">
+        <span className={cx("rounded-full px-2 py-0.5 text-[11px] font-semibold", ARIA_MODE_TONE[data.mode] ?? "bg-slate-100 text-slate-500")}>{data.mode}</span>
+        {running > 0 && <span className="text-[11px] text-amber-600">{running} investigating…</span>}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <StatTile label="Tasks" value={data.tasks_total} />
+        <StatTile label="Findings" value={findings} tone={findings > 0 ? "emerald" : "slate"} />
+        <StatTile label="Acquires 24h" value={data.acquire.fired_24h} tone={data.acquire.fired_24h > 0 ? "blue" : "slate"} />
+      </div>
+      {Object.keys(data.by_disposition).length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {Object.entries(data.by_disposition).map(([k, n]) => (
+            <span key={k} className={cx("rounded-full bg-slate-50 px-2 py-0.5 text-[11px] font-medium", DISPOSITION_TONE[k] ?? "text-slate-500")}>{k} · {n}</span>
+          ))}
+        </div>
+      )}
+      <div>
+        <SubHead label="Recent findings" />
+        {data.tasks.length === 0 ? (
+          <p className="text-slate-400">No findings yet — they appear as the researcher works the planner&apos;s tasks.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {data.tasks.slice(0, 8).map((t) => (
+              <div key={t.id} className="rounded-xl border border-slate-100 p-2">
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">{t.task_type}</span>
+                  <span className={cx("text-[11px] font-semibold", DISPOSITION_TONE[t.finding?.disposition ?? ""] ?? "text-slate-400")}>{t.finding?.disposition ?? t.status}</span>
+                  <span className="ml-auto text-[10px] text-slate-400">{t.at ? ago(t.at) : ""}</span>
+                </div>
+                {t.finding?.summary && <div className="mt-0.5 line-clamp-2 text-slate-700">{t.finding.summary}</div>}
+                {t.direction && <div className="mt-0.5 truncate text-[11px] text-slate-400">← {t.direction}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <Link href="/researchers" className="inline-block text-[12px] font-medium text-violet-700 hover:underline">Open Researchers page →</Link>
+    </div>
+  );
+}
+
+// --- Ops / Quartermaster inspector — host, GPUs, cost, recent decisions ----
+export function OpsInspector({ host, costs, mimir }: { host: HostStats | null; costs: DebugCosts | null; mimir: MimirPanel | null }) {
+  const gpus = costs?.power?.gpus ?? [];
+  const spend = costs?.deepseek?.today_cost_usd ?? null;
+  const projected = costs?.power?.projected_usd_per_day ?? null;
+  const certs = (mimir?.recent_certifications ?? []).slice(0, 8);
+  const pct = (v?: number) => (v != null ? `${Math.round(v)}%` : "—");
+  return (
+    <div className="space-y-4 text-sm">
+      <div className="grid grid-cols-3 gap-2">
+        <StatTile label="CPU" value={pct(host?.cpu_percent)} />
+        <StatTile label="Memory" value={pct(host?.memory_percent)} />
+        <StatTile label="Disk" value={pct(host?.disk_percent)} />
+      </div>
+      {host?.memory_used_gb != null && host?.memory_total_gb != null && (
+        <p className="-mt-2 text-[11px] text-slate-400">RAM {host.memory_used_gb.toFixed(0)} / {host.memory_total_gb.toFixed(0)} GB</p>
+      )}
+      <div>
+        <SubHead label="GPUs" />
+        {gpus.length === 0 ? (
+          <p className="text-slate-400">No GPU telemetry.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {gpus.map((g) => (
+              <div key={g.index}>
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="truncate text-slate-600">{g.name}</span>
+                  <span className="shrink-0 font-mono text-slate-700">{Math.round(g.util)}% · {Math.round(g.watts)}W</span>
+                </div>
+                <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.min(100, g.util)}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <SubHead label="Cost · 24h" />
+        <div className="grid grid-cols-2 gap-2">
+          <StatTile label="API spend" value={spend != null ? `$${spend.toFixed(2)}` : "—"} tone="emerald" />
+          <StatTile label="Power (proj)" value={projected != null ? `$${projected.toFixed(2)}/d` : "—"} />
+        </div>
+      </div>
+      <div>
+        <SubHead label="Recent certifications" />
+        {certs.length === 0 ? (
+          <p className="text-slate-400">None in the window.</p>
+        ) : (
+          <ul className="space-y-1">
+            {certs.map((c, i) => (
+              <li key={c.canonical_key ?? c.arxiv_id ?? `${i}`} className="flex items-start gap-1.5 text-xs text-slate-600">
+                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                <span className="line-clamp-1">{c.title ?? c.arxiv_id ?? c.canonical_key ?? "a source"}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

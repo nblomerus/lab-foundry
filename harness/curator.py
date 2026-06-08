@@ -439,18 +439,17 @@ class Curator:
 
     async def _constitution_layer(self) -> PromptLayer:
         s = await self.state.get_company_state()
-        if s.current_phase == "execution" and s.charter:
-            body = (
-                f"## Charter (committed thesis)\n{s.charter}\n\n"
-                f"## Stance\n{s.stance or '(unset)'}\n\n"
-                f"## Success criterion\n{s.success_criterion or '(unset)'}"
-            )
-        else:
-            body = (
-                f"## Seed problem\n{s.problem_statement}\n\n"
-                f"## Stance\n{s.stance or '(unset)'}\n\n"
-                f"## Success criterion\n{s.success_criterion or '(unset)'}"
-            )
+        # Stage 0 (market-PI neutralized): the constitution always grounds agents in
+        # the seed problem. The old execution-phase branch injected company_state.charter
+        # — a committed MARKET thesis the phase-transition PI wrote AUTONOMOUSLY — into
+        # every agent's prompt (priority 0). Disabled so a stale or auto-written charter
+        # can't hijack the lab's direction. Re-enable only with an explicit, human-gated
+        # charter path if the market-lifecycle is ever intentionally reinstated.
+        body = (
+            f"## Seed problem\n{s.problem_statement}\n\n"
+            f"## Stance\n{s.stance or '(unset)'}\n\n"
+            f"## Success criterion\n{s.success_criterion or '(unset)'}"
+        )
         return PromptLayer(name="constitution", content=body, priority=0)
 
     async def _phase_layer(self) -> PromptLayer:
