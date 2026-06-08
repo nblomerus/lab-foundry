@@ -14,6 +14,8 @@ const TABS = [
   { href: "/", label: "Floorplan" },
   { href: "/agents", label: "Agents" },
   { href: "/claims", label: "Claims" },
+  { href: "/ariadne", label: "Ariadne" },
+  { href: "/researchers", label: "Researchers" },
   { href: "/events", label: "Events" },
   { href: "/org", label: "Org" },
   { href: "/trace", label: "Trace" },

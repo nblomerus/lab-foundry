@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 import asyncpg
 
+from harness.agent_modes import agent_of, get_agent_mode, should_run
 from harness.session import Session
 
 log = logging.getLogger(__name__)
@@ -194,6 +195,16 @@ class Dispatcher:
         if handler is None:
             await self._mark_suppressed(event_id, "no_handler")
             return
+
+        # Per-agent mode dial (Stage 4 / debug control): run only when advisory|active.
+        # off|shadow pause the agent — applies even to URGENT events (a deliberate pause
+        # must hold regardless of urgency). System handlers (agent_of -> None) never gate.
+        agent = agent_of(handler)
+        if agent is not None:
+            mode = await get_agent_mode(self.pool, agent)
+            if not should_run(mode):
+                await self._mark_suppressed(event_id, f"agent_{mode}")
+                return
 
         is_urgent = event["event_type"] in URGENT_EVENTS
 
@@ -635,29 +646,14 @@ class Dispatcher:
             asyncio.create_task(self._process_event(r["id"]))
 
     async def _check_phase_budget(self, conn) -> None:
-        state = await conn.fetchrow("SELECT current_phase, phase_started_at FROM company_state WHERE id = 1")
-        if state is None:
-            return
-        budget = PHASE_BUDGET_DAYS.get(state["current_phase"])
-        if budget is None:
-            return
-
-        elapsed = (datetime.now(UTC) - state["phase_started_at"]).days
-        if elapsed > int(budget * 1.5):
-            await conn.execute(
-                """
-                INSERT INTO events (event_type, target_type, payload, dedup_key)
-                VALUES (
-                    'phase.budget_exceeded',
-                    'phase',
-                    $1::jsonb,
-                    'budget-' || $2
-                )
-                ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
-                """,
-                json.dumps({"phase": state["current_phase"], "elapsed_days": elapsed}),
-                state["current_phase"],
-            )
+        # DISABLED — Stage 0 (market-PI neutralized). This watchdog used to emit
+        # `phase.budget_exceeded` on a 1.5× phase overrun, which autonomously drove
+        # `phase.transition_proposed` → a committed market charter written into
+        # company_state → every agent's prompt swapped to that charter. A research lab
+        # (Ariadne is the research PI) must have no market-lifecycle autopilot, so the
+        # trigger is removed. The handlers are also unregistered (harness/main.py) and
+        # the charter injection is disabled (curator._constitution_layer) — defence in depth.
+        return
 
     async def _refresh_slop_view(self, conn) -> None:
         # Plain REFRESH (not CONCURRENTLY): migration 008 recreated this matview as

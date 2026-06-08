@@ -7,7 +7,7 @@ import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { AlertTriangle, CheckCircle2, Cpu, Gauge, Library, ShieldCheck, Zap } from "lucide-react";
 import { Sparkline, StatusPill, MiniBar, cx } from "../ui";
 import { compact } from "../../lib/format";
-import type { DebugCosts, HostStats, KnowledgeStats, MimirPanel, ScoutPanel } from "../../lib/api";
+import type { AriadneOverview, DebugCosts, HostStats, KnowledgeStats, MimirPanel, ScoutPanel } from "../../lib/api";
 import type { NodeDef } from "./topology";
 
 export type Selected =
@@ -15,6 +15,11 @@ export type Selected =
   | { kind: "mimir"; title: string }
   | { kind: "library"; title: string }
   | { kind: "gate"; scope: string; title: string }
+  | { kind: "ariadne"; title: string }
+  | { kind: "queue"; title: string }
+  | { kind: "planner"; title: string }
+  | { kind: "researcher"; title: string }
+  | { kind: "ops"; title: string }
   | { kind: "info"; title: string; sub?: string; description?: string };
 
 export interface FloorNodeData {
@@ -25,6 +30,7 @@ export interface FloorNodeData {
   stats?: KnowledgeStats | null;
   host?: HostStats | null;
   costs?: DebugCosts | null;
+  ariadne?: AriadneOverview | null;
   priority?: string | null;
   onOpen?: (sel: Selected) => void;
   // React Flow v12 requires node data to extend Record<string, unknown>.
@@ -42,6 +48,8 @@ function NodeHandles() {
       <Handle id="b" type="source" position={Position.Bottom} style={HANDLE_STYLE} isConnectable={false} />
       <Handle id="l" type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />
       <Handle id="r" type="source" position={Position.Right} style={HANDLE_STYLE} isConnectable={false} />
+      {/* top-source handle — lets a return/feedback edge ORIGINATE from the top and arc over the row */}
+      <Handle id="ts" type="source" position={Position.Top} style={HANDLE_STYLE} isConnectable={false} />
     </>
   );
 }
@@ -171,12 +179,16 @@ function sumKinds(stats?: KnowledgeStats | null): number | null {
 }
 
 export function StorageNode({ data }: NodeProps<FN>) {
-  const { def, stats } = data;
-  const live = def.live;
+  const { def, stats, ariadne } = data;
+  let live = def.live;
   let value: string | number = "—";
   let sub = def.sub ?? "";
   let delta: string | null = null;
-  if (live && stats) {
+  if (def.storageVariant === "claims") {
+    // The Claim Ledger is live once the PI (Ariadne) has framed claims.
+    const n = ariadne?.at_a_glance.claims_total ?? null;
+    if (n != null) { live = n > 0; value = compact(n); sub = "mission · directions"; }
+  } else if (live && stats) {
     if (def.storageVariant === "raw") {
       value = compact(sumKinds(stats) ?? 0);
       delta = stats.corpus?.docs_today ? `+${compact(stats.corpus.docs_today)} (24h)` : null;
@@ -299,8 +311,60 @@ export function OpsNode({ data }: NodeProps<FN>) {
 }
 
 // --- Dormant -----------------------------------------------------------
+const MODE_DOT: Record<string, string> = {
+  active: "bg-emerald-500", advisory: "bg-blue-500", shadow: "bg-amber-500", off: "bg-slate-400",
+};
+
+// Ariadne + the request queue are BUILT, so they show live status (not "Planned").
+function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
+  { dot: string; status: string; value: string; sub: string } | null {
+  if (!ariadne) return null;
+  const ag = ariadne.at_a_glance;
+  if (def.id === "ariadne") {
+    return { dot: MODE_DOT[ariadne.mode] ?? "bg-slate-400", status: ariadne.mode,
+             value: `${ag.active_directions} directions`, sub: ag.status };
+  }
+  if (def.id === "request-queue") {
+    const n = ag.acquire_requests_24h ?? 0;
+    return { dot: n > 0 ? "bg-emerald-500" : "bg-slate-400", status: n > 0 ? "Live" : "Idle",
+             value: `${n} asks`, sub: "acquire · 24h" };
+  }
+  if (def.id === "planner" && (ag.planner_mode === "advisory" || ag.planner_mode === "active")) {
+    return { dot: MODE_DOT[ag.planner_mode] ?? "bg-slate-400", status: ag.planner_mode,
+             value: `${ag.research_tasks ?? 0} tasks`, sub: `${ag.research_tasks_pending ?? 0} pending` };
+  }
+  if (def.id === "researchers" && (ag.researcher_mode === "advisory" || ag.researcher_mode === "active")) {
+    const pending = ag.research_tasks_pending ?? 0;
+    return { dot: MODE_DOT[ag.researcher_mode] ?? "bg-slate-400", status: ag.researcher_mode,
+             value: `${ag.research_tasks ?? 0} tasks`, sub: pending > 0 ? `${pending} investigating` : "findings ready" };
+  }
+  return null;
+}
+
 export function DormantNode({ data }: NodeProps<FN>) {
-  const { def } = data;
+  const { def, ariadne } = data;
+  const lv = dormantLive(def, ariadne);
+  if (lv) {
+    return (
+      <div className="flex h-full w-full cursor-pointer flex-col rounded-node border border-slate-200 bg-white/90 p-3 shadow-card backdrop-blur transition hover:shadow-panel">
+        <NodeHandles />
+        <div className="flex items-center justify-between">
+          <div className="flex min-w-0 items-center gap-2">
+            <IconTile icon={def.icon} tone="violet" />
+            <div className="min-w-0">
+              <div className="truncate text-[12px] font-semibold leading-tight text-slate-800">{def.title}</div>
+              <div className="truncate text-[10px] text-slate-400">{def.sub}</div>
+            </div>
+          </div>
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">
+            <span className={cx("h-1.5 w-1.5 rounded-full", lv.dot)} /> {lv.status}
+          </span>
+        </div>
+        <div className="mt-2 text-xl font-semibold tabular-nums text-slate-900">{lv.value}</div>
+        <div className="text-[10px] text-slate-400">{lv.sub}</div>
+      </div>
+    );
+  }
   return (
     <div className="flex h-full w-full cursor-pointer flex-col rounded-node border border-dashed border-slate-200 bg-white/45 p-3 transition hover:bg-white/70">
       <NodeHandles />

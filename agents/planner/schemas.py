@@ -93,3 +93,26 @@ class CritiquedTasks(BaseModel):
         "Low confidence is honest signal — the swarm will run them anyway, "
         "but trace observers can spot weak batches.",
     )
+
+
+# ── Direction → research tasks (Stage 2: Ariadne's approved directions) ──────
+
+
+class ResearchTask(BaseModel):
+    """One executable research task for the Researcher, decomposed from a direction."""
+
+    title: str
+    description: str = Field(..., description="the concrete instruction the Researcher executes")
+    task_type: str = Field("analyze", description="survey|analyze|compare|reproduce|falsify|deepen")
+    rationale: str = Field("", description="which goal/expectation this task advances")
+    priority: str = Field("medium", description="high | medium | low")
+
+
+class DirectionPlan(BaseModel):
+    claim_id: int = Field(..., description="the approved direction this plan decomposes")
+    tasks: list[ResearchTask] = Field(default_factory=list)
+
+
+class PlanOutput(BaseModel):
+    plans: list[DirectionPlan] = Field(default_factory=list)
+    notes: str = Field("", description="planning notes / sequencing")

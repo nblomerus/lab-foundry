@@ -5,7 +5,7 @@
 // real ops cost telemetry (/debug/costs). All read-only, polled.
 
 import { useEffect, useState } from "react";
-import { api, type DebugCosts, type ScoutPanel } from "../../lib/api";
+import { api, type AriadneOverview, type DebugCosts, type ScoutPanel } from "../../lib/api";
 import { useKnowledgePulse, type KnowledgePulse } from "../../lib/pulse";
 
 const SCOUT_KINDS = ["web", "arxiv", "github", "openml", "dataset"] as const;
@@ -15,6 +15,7 @@ export interface FloorData {
   scouts: Record<string, ScoutPanel | null>;
   scoutSeries: Record<string, number[]>;
   costs: DebugCosts | null;
+  ariadne: AriadneOverview | null;
 }
 
 export function useFloorData(): FloorData {
@@ -22,18 +23,21 @@ export function useFloorData(): FloorData {
   const [scouts, setScouts] = useState<Record<string, ScoutPanel | null>>({});
   const [scoutSeries, setScoutSeries] = useState<Record<string, number[]>>({});
   const [costs, setCosts] = useState<DebugCosts | null>(null);
+  const [ariadne, setAriadne] = useState<AriadneOverview | null>(null);
 
-  // Scout panels + ops costs — poll at the dashboard cadence.
+  // Scout panels + ops costs + Ariadne's live state — poll at the dashboard cadence.
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       const panels = await Promise.all(SCOUT_KINDS.map((k) => api.scoutPanel(k).catch(() => null)));
       const cost = await api.debugCosts().catch(() => null);
+      const ari = await api.ariadneOverview().catch(() => null);
       if (cancelled) return;
       const next: Record<string, ScoutPanel | null> = {};
       SCOUT_KINDS.forEach((k, i) => { next[k] = panels[i]; });
       setScouts(next);
       setCosts(cost);
+      setAriadne(ari);
     };
     load();
     const id = setInterval(load, 10_000);
@@ -61,5 +65,5 @@ export function useFloorData(): FloorData {
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  return { pulse, scouts, scoutSeries, costs };
+  return { pulse, scouts, scoutSeries, costs, ariadne };
 }

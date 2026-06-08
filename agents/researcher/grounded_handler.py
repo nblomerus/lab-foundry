@@ -1,0 +1,101 @@
+"""
+Research-era Researcher handler — triggered by `task.created`.
+
+Claims one pending research task and EXECUTES it against the certified Library
+(agents.researcher.grounded.investigate_task), then feeds the verdict back onto the direction it
+serves (agents.researcher.feedback) so Ariadne's reflection becomes OUTCOME-aware. This supersedes
+the market-era web/Reddit researcher — the lab researches its own trusted corpus.
+
+Mode-gated on the 'researcher' dial: off/shadow → it does NOT claim (no-op, the dry state);
+advisory/active → it runs the full loop (finding → confidence / last_evidence_at / self-healing
+acquire). Concurrency-safe: claim_task is atomic, so concurrent invocations take distinct tasks.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+
+from agents.researcher.feedback import (
+    aggregate_direction,
+    apply_feedback,
+    disposition,
+    finding_feedback,
+    refine_disposition,
+)
+from agents.researcher.grounded import grade_finding, investigate_task
+from harness.agent_modes import get_agent_mode
+
+log = logging.getLogger(__name__)
+
+
+async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
+    """Claim + investigate one research task against the Library; feed the verdict back to its
+    direction. No-op unless researcher mode is advisory|active (off/shadow = dry)."""
+    state = dispatcher.state
+    mode = await get_agent_mode(state.pool, "researcher")
+    if mode not in ("advisory", "active"):
+        return {"skipped": True, "reason": f"researcher mode {mode}"}
+
+    worker = f"researcher-{uuid.uuid4().hex[:8]}"
+    task = await state.claim_task(worker_id=worker, department="research")
+    if task is None:
+        return {"skipped": True, "reason": "no claimable research task"}
+
+    log.info("researcher %s claimed T%s: %s", worker, task.id, (task.description or "")[:80])
+    try:
+        # emit=True → the Ariadne↔Mimir conversation shows live (floorplan + history).
+        result = await investigate_task(state, task.id, emit=True)
+    except Exception as e:  # noqa: BLE001 — a task-level failure must not sink the harness
+        log.exception("grounded researcher failed for T%s", task.id)
+        await state.fail_task(task.id, error=f"grounded researcher: {e}")
+        return {"task_id": task.id, "failed": True, "reason": str(e)[:200]}
+    if result is None:
+        await state.fail_task(task.id, error="task context missing")
+        return {"task_id": task.id, "failed": True, "reason": "no context"}
+
+    ctx, refs, _mimir, finding = result
+    grade = grade_finding(finding, refs)
+    # The feedback seam touches the DB (confidence / last_evidence / acquires). It must NEVER strand
+    # the task — a failure here would leave it 'running', get reaped to 'pending', and re-loop. So we
+    # always complete the task below, even if steering failed.
+    try:
+        disp = await refine_disposition(state, ctx["claim_id"], disposition(finding))
+        fb = aggregate_direction(
+            ctx["claim_id"],
+            ctx["direction"],
+            [finding_feedback(ctx, finding, grade["grounded"], disposition_override=disp)],
+        )
+        applied = await apply_feedback(state, fb)  # confidence / last_evidence_at / self-healing acquire
+    except Exception as e:  # noqa: BLE001 — steering is best-effort; the finding still completes
+        log.exception("grounded researcher: feedback failed for T%s", task.id)
+        disp, applied = disposition(finding), {"feedback_error": str(e)[:200]}
+
+    await state.complete_task(
+        task_id=task.id,
+        result={
+            "worker": worker,
+            "verdict": finding.verdict,
+            "blocker": finding.blocker,
+            "disposition": disp,
+            "grounded": grade["grounded"],
+            "confidence": finding.confidence,
+            "summary": finding.summary,
+            "key_evidence": finding.key_evidence[:6],
+            "kill_condition_check": finding.kill_condition_check,
+            "gaps": finding.gaps[:6],
+            "acquire_queries": finding.acquire_queries[:6],
+            "next_step": finding.next_step,
+            "queries": ctx.get("queries", []),
+            "n_evidence": len(refs),
+            "applied": applied,
+        },
+    )
+    log.info(
+        "researcher T%s → %s (Δconf=%s acquires=%s)",
+        task.id,
+        disp,
+        applied.get("confidence"),
+        applied.get("acquires_fired", 0),
+    )
+    return {"task_id": task.id, "disposition": disp, "applied": applied}

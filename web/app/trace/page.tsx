@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Network, RefreshCw, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Network, RefreshCw, AlertTriangle, CheckCircle2, Loader2, Route } from "lucide-react";
 import { api, type TraceSessionSummary, type TraceSessionsResponse } from "../lib/api";
 import { useEventStream } from "../lib/ws";
 import { Badge, Card, SectionTitle, cx } from "../components/ui";
@@ -29,6 +30,9 @@ export default function TracePage() {
   const [handler, setHandler] = useState<string>("");
   const [status, setStatus] = useState<string>("");
   const [mode, setMode] = useState<string>("");
+  const [withSteps, setWithSteps] = useState(true);
+  const [journeyRef, setJourneyRef] = useState("");
+  const router = useRouter();
   const { latest } = useEventStream(20);
 
   const load = useCallback(() => {
@@ -38,10 +42,11 @@ export default function TracePage() {
         handler_name: handler || undefined,
         status: status || undefined,
         mode: mode || undefined,
+        min_steps: withSteps ? 1 : 0,
       })
       .then(setData)
       .catch(() => {});
-  }, [handler, status, mode]);
+  }, [handler, status, mode, withSteps]);
 
   useEffect(() => {
     load();
@@ -80,6 +85,44 @@ export default function TracePage() {
           <RefreshCw className="h-4 w-4" /> Refresh
         </button>
       </div>
+
+      <Card>
+        <SectionTitle
+          icon={Route}
+          title="Journeys"
+          subtitle="Follow a source across the whole pipeline: scout → Mimir gate → Library, with every event and its output. The session DAGs below are one handler each; a journey is the cross-pipeline timeline."
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/trace/journeys"
+            className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-slate-800"
+          >
+            <Route className="h-4 w-4" /> Browse journeys
+          </Link>
+          <span className="text-sm text-slate-400">or jump straight to one:</span>
+          <form
+            className="flex flex-1 flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const ref = journeyRef.trim();
+              if (ref) router.push(`/trace/journey/${ref.split("/").map(encodeURIComponent).join("/")}`);
+            }}
+          >
+            <input
+              value={journeyRef}
+              onChange={(e) => setJourneyRef(e.target.value)}
+              placeholder="canonical_key, arxiv id, or document id"
+              className="min-w-[16rem] flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm"
+            />
+            <button
+              type="submit"
+              className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+            >
+              Open
+            </button>
+          </form>
+        </div>
+      </Card>
 
       <GraphStatsPanel />
 
@@ -121,6 +164,15 @@ export default function TracePage() {
             <option value="live">live only</option>
             <option value="replay">replay only</option>
           </select>
+          <label className="ml-1 inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={withSteps}
+              onChange={(e) => setWithSteps(e.target.checked)}
+              className="accent-slate-900"
+            />
+            with model steps only
+          </label>
         </div>
 
         <div className="overflow-hidden rounded-2xl border border-slate-200">

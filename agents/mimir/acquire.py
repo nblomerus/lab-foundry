@@ -74,42 +74,47 @@ async def request_acquire(state, req: AcquireRequest) -> None:
     )
 
 
-async def _resolve_descriptor(req: AcquireRequest) -> SourceDescriptor | None:
-    """Turn a request into a concrete SourceDescriptor. Explicit identifiers map
-    directly; a `query` is resolved to the top arXiv hit. Returns None if nothing
-    resolves."""
+async def _resolve_candidates(req: AcquireRequest, *, n: int = 8) -> list[SourceDescriptor]:
+    """Turn a request into concrete SourceDescriptor CANDIDATES. Explicit identifiers map to a
+    single descriptor; a `query` resolves to the TOP-N arXiv hits (not just the top one) so the
+    caller can skip ones already in the corpus and fetch a genuinely-new paper — the difference
+    between a gap request returning `fulfilled` vs falsely `already_have`."""
     if req.arxiv_id:
-        return SourceDescriptor(
-            kind="paper",
-            source_kind="arxiv",
-            canonical_key=req.arxiv_id,
-            url=f"https://arxiv.org/abs/{req.arxiv_id}",
-            arxiv_id=req.arxiv_id,
-            why=req.why,
-        )
+        return [
+            SourceDescriptor(
+                kind="paper",
+                source_kind="arxiv",
+                canonical_key=req.arxiv_id,
+                url=f"https://arxiv.org/abs/{req.arxiv_id}",
+                arxiv_id=req.arxiv_id,
+                why=req.why,
+            )
+        ]
     if req.doi:
-        return SourceDescriptor(
-            kind=req.kind,
-            source_kind="doi",
-            canonical_key=req.doi,
-            url=f"https://doi.org/{req.doi}",
-            doi=req.doi,
-            why=req.why,
-        )
+        return [
+            SourceDescriptor(
+                kind=req.kind,
+                source_kind="doi",
+                canonical_key=req.doi,
+                url=f"https://doi.org/{req.doi}",
+                doi=req.doi,
+                why=req.why,
+            )
+        ]
     if req.url:
-        return SourceDescriptor(
-            kind=req.kind,
-            source_kind="web",
-            canonical_key=req.url,
-            url=req.url,
-            why=req.why,
-        )
+        return [SourceDescriptor(kind=req.kind, source_kind="web", canonical_key=req.url, url=req.url, why=req.why)]
     if req.query:
-        hits = await scout_arxiv([req.query], per_topic=1)
-        if hits:
-            d = hits[0]
-            return d.model_copy(update={"why": req.why})
-    return None
+        # Walk a few pages (newest → older) so a relevant paper the scouts haven't reached can
+        # still be found, not just the newest hits the scouts already pulled.
+        pages = int(os.environ.get("MIMIR_ACQUIRE_PAGES", "3"))
+        out: list[SourceDescriptor] = []
+        for pg in range(max(1, pages)):
+            hits = await scout_arxiv([req.query], per_topic=n, start=pg * n)
+            if not hits:
+                break
+            out.extend(d.model_copy(update={"why": req.why}) for d in hits)
+        return out
+    return []
 
 
 async def _reply(state, req: AcquireRequest, *, status: str, reason: str, document_id: int | None = None) -> dict:
@@ -155,14 +160,23 @@ async def handle_acquire_requested(event: dict, dispatcher) -> dict | None:
     if await state.count_acquires_today(req.requester) > cap:
         return await _reply(state, req, status="rate_limited", reason=f"daily acquire cap ({cap}) reached")
 
-    # (2) resolve to a concrete source.
-    desc = await _resolve_descriptor(req)
-    if desc is None:
+    # (2) resolve to candidate sources (top-N for a query).
+    candidates = await _resolve_candidates(req)
+    if not candidates:
         return await _reply(state, req, status="rejected", reason="could not resolve request to a source")
 
-    # (3) dedupe against the corpus — cheap, avoids a re-fetch.
-    if await state.document_exists(desc.source_kind, desc.canonical_key):
-        return await _reply(state, req, status="already_have", reason="already in the corpus")
+    # (3) dedupe — walk the candidates and pick the FIRST one NOT already in the corpus, so a
+    # real gap fetches a genuinely-new paper instead of falsely deduping on the top hit. Only if
+    # EVERY candidate is already ingested do we report already_have (the area is truly covered).
+    desc = None
+    for c in candidates:
+        if not await state.document_exists(c.source_kind, c.canonical_key):
+            desc = c
+            break
+    if desc is None:
+        return await _reply(
+            state, req, status="already_have", reason=f"all {len(candidates)} top matches already in the corpus"
+        )
 
     # (4) trust-gated ingest (stage → classify → certify/finalize, or block).
     result = await ingest_source(

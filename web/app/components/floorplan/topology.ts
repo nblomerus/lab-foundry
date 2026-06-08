@@ -9,8 +9,8 @@ import {
 } from "lucide-react";
 
 export type FloorNodeType = "wing" | "scout" | "mimir" | "storage" | "ops" | "dormant" | "librarybox";
-export type InspectorKind = "mimir" | "library" | "scout" | "gate" | "info";
-export type Handle = "t" | "b" | "l" | "r";
+export type InspectorKind = "mimir" | "library" | "scout" | "gate" | "ariadne" | "queue" | "planner" | "researcher" | "ops" | "info";
+export type Handle = "t" | "b" | "l" | "r" | "ts";  // ts = top-source (return/feedback edges)
 
 export interface NodeDef {
   id: string;
@@ -36,7 +36,7 @@ export interface EdgeDef {
   target: string;
   sourceHandle: Handle;
   targetHandle: Handle;
-  kind: "intake" | "knowledge" | "workflow";
+  kind: "intake" | "knowledge" | "workflow" | "converse" | "feedback";
   live: boolean;
   hotEvents: string[];
   sourceKind?: string; // scope heat to one scout kind
@@ -44,6 +44,7 @@ export interface EdgeDef {
 
 const SCOUT_EVENTS = ["source.discovered", "library.sweep_requested", "library.trends"];
 const LIB_EVENTS = ["document.ingested", "document.parsed"];
+const ACQUIRE_EVENTS = ["acquire.requested", "acquire.fulfilled", "acquire.rejected"];
 
 // --- Wing backdrops (rendered behind, non-interactive) -------------------
 const WINGS: NodeDef[] = [
@@ -68,36 +69,42 @@ const SCOUTS: NodeDef[] = [
 // --- Research & Discovery (dormant) -------------------------------------
 const RESEARCH: NodeDef[] = [
   { id: "ariadne", x: 1088, y: 112, w: 180, h: 156, title: "Ariadne", sub: "Principal Investigator", icon: Compass,
-    description: "Frames research directions and decides what to pursue or kill. Activates with the research workflow." },
+    inspector: "ariadne" as const,
+    description: "Frames research directions and decides what to pursue or kill." },
   { id: "planner", x: 1284, y: 112, w: 150, h: 156, title: "Planner", sub: "Schedules & goals", icon: Calendar,
-    description: "Turns directions into concrete, falsifiable tasks. Activates with the research workflow." },
+    inspector: "planner" as const,
+    description: "Turns Ariadne's approved directions into concrete, falsifiable research tasks." },
   { id: "researchers", x: 1450, y: 112, w: 186, h: 156, title: "Researchers", sub: "Investigate & gather", icon: Users,
-    description: "Investigate directions and gather grounded evidence from the Library. Activates with the research workflow." },
-].map((n) => ({ ...n, type: "dormant" as const, live: false, inspector: "info" as const }));
+    inspector: "researcher" as const,
+    description: "Execute the planner's tasks against the Library — grounded findings that steer each direction." },
+].map((n) => ({ ...n, type: "dormant" as const, live: false }));
 
 // --- Knowledge core: Mimir + request queue + storage row ----------------
 const CORE: NodeDef[] = [
   { id: "mimir", type: "mimir", x: 72, y: 356, w: 372, h: 196, title: "Mimir", sub: "AI Curator of Knowledge",
     icon: ShieldCheck, live: true, inspector: "mimir" },
   { id: "request-queue", type: "dormant", x: 720, y: 356, w: 280, h: 196, title: "Request Queue", sub: "Acquire asks", icon: Inbox,
-    live: false, inspector: "info",
-    description: "Agents request missing sources here once the research workflow is live. Empty by design today." },
-  // Decorative container that groups the three live storage cards as one Library
-  // (they all open the same Library inspector). Anchors the Mimir -> Library flow.
+    live: false, inspector: "queue",
+    description: "Agents ask Mimir to acquire specific evidence; Mimir resolves, dedupes, and trust-gates the ingest." },
+  // Decorative containers that group the storage cards. LIBRARY = the queryable corpus
+  // (raw / vector / graph); LEDGERS = the research record (claims / runs). Both open the
+  // cards' own inspectors. Library anchors the Mimir -> Library flow.
   { id: "library-box", type: "librarybox", x: 44, y: 572, w: 582, h: 172, title: "Library", sub: "Queryable research memory", live: true },
+  { id: "ledgers-box", type: "librarybox", x: 660, y: 572, w: 394, h: 172, title: "Ledgers", sub: "Research record", live: true },
 ];
 
 const STORAGE_SRC: Array<Pick<NodeDef, "id" | "storageVariant" | "title" | "sub" | "icon" | "live" | "inspector" | "description">> = [
   { id: "raw-archive", storageVariant: "raw", title: "Raw Archive", sub: "Documents & files", icon: Archive, live: true, inspector: "library" },
   { id: "vector-memory", storageVariant: "vector", title: "Vector Memory", sub: "Embeddings & chunks", icon: Boxes, live: true, inspector: "library" },
   { id: "context-graph", storageVariant: "graph", title: "Context Graph", sub: "Nodes & relationships", icon: Network, live: true, inspector: "library" },
-  { id: "claim-ledger", storageVariant: "claims", title: "Claim Ledger", sub: "Claims", icon: ScrollText, live: false, inspector: "info",
-    description: "The research claim ledger. Populated once the PI starts framing claims." },
-  { id: "experiment-ledger", storageVariant: "experiments", title: "Experiment Ledger", sub: "Runs", icon: FlaskConical, live: false, inspector: "info",
+  { id: "claim-ledger", storageVariant: "claims", title: "Claim Ledger", sub: "Claims", icon: ScrollText, live: false, inspector: "ariadne",
+    description: "The research claim ledger — Ariadne's mission + directions." },
+  { id: "experiment-ledger", storageVariant: "experiments", title: "Run Ledger", sub: "Experiments", icon: FlaskConical, live: false, inspector: "info",
     description: "Benchmark/experiment runs. Populated once the experiments agent is live." },
 ];
+// First 3 cards sit in the LIBRARY box; the 2 ledgers (i >= 3) shift right into the LEDGERS box.
 const STORAGE: NodeDef[] = STORAGE_SRC.map((s, i) => ({
-  ...s, type: "storage" as const, x: 56 + i * 192, y: 600, w: 178, h: 128,
+  ...s, type: "storage" as const, x: 56 + i * 192 + (i >= 3 ? 40 : 0), y: 600, w: 178, h: 128,
 }));
 
 // --- Evaluation & output (dormant) --------------------------------------
@@ -115,7 +122,7 @@ const EVALUATION: NodeDef[] = [
 // --- Operations (live) ---------------------------------------------------
 const OPERATIONS: NodeDef[] = [
   { id: "ops", type: "ops", x: 56, y: 812, w: 1572, h: 170, title: "Ops / Quartermaster", sub: "Infrastructure & resources",
-    icon: Cpu, live: true },
+    icon: Cpu, live: true, inspector: "ops" },
 ];
 
 export const NODE_DEFS: NodeDef[] = [...WINGS, ...SCOUTS, ...RESEARCH, ...CORE, ...STORAGE, ...EVALUATION, ...OPERATIONS];
@@ -128,7 +135,25 @@ export const EDGE_DEFS: EdgeDef[] = [
   })),
   // Mimir -> Library (certified knowledge flows into the Library box)
   { id: "k-lib", source: "mimir", target: "library-box", sourceHandle: "b", targetHandle: "t", kind: "knowledge", live: true, hotEvents: LIB_EVENTS },
+  { id: "w-queue", source: "mimir", target: "request-queue", sourceHandle: "r", targetHandle: "l", kind: "workflow", live: true, hotEvents: ACQUIRE_EVENTS },
+  // Ariadne's wiring — kept short so no path crosses a block. She ASKS the Request Queue for
+  // evidence (live; pulses on acquire) — her interface to the knowledge core (queue → Mimir →
+  // Library) — and feeds the Planner → Researchers pipeline (planned until they wake).
+  { id: "w-aria-queue", source: "ariadne", target: "request-queue", sourceHandle: "b", targetHandle: "t", kind: "knowledge", live: true, hotEvents: ACQUIRE_EVENTS },
+  // Ariadne CONVERSES with Mimir directly (GraphRAG multi-hop ask) — its own violet "converse"
+  // kind, threaded above the queue into Mimir's top so the path crosses no block. Pulses while a
+  // question/answer is in flight.
+  { id: "w-aria-mimir", source: "ariadne", target: "mimir", sourceHandle: "b", targetHandle: "t", kind: "converse", live: true, hotEvents: ["mimir.ask", "mimir.answered"] },
+  { id: "w-aria-plan", source: "ariadne", target: "planner", sourceHandle: "r", targetHandle: "l", kind: "workflow", live: true, hotEvents: ["planner.plan", "task.created"] },
+  // Planner hands tasks to the Researchers (live; pulses as tasks are created + completed).
+  { id: "w-plan-research", source: "planner", target: "researchers", sourceHandle: "r", targetHandle: "l", kind: "workflow", live: true, hotEvents: ["task.created", "task.completed"] },
+  // The Researchers ASK the Request Queue for evidence too (self-healing acquires) — threaded
+  // bottom→top below the research wing so it crosses no block, like Ariadne's queue edge.
+  { id: "w-research-queue", source: "researchers", target: "request-queue", sourceHandle: "b", targetHandle: "t", kind: "knowledge", live: true, hotEvents: ACQUIRE_EVENTS },
+  // The FEEDBACK loop that CLOSES the autonomous cycle: research findings move each direction's
+  // confidence/last_evidence, which Ariadne's reflection reads to steer. Routed top→top so it
+  // arcs OVER the Planner (both top handles are otherwise free) — crosses no block. Amber.
+  { id: "w-research-aria", source: "researchers", target: "ariadne", sourceHandle: "ts", targetHandle: "t", kind: "feedback", live: true, hotEvents: ["claim.confidence_changed", "task.completed"] },
   // dormant handoffs (planned, never heat)
-  { id: "w-queue", source: "mimir", target: "request-queue", sourceHandle: "r", targetHandle: "l", kind: "workflow", live: false, hotEvents: [] },
   { id: "w-eval", source: "library-box", target: "experiments", sourceHandle: "r", targetHandle: "l", kind: "workflow", live: false, hotEvents: [] },
 ];

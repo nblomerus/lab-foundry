@@ -43,3 +43,4 @@ data/
 ### Docker / Postgres mount
 postgres-data/
 langfuse-db-data/
+backups/

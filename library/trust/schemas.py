@@ -33,6 +33,10 @@ class DocMeta(BaseModel):
     github_has_release: bool | None = None
     github_days_since_push: int | None = None
     retracted: bool = False  # arXiv withdrawal / DOI retraction -> hard-gate BLOCK
+    # A retraction check was APPLICABLE (arXiv id / DOI present) but could not be
+    # completed (probe outage). Distinct from retracted=False (verified clean) so the
+    # gate can fail CLOSED instead of admitting a possibly-retracted source as clean.
+    retraction_unverified: bool = False
 
 
 class TrustClassification(BaseModel):

@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 
 import httpx
 from pydantic import BaseModel
@@ -56,6 +57,10 @@ _SCOUT_UA = "labfoundry-scout"
 # fans over many topics, so we space the calls. Self-hosted SearXNG and the HF
 # hub are generous and don't pace.
 _SCOUT_TOPIC_DELAY = float(os.environ.get("SCOUT_TOPIC_DELAY", "2.5"))
+# OpenML v1 has no substring search and its data_name filter is EXACT (a miss returns
+# HTTP 412 "No results"), so a subfield topic matched ~nothing. We fetch one page of
+# active datasets per scout run and substring-match topic tokens against their names.
+_OPENML_ACTIVE_POOL = int(os.environ.get("OPENML_ACTIVE_POOL", "1000"))
 
 
 # -------------------------------------------------------------------------
@@ -281,29 +286,57 @@ async def scout_dataset(topics: list[str], per_topic: int = 5, *, start: int = 0
 # -------------------------------------------------------------------------
 
 
-async def scout_openml(topics: list[str], per_topic: int = 5, *, start: int = 0) -> list[SourceDescriptor]:
-    """Scout OpenML for benchmark datasets matching `topics` by name. `start` pages
-    deeper (OpenML `offset`). Best-effort: empty list on any failure, one bad topic
-    never sinks the sweep."""
-    seen: dict[str, SourceDescriptor] = {}
+def _openml_topic_tokens(topic: str) -> list[str]:
+    """Lowercased alpha tokens (len>=4) used to substring-match dataset names."""
+    return [w.lower() for w in re.findall(r"[A-Za-z]{4,}", topic)]
+
+
+async def _openml_active_pool(client: httpx.AsyncClient, limit: int, start: int) -> list[dict]:
+    """One page of active datasets (did-ordered) for the substring fallback. Logs on a
+    real failure (vs the silent [] the old scout returned, hiding outages — finding #2)."""
     off = f"/offset/{start}" if start else ""
+    try:
+        resp = await client.get(f"{_OPENML_API}/data/list/status/active/limit/{limit}{off}")
+        if resp.status_code != 200:
+            log.warning("scout_openml: active-list HTTP %d at %s — OpenML degraded", resp.status_code, _OPENML_API)
+            return []
+        return resp.json().get("data", {}).get("dataset", []) or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("scout_openml: active-list fetch failed (%s): %s", _OPENML_API, e)
+        return []
+
+
+async def _openml_exact(client: httpx.AsyncClient, name: str, per_topic: int) -> list[dict]:
+    """Exact data_name match (precise when a topic IS a dataset name). A 412 'No
+    results' is the EXPECTED miss signal here, not an error — return [] quietly."""
+    try:
+        resp = await client.get(f"{_OPENML_API}/data/list/data_name/{name}/status/active/limit/{per_topic}")
+        if resp.status_code != 200:
+            return []
+        return resp.json().get("data", {}).get("dataset", []) or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def scout_openml(topics: list[str], per_topic: int = 5, *, start: int = 0) -> list[SourceDescriptor]:
+    """Scout OpenML for benchmark datasets matching `topics`.
+
+    OpenML's `data_name` filter is EXACT (a miss returns HTTP 412), so a subfield
+    topic matched nothing. We now combine: (1) an exact `data_name` lookup — precise
+    when a topic literally names a dataset (mnist_784, iris, credit-g) — with (2) a
+    substring match of the topic's tokens against a once-fetched page of active
+    datasets. `start` pages the active pool deeper. Best-effort; one bad topic never
+    sinks the sweep. PURE: returns descriptors only."""
+    seen: dict[str, SourceDescriptor] = {}
     async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": _SCOUT_UA}) as client:
+        pool = await _openml_active_pool(client, _OPENML_ACTIVE_POOL, start)
         for topic in topics:
-            # OpenML datasets are named things (mnist, cifar, …), not abstract
-            # subfields, so match the topic's most distinctive word against names.
+            tokens = _openml_topic_tokens(topic)
             kw = next((w for w in topic.split() if w.isalpha() and len(w) > 3), "")
-            url = (
-                f"{_OPENML_API}/data/list/data_name/{kw}/status/active/limit/{per_topic}{off}"
-                if kw
-                else f"{_OPENML_API}/data/list/status/active/limit/{per_topic}{off}"
-            )
-            try:
-                resp = await client.get(url)
-                rows = resp.json().get("data", {}).get("dataset", []) if resp.status_code == 200 else []
-            except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
-                log.warning("scout_openml: topic %r failed: %s", topic, e)
-                continue
-            for d in rows[:per_topic]:
+            exact = await _openml_exact(client, kw, per_topic) if kw else []
+            substr = [d for d in pool if any(t in (d.get("name") or "").lower() for t in tokens)] if tokens else []
+            added = 0
+            for d in exact + substr:  # exact first, then substring; dedupe by did
                 did = d.get("did")
                 if did is None:
                     continue
@@ -318,4 +351,7 @@ async def scout_openml(topics: list[str], per_topic: int = 5, *, start: int = 0)
                     title=d.get("name"),
                     why=f"openml dataset (topic: {topic})",
                 )
+                added += 1
+                if added >= per_topic:
+                    break
     return list(seen.values())

@@ -271,6 +271,144 @@ export interface TraceSessionDetail {
   session: (TraceSessionSummary & { trigger_payload: Record<string, unknown> | null }) | null;
   runs: TraceRun[];
 }
+export interface TraceJourneyStep {
+  at: string | null;
+  kind: string;
+  label: string;
+  detail: string;
+  status?: string | null;
+  event_id?: number | null;
+  session_id?: number | null;
+  payload?: Record<string, unknown> | null;
+}
+export interface TraceJourneySubject {
+  canonical_key: string;
+  source_kind: string | null;
+  title: string;
+  doc_id: number | null;
+  trust_tier: string | null;
+  trust_state: string | null;
+  status: string | null;
+  queryable: boolean;
+  ingested_at: string | null;
+  outcome: string;
+  outcome_reason: string;
+}
+export interface TraceJourney {
+  subject: TraceJourneySubject | null;
+  steps: TraceJourneyStep[];
+}
+export interface TraceJourneyListItem {
+  canonical_key: string;
+  source_kind: string | null;
+  title: string;
+  doc_id: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  outcome: string;
+  outcome_reason: string;
+}
+export interface TraceJourneysResponse {
+  journeys: TraceJourneyListItem[];
+  facets: Record<string, number>;
+  total: number;
+}
+export interface AriadneScores {
+  novelty: number; feasibility: number; evidence_availability: number; paper_potential: number;
+  reviewer_interest: number; technical_depth: number; differentiation: number;
+  cost_efficiency: number; lab_alignment: number;
+}
+export interface AriadneDirection {
+  id: number; title: string; statement: string; status: string; retired: boolean;
+  invalidation_reason: string | null; composite: number | null; priority: string | null;
+  rationale: string | null; scores: AriadneScores | null; n_goals: number; gate: string;
+}
+export interface AriadneLesson { lesson: string; status: string; when: string | null; created_at: string | null }
+export interface AriadneOverview {
+  mode: string;
+  at_a_glance: {
+    active_directions: number; retired_directions: number; claim_goals: number; lessons: number;
+    top_priority: string | null; focus: string[]; status: string;
+    approved: number; gate_budget: number;
+    claims_total: number; acquire_requests_24h: number;
+    planner_mode: string; researcher_mode: string;
+    research_tasks: number; research_tasks_pending: number;
+  };
+  mission: { id: number; statement: string; framed_at: string } | null;
+  directions: AriadneDirection[];
+  lessons: AriadneLesson[];
+}
+export interface AcquireRequestRow {
+  requester: string | null; subject: string; why: string | null; at: string | null;
+  request_status: string; outcome: string; reason: string | null; document_id: number | null;
+}
+export interface QueueHealth {
+  pending: number;                          // requests still awaiting a Mimir reply (depth)
+  oldest_pending_age_seconds: number | null; // how long the oldest unanswered ask has waited (lag)
+  requested_1h: number;
+  resolved_1h: number;
+}
+export interface AriadneRequests { requests: AcquireRequestRow[]; counts: Record<string, number>; health?: QueueHealth }
+export interface AriadneConversation {
+  session_id: number;
+  at: string | null;
+  kind: "deliberation" | "reflection";
+  question: string | null;      // Ariadne's multi-hop question to Mimir
+  answer: string | null;        // Mimir's synthesized answer
+  citations: string[];
+  gaps: string[];               // thinly-covered areas Mimir flagged
+  outcome: {
+    label: string;              // "Framed" (deliberation) | "Steered" (reflection)
+    summary: string | null;     // mission framed / reprioritized focus
+    items: string[];            // direction titles / per-direction verdicts
+  };
+}
+export interface PlannerTask {
+  id: number; task_type: string; description: string; status: string;
+  direction: string | null; at: string | null;
+}
+export interface ResearcherFinding {
+  verdict: string | null;
+  disposition: string | null;            // supported|contradicted|corpus_exhausted|thin_corpus|needs_experiment|inconclusive
+  grounded: number | null;               // fraction of cited evidence that resolves to real papers
+  summary: string | null;
+  key_evidence: string[];
+  kill_condition_check: string | null;
+  gaps: string[];
+  acquire_queries: string[];
+  next_step: string | null;
+  queries: string[];                     // the topical corpus queries the researcher formulated
+  n_evidence: number | null;
+  confidence_move: [number, number] | null;  // [from, to] if the finding moved the direction
+  acquires_fired: number | null;
+}
+export interface ResearcherTask {
+  id: number; task_type: string; status: string; description: string;
+  claim_id: number | null; direction: string | null; at: string | null;
+  finding: ResearcherFinding | null;
+}
+export interface ResearcherOverview {
+  mode: string;
+  tasks_total: number;
+  by_status: Record<string, number>;
+  by_disposition: Record<string, number>;
+  acquire: { fired_24h: number; replied: number; outcomes: Record<string, number>; pending: number };
+  tasks: ResearcherTask[];
+}
+export interface PlannerPanel {
+  mode: string;
+  tasks_total: number;
+  by_status: Record<string, number>;
+  awaiting_plan: number;        // approved directions still awaiting a plan (the planner's backlog)
+  last_plan_at: string | null;
+  tasks: PlannerTask[];
+}
+export interface FieldConcept { kind: string; name: string; total: number; recent: number; prior: number; velocity: number }
+export interface AriadneFieldModel {
+  windows: { recent: string | null; prior: string | null };
+  counts: Record<string, number>;
+  by_state: { hot: FieldConcept[]; emerging: FieldConcept[]; saturated: FieldConcept[]; declining: FieldConcept[] };
+}
 export interface GraphStats {
   status: "ok" | "unavailable";
   nodes?: { claims: number; findings: number; verdicts: number };
@@ -525,15 +663,39 @@ export const api = {
   debugResearchTree: (taskId: number) => jget<ResearchTree>(`/debug/research-tree/${taskId}`),
   replayStep: (body: { run_id: number; model: { provider: string; model_name: string }; prompt_override?: string }) =>
     jpost<ReplayStepResponse>("/bench/replay-step", body),
-  traceSessions: (p: { limit?: number; handler_name?: string; status?: string; mode?: string } = {}) => {
+  traceSessions: (
+    p: { limit?: number; handler_name?: string; status?: string; mode?: string; min_steps?: number } = {},
+  ) => {
     const q = new URLSearchParams();
     if (p.limit) q.set("limit", String(p.limit));
     if (p.handler_name) q.set("handler_name", p.handler_name);
     if (p.status) q.set("status", p.status);
     if (p.mode) q.set("mode", p.mode);
+    if (p.min_steps) q.set("min_steps", String(p.min_steps));
     return jget<TraceSessionsResponse>(`/trace/sessions?${q.toString()}`);
   },
   traceSession: (id: number) => jget<TraceSessionDetail>(`/trace/sessions/${id}`),
+  traceJourney: (ref: string) =>
+    jget<TraceJourney>(`/trace/journey/${ref.split("/").map(encodeURIComponent).join("/")}`),
+  ariadneOverview: () => jget<AriadneOverview>("/ariadne/overview"),
+  ariadneFieldModel: () => jget<AriadneFieldModel>("/ariadne/field-model"),
+  ariadneRequests: (limit = 15) => jget<AriadneRequests>(`/ariadne/requests?limit=${limit}`),
+  ariadneConversations: (limit = 12) =>
+    jget<{ conversations: AriadneConversation[] }>(`/ariadne/conversations?limit=${limit}`),
+  ariadnePlanner: () => jget<PlannerPanel>("/ariadne/planner"),
+  researcherOverview: (limit = 30) => jget<ResearcherOverview>(`/researcher/overview?limit=${limit}`),
+  ariadneGate: (claimId: number, decision: string, note?: string) =>
+    jpost<{ ok: boolean; error?: string; budget_full?: boolean; decision?: string }>(
+      `/ariadne/gate/${claimId}`, { decision, note }),
+  traceJourneys: (p: { limit?: number; outcome?: string; kind?: string; q?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (p.limit) qs.set("limit", String(p.limit));
+    if (p.outcome) qs.set("outcome", p.outcome);
+    if (p.kind) qs.set("kind", p.kind);
+    if (p.q) qs.set("q", p.q);
+    const s = qs.toString();
+    return jget<TraceJourneysResponse>(`/trace/journeys${s ? `?${s}` : ""}`);
+  },
   graphStats: () => jget<GraphStats>("/trace/graph/stats"),
   graphClaim: (id: number) => jget<GraphClaim>(`/trace/graph/claim/${id}`),
 };

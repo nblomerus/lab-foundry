@@ -25,16 +25,17 @@ from contextlib import suppress
 import asyncpg
 import httpx
 
+# Stage 0 (market-PI neutralized): the legacy market-lifecycle PI handlers
+# (claim_invalidated / phase_adjudicator / phase_budget_exceeded / phase_transition)
+# are intentionally NOT imported or registered — see the registration block below.
+from agents.ariadne.handler import handle_ariadne_deliberate, handle_ariadne_reflect
 from agents.critic.handler import handle_finding_high_signal
 from agents.evaluation.handler import handle_task_completed
 from agents.evaluation.slop_handler import handle_audit_slop_detected
-from agents.pi.claim_invalidated import handle_claim_invalidated
-from agents.pi.phase_adjudicator import handle_claim_confidence_changed
-from agents.pi.phase_budget_exceeded import handle_phase_budget_exceeded
-from agents.pi.phase_transition import handle_phase_transition_proposed
+from agents.planner.decompose import handle_planner_decompose
 from agents.planner.handler import handle_queue_empty
 from agents.reflection.handler import handle_reflection_requested
-from agents.researcher.handler import handle_task_created
+from agents.researcher.grounded_handler import handle_grounded_research
 from harness.curator import Curator
 from harness.dispatch import Dispatcher
 from harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
@@ -244,19 +245,31 @@ async def main() -> int:
 
     # Register handlers — covers the full frame → submit loop
     if not knowledge_core_only:
-        dispatcher.register("task.created", handle_task_created)
         dispatcher.register("task.completed", handle_task_completed)
         dispatcher.register("finding.high_signal", handle_finding_high_signal)
-        dispatcher.register("claim.invalidated", handle_claim_invalidated)
         dispatcher.register("queue.empty", handle_queue_empty)
-        dispatcher.register("claim.confidence_changed", handle_claim_confidence_changed)
-        dispatcher.register("phase.transition_proposed", handle_phase_transition_proposed)
         dispatcher.register("reflection.requested", handle_reflection_requested)
         dispatcher.register("audit.slop_detected", handle_audit_slop_detected)
-        dispatcher.register("phase.budget_exceeded", handle_phase_budget_exceeded)
+        # Stage 0 — market-lifecycle PI handlers DISABLED (research-PI and market-PI
+        # cannot coexist on this schema). NOT registered: claim.invalidated,
+        # claim.confidence_changed (phase_adjudicator), phase.transition_proposed,
+        # phase.budget_exceeded — they formed an autonomous chain that wrote a market
+        # charter into company_state and swapped every agent's prompt. The trigger
+        # (dispatch._check_phase_budget) and the charter injection (curator
+        # ._constitution_layer) are disabled too — defence in depth.
     else:
         log.info("KNOWLEDGE_CORE_ONLY — research-workflow handlers NOT registered (Mimir + collectors only)")
     dispatcher.register("claim.created", handle_graph_sink_claim_created)
+    # Ariadne (research PI) — registered ALWAYS; the per-agent mode dial gates her
+    # (defaults 'off' under KNOWLEDGE_CORE_ONLY). Flip to advisory/active with ops.agent_mode.
+    dispatcher.register("ariadne.deliberate", handle_ariadne_deliberate)
+    dispatcher.register("ariadne.reflect", handle_ariadne_reflect)
+    # Planner (Stage 2) — registered ALWAYS; the 'planner' mode dial gates it (default off).
+    dispatcher.register("planner.plan", handle_planner_decompose)
+    # Researcher (Stage 3, research-era Library-grounded) — registered ALWAYS; the 'researcher'
+    # mode dial gates it (off/shadow = no-op, advisory/active = executes tasks → findings →
+    # confidence feedback). Supersedes the market-era web researcher.
+    dispatcher.register("task.created", handle_grounded_research)
 
     # Mimir — Warden of the Library. ONE agent owns ingest + trust: on a
     # discovered source it stages, classify_trust-gates, then finalizes or
@@ -286,6 +299,15 @@ async def main() -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
+    # Ariadne pacemaker — condition-driven trigger for her continuous loop. Gated on
+    # ARIADNE_PACE (default OFF); only fires when her mode dial is advisory|active.
+    pace_task = None
+    if os.environ.get("ARIADNE_PACE", "").lower() in {"on", "1", "true"}:
+        from harness.ariadne_pace import ariadne_pacemaker
+
+        pace_task = asyncio.create_task(ariadne_pacemaker(pool, stop_event))
+        log.info("ariadne pacemaker ENABLED (ARIADNE_PACE)")
+
     log.info("harness ready; entering dispatch loop")
     runner = asyncio.create_task(dispatcher.run())
 
@@ -296,6 +318,9 @@ async def main() -> int:
     with suppress(asyncio.CancelledError):
         runner.cancel()
         await runner
+        if pace_task is not None:
+            pace_task.cancel()
+            await pace_task
 
     await router.close()
     await pool.close()

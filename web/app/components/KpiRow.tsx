@@ -1,20 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { Inbox, ShieldCheck } from "lucide-react";
+import { Inbox, ShieldCheck, Compass } from "lucide-react";
 import { DeltaBadge, KpiCard } from "./ui";
 import { compact } from "../lib/format";
 import type { KnowledgePulse } from "../lib/pulse";
+import type { AriadneOverview } from "../lib/api";
 
-// The mockup's 6-card header. Live: Current Mission, New Knowledge 24h,
-// Certified Documents. Dormant (muted "Planned" tiles, no fabricated numbers):
-// Active Directions / Requests / Experiments — backed by the off research loop.
-export function KpiRow({ pulse, mission }: { pulse: KnowledgePulse; mission?: string | null }) {
+// The mockup's 6-card header. Live: Current Mission, New Knowledge 24h, Certified
+// Documents, plus Active Directions / Requests (Ariadne's live agenda). Running
+// Experiments stays "Planned" — the execution loop isn't woken yet.
+export function KpiRow({
+  pulse, mission, ariadne,
+}: { pulse: KnowledgePulse; mission?: string | null; ariadne?: AriadneOverview | null }) {
   const g = pulse.mimir?.at_a_glance;
   const ingestedToday = g?.ingested_today ?? 0;
   const ingestedYday = g?.ingested_yesterday ?? 0;
   const deltaPct = ingestedYday > 0 ? Math.round(((ingestedToday - ingestedYday) / ingestedYday) * 100) : null;
   const certified = g?.certified ?? null;
+  const ag = ariadne?.at_a_glance;
 
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-7">
@@ -46,9 +50,29 @@ export function KpiRow({ pulse, mission }: { pulse: KnowledgePulse; mission?: st
         value={compact(certified)}
         footer="in the Library"
       />
-      <KpiCard label="Active Directions" planned footer="research workflow" />
-      <KpiCard label="Active Requests" planned footer="research workflow" />
-      <KpiCard label="Running Experiments" planned footer="research workflow" />
+      {ag ? (
+        <KpiCard
+          label="Active Directions"
+          icon={Compass}
+          accent="live"
+          value={compact(ag.active_directions)}
+          footer={ag.approved > 0 ? `${ag.approved}/${ag.gate_budget} approved` : `Ariadne · ${ariadne?.mode ?? ""}`}
+        />
+      ) : (
+        <KpiCard label="Active Directions" planned footer="research workflow" />
+      )}
+      {ag ? (
+        <KpiCard
+          label="Active Requests"
+          icon={Inbox}
+          accent="live"
+          value={compact(ag.acquire_requests_24h)}
+          footer="acquire asks · 24h"
+        />
+      ) : (
+        <KpiCard label="Active Requests" planned footer="research workflow" />
+      )}
+      <KpiCard label="Running Experiments" planned footer="execution loop" />
     </div>
   );
 }

@@ -17,7 +17,7 @@ function Dashboard({ snapshot }: { snapshot: Snapshot | null }) {
   const floorData = useFloorData();
   return (
     <div className="space-y-4">
-      <KpiRow pulse={floorData.pulse} mission={snapshot?.state?.problem_statement} />
+      <KpiRow pulse={floorData.pulse} mission={snapshot?.state?.problem_statement} ariadne={floorData.ariadne} />
       <FloorplanCanvas snapshot={snapshot} floorData={floorData} />
     </div>
   );
