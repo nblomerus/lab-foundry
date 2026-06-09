@@ -135,7 +135,10 @@ async def test_plan_sweep_aggressive_when_ariadne_dark(monkeypatch):
     assert len(set(topics)) == len(topics)  # no dupes in the rotating slice
 
 
-def test_discovery_topics_default(monkeypatch):
+async def test_discovery_topics_default(monkeypatch):
+    # Sync logic, but the module-level `pytestmark = pytest.mark.asyncio` marks
+    # every test in this file; declared async so it runs under that mark cleanly
+    # (rather than warning about an asyncio-marked sync function).
     from agents.mimir.collectors import discovery_topics
 
     monkeypatch.delenv("LIBRARY_TOPICS", raising=False)

@@ -25,6 +25,13 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "strict"
 addopts = "-ra"
+filterwarnings = [
+    # Third-party noise, not actionable here: langfuse -> opentelemetry reads
+    # importlib.metadata entry points via the deprecated SelectableGroups dict
+    # interface on import. Ignore this one specific deprecation by message so
+    # every other warning still surfaces.
+    "ignore:SelectableGroups dict interface is deprecated:DeprecationWarning",
+]
 # DB-backed integration tests skip themselves unless DATABASE_URL points at a
 # migrated pgvector database (see tests/test_labfoundry_corpus.py).
 

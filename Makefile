@@ -88,14 +88,51 @@ ruff:
 	ruff check --select I --fix
 	ruff format
 
-# Run the test suite. Note: the Makefile auto-loads .env, so DATABASE_URL is set
-# and the DB-integration tests run against the local DB (they clean up after
-# themselves); in CI those tests skip because DATABASE_URL is unset.
+# ---------------------- Tests ----------------------
+#
+# The DB-backed tests must RUN, not skip — but they TRUNCATE core tables, and
+# pointing them at the live :5432 corpus would wipe ~57k documents. So `make
+# test` spins up a DISPOSABLE pgvector container, applies the migrations, points
+# DATABASE_URL at it, runs the suite, and always tears it down. The live DB is
+# never touched.
+#
+# It also strips every .env-exported var for the pytest run so local matches CI
+# (which has no .env). Without this, LIBRARY_SCOUTS would fire real network
+# scouts in the collector tests (the "22 != 2" failures), and other loop/pace
+# flags would skew agent defaults.
+TEST_DB_CONTAINER ?= labfoundry-test-db
+TEST_DB_PORT      ?= 5434
+TEST_DATABASE_URL  = postgresql://labfoundry:labfoundry@localhost:$(TEST_DB_PORT)/labfoundry
+# Every KEY defined in .env, rendered as `-u KEY` so `env` drops them for pytest.
+ENV_KEYS := $(shell test -f .env && awk -F= '/^[A-Za-z_]/{print "-u "$$1}' .env | tr '\n' ' ')
+
+# Spin a disposable migrated DB, run pytest ($(1) = extra args) against it in a
+# CI-clean env, and ALWAYS tear it down (trap on EXIT). Never touches :5432.
+define RUN_TESTS
+	set -e; \
+	echo ">> disposable test DB '$(TEST_DB_CONTAINER)' on :$(TEST_DB_PORT) (never the live :5432)"; \
+	docker rm -f $(TEST_DB_CONTAINER) >/dev/null 2>&1 || true; \
+	docker run -d --name $(TEST_DB_CONTAINER) \
+		-e POSTGRES_USER=labfoundry -e POSTGRES_PASSWORD=labfoundry -e POSTGRES_DB=labfoundry \
+		-p $(TEST_DB_PORT):5432 pgvector/pgvector:pg16 >/dev/null; \
+	trap 'docker rm -f $(TEST_DB_CONTAINER) >/dev/null 2>&1 || true' EXIT; \
+	for i in $$(seq 1 60); do \
+		if docker exec $(TEST_DB_CONTAINER) pg_isready -U labfoundry -d labfoundry >/dev/null 2>&1; then break; fi; \
+		sleep 1; \
+	done; \
+	for f in migrations/*.sql; do \
+		docker exec -i $(TEST_DB_CONTAINER) psql -q -U labfoundry -d labfoundry < $$f >/dev/null \
+			|| { echo "migration $$f failed"; exit 1; }; \
+	done; \
+	echo ">> pytest (clean env: .env vars stripped; disposable DB)"; \
+	env $(ENV_KEYS) DATABASE_URL=$(TEST_DATABASE_URL) LABFOUNDRY_ALLOW_DB_WIPE=1 $(VENV_PYTHON) -m pytest $(1)
+endef
+
 test tests:
-	pytest
+	@$(call RUN_TESTS,)
 
 test-last-fail:
-	pytest --lf
+	@$(call RUN_TESTS,--lf)
 
 
 # ---------------------- Infrastructure ----------------------

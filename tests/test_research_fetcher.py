@@ -22,6 +22,13 @@ from library.ingest.fetcher import (
     web_fetch,
 )
 
+# The autouse fixture below stubs fetcher._render_with_playwright to None so the
+# blocked-page tests never launch a real browser. Capture the REAL function here,
+# at import (before any fixture runs), so the dedicated rung-2 tests can exercise
+# it directly. It still resolves async_playwright/_playwright_sem from the fetcher
+# module at call time, so monkeypatching those in a test takes effect.
+_REAL_RENDER = fetcher._render_with_playwright
+
 # --------------------------------------------------------------------------
 # Fake state client
 # --------------------------------------------------------------------------
@@ -66,10 +73,24 @@ def _resp(text: str, content_type: str = "text/html", status: int = 200) -> http
 
 @pytest.fixture(autouse=True)
 def _fast_domain_delay(monkeypatch):
-    """Squash the courtesy delay to keep tests snappy."""
+    """Squash the courtesy delay to keep tests snappy, and neutralize rung-2.
+
+    Rung-2 (the headless-browser render) fires whenever rung-1 comes back
+    blocked/empty. Left live it would launch a REAL Chromium and navigate to the
+    REAL URL — so the blocked-page tests would non-deterministically rescue real
+    content (e.g. medium.com's shell) and the httpx `.get` patch wouldn't cover
+    it. Stub it to "render unavailable" (None) by default so every test in this
+    module is deterministic and network-free. The handful of tests that exercise
+    the rung-2 rescue path re-patch `_render_with_playwright` themselves.
+    """
     monkeypatch.setattr(fetcher, "DOMAIN_DELAY", 0.01)
     # Also reset per-test domain gates so ordering doesn't leak.
     fetcher._domain_gates.clear()
+
+    async def _no_render(_url):
+        return None
+
+    monkeypatch.setattr(fetcher, "_render_with_playwright", _no_render)
 
 
 # --------------------------------------------------------------------------
@@ -341,6 +362,223 @@ async def test_legacy_cached_challenge_pages_cleaned_on_hit():
     assert page.from_cache is True
     assert page.content == ""
     assert page.extractor == "blocked"
+
+
+# --------------------------------------------------------------------------
+# Rung 2 — headless-browser render fallback. These mock the render explicitly
+# (no real browser, no network) so the JS-shell rescue path is covered
+# deterministically. The autouse fixture stubs _render_with_playwright to None;
+# each test here re-patches it (or async_playwright) for the behaviour it wants.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_playwright_rung2_rescues_js_shell(monkeypatch):
+    """Rung-1 returns a near-empty JS shell that looks blocked; rung-2 renders
+    the real content and the page comes back with extractor='playwright'."""
+    state = _FakeState()
+
+    async def _fake_get(self, url):
+        return _resp("<html><body><div id='root'></div></body></html>")
+
+    rendered_html = (
+        "<html><body><main>"
+        "<p>The article content painted by client-side JavaScript. It has well "
+        "over two hundred characters of real substance so the blocked-page "
+        "detector treats it as a genuine page: coroutines, the event loop, and "
+        "how await suspends a task until its future resolves, with examples and "
+        "benchmarks that make the body realistic enough to clear the threshold.</p>"
+        "</main></body></html>"
+    )
+
+    async def _fake_render(_url):
+        return rendered_html
+
+    monkeypatch.setattr(fetcher, "_render_with_playwright", _fake_render)
+
+    with patch.object(httpx.AsyncClient, "get", new=_fake_get):
+        page = await web_fetch("https://spa.example.com/article", state)
+
+    assert page is not None
+    assert page.extractor == "playwright"
+    assert "client-side JavaScript" in page.content
+    assert page.from_cache is False
+    # Rescued content is cached as a normal page (not 'blocked').
+    assert len(state.puts) == 1
+    assert state.puts[0]["extractor"] == "playwright"
+
+
+@pytest.mark.asyncio
+async def test_playwright_rung2_still_blocked_falls_through(monkeypatch):
+    """If rung-2's render is ALSO a challenge page, the result stays 'blocked'
+    — rung-2 can only ever help, never break the httpx path."""
+    state = _FakeState()
+
+    async def _fake_get(self, url):
+        return _resp("<html><body><h1>Just a moment...</h1></body></html>", status=403)
+
+    async def _fake_render(_url):
+        return "<html><body><h1>Just a moment...</h1></body></html>"
+
+    monkeypatch.setattr(fetcher, "_render_with_playwright", _fake_render)
+
+    with patch.object(httpx.AsyncClient, "get", new=_fake_get):
+        page = await web_fetch("https://hard.example.com/x", state)
+
+    assert page is not None
+    assert page.content == ""
+    assert page.extractor == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_playwright_disabled_skips_rung2(monkeypatch):
+    """With rung-2 disabled, a blocked rung-1 result is never re-rendered — the
+    render hook must not be called at all."""
+    state = _FakeState()
+    monkeypatch.setattr(fetcher, "_PLAYWRIGHT_ENABLED", False)
+
+    calls: list[str] = []
+
+    async def _fake_render(url):
+        calls.append(url)
+        return "<html><body><main><p>" + "x" * 400 + "</p></main></body></html>"
+
+    monkeypatch.setattr(fetcher, "_render_with_playwright", _fake_render)
+
+    async def _fake_get(self, url):
+        return _resp("<html><body><h1>Just a moment...</h1></body></html>", status=403)
+
+    with patch.object(httpx.AsyncClient, "get", new=_fake_get):
+        page = await web_fetch("https://blocked.example.com/x", state)
+
+    assert page is not None
+    assert page.extractor == "blocked"
+    assert calls == []  # rung-2 never invoked when disabled
+
+
+# --- _render_with_playwright itself (mock async_playwright, no real browser) ---
+
+
+class _FakePWPage:
+    def __init__(self, html, *, goto_exc=None):
+        self._html = html
+        self._goto_exc = goto_exc
+
+    async def goto(self, url, **kw):
+        if self._goto_exc is not None:
+            raise self._goto_exc
+
+    async def wait_for_load_state(self, *a, **kw):
+        return None
+
+    async def content(self):
+        return self._html
+
+
+class _FakePWContext:
+    def __init__(self, page):
+        self._page = page
+
+    async def new_page(self):
+        return self._page
+
+
+class _FakePWBrowser:
+    def __init__(self, page):
+        self._page = page
+        self.closed = False
+
+    async def new_context(self, **kw):
+        return _FakePWContext(self._page)
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeChromium:
+    def __init__(self, browser):
+        self._browser = browser
+
+    async def launch(self, **kw):
+        return self._browser
+
+
+class _FakePW:
+    def __init__(self, browser):
+        self.chromium = _FakeChromium(browser)
+
+
+class _FakePWManager:
+    """Mimics async_playwright() — an async context manager yielding the PW handle."""
+
+    def __init__(self, pw, *, enter_exc=None):
+        self._pw = pw
+        self._enter_exc = enter_exc
+
+    async def __aenter__(self):
+        if self._enter_exc is not None:
+            raise self._enter_exc
+        return self._pw
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _NullCtx:
+    """A loop-agnostic async context manager — stands in for the concurrency
+    Semaphore so these tests never depend on which event loop it was bound to
+    (a real Semaphore created outside the test's loop raises on acquire)."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+@pytest.fixture
+def _fresh_pw_sem(monkeypatch):
+    """Swap the module-level concurrency Semaphore for a loop-agnostic null gate
+    so the render path exercises cleanly regardless of test loop."""
+    monkeypatch.setattr(fetcher, "_playwright_sem", _NullCtx())
+
+
+@pytest.mark.asyncio
+async def test_render_with_playwright_returns_html(monkeypatch, _fresh_pw_sem):
+    page = _FakePWPage("<html><body><p>rendered content</p></body></html>")
+    browser = _FakePWBrowser(page)
+    monkeypatch.setattr(fetcher, "async_playwright", lambda: _FakePWManager(_FakePW(browser)))
+
+    html = await _REAL_RENDER("https://x.example.com/")
+
+    assert html == "<html><body><p>rendered content</p></body></html>"
+    assert browser.closed is True  # browser torn down in finally
+
+
+@pytest.mark.asyncio
+async def test_render_with_playwright_swallows_nav_error(monkeypatch, _fresh_pw_sem):
+    page = _FakePWPage("", goto_exc=RuntimeError("navigation timeout"))
+    browser = _FakePWBrowser(page)
+    monkeypatch.setattr(fetcher, "async_playwright", lambda: _FakePWManager(_FakePW(browser)))
+
+    html = await _REAL_RENDER("https://x.example.com/")
+
+    assert html is None  # failure is swallowed, caller keeps rung-1
+    assert browser.closed is True  # closed even on failure (finally)
+
+
+@pytest.mark.asyncio
+async def test_render_with_playwright_swallows_launch_error(monkeypatch, _fresh_pw_sem):
+    """A failure before the browser exists (e.g. missing binary) returns None."""
+    monkeypatch.setattr(
+        fetcher,
+        "async_playwright",
+        lambda: _FakePWManager(None, enter_exc=RuntimeError("playwright not installed")),
+    )
+
+    html = await _REAL_RENDER("https://x.example.com/")
+
+    assert html is None
 
 
 # --------------------------------------------------------------------------
