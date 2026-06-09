@@ -83,7 +83,7 @@ async def test_update_confidence_rejects_out_of_range(db):
 async def test_invalidate_claim_idempotent(db):
     c = await db.create_claim("doomed", 0.5)
     vid = await db.pool.fetchval(
-        "INSERT INTO critic_verdicts (thesis_id, verdict, confidence, reasoning, cited_finding_ids) "
+        "INSERT INTO critic_verdicts (claim_id, verdict, confidence, reasoning, cited_finding_ids) "
         "VALUES ($1, 'kill', 0.9, 'refuted', '{}') RETURNING id",
         c.id,
     )
@@ -241,18 +241,30 @@ async def test_detect_slop_breaker_below_threshold(db):
     assert await db.detect_slop_breaker(c.id) is False
 
 
-# ---- known schema/code mismatch (documented, not yet fixed) --------------
+# ---- critic verdicts -----------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="create_critic_verdict inserts `claim_id`, but migration 008 renamed the "
-    "adversary_verdicts table to critic_verdicts WITHOUT renaming its thesis_id "
-    "column. Fix is a follow-up (rename the column to claim_id + match the code).",
-)
-async def test_create_critic_verdict_schema_mismatch(db):
+async def test_create_and_get_critic_verdict_round_trip(db):
+    # Was xfail: critic_verdicts physically kept the legacy `thesis_id` column
+    # while the code expected `claim_id`, so create+get both raised. Migration
+    # 010 renamed the column; this now exercises the full write→read round-trip.
     c = await db.create_claim("c", 0.5)
-    await db.create_critic_verdict(claim_id=c.id, verdict="kill", confidence=0.9, reasoning="r", cited_finding_ids=[])
+    vid = await db.create_critic_verdict(
+        claim_id=c.id,
+        verdict="kill",
+        confidence=0.9,
+        reasoning="refuted by adversary",
+        cited_finding_ids=[],
+    )
+    assert isinstance(vid, int)
+
+    v = await db.get_critic_verdict(vid)
+    assert v.id == vid
+    assert v.claim_id == c.id
+    assert v.verdict == "kill"
+    assert float(v.confidence) == pytest.approx(0.9)
+    assert v.reasoning == "refuted by adversary"
+    assert v.cited_finding_ids == []
 
 
 # ---- fetch cache ---------------------------------------------------------

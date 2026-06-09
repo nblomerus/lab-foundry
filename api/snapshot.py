@@ -189,7 +189,7 @@ async def _dissent(pool: asyncpg.Pool, limit: int) -> list[DissentItem]:
     async with pool.acquire() as c:
         rows = await c.fetch(
             """
-            SELECT 'critic' AS kind, av.id, av.thesis_id AS claim_id,
+            SELECT 'critic' AS kind, av.id, av.claim_id,
                    av.verdict AS detail, av.confidence,
                    av.reasoning, av.created_at
             FROM critic_verdicts av
