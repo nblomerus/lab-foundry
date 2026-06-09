@@ -36,7 +36,12 @@ filterwarnings = [
 # migrated pgvector database (see tests/test_labfoundry_corpus.py).
 
 [tool.coverage.run]
-source = ["agents", "harness", "library", "state", "memory", "skills", "api", "ops"]
+# `eval/` (the retrieval/scout/mimir/graph benchmark harnesses) is measured too — it's
+# the tooling we trust to tell us the lab is working, so it carries its own tests.
+# `scripts/` is intentionally NOT measured: those are demos and one-off ops utilities,
+# not lab runtime. `*/server.py` (thin MCP stdio wrappers) is omitted — the logic they
+# expose lives in the client layer, which IS tested.
+source = ["agents", "harness", "library", "state", "memory", "skills", "api", "ops", "eval"]
 branch = true
 omit = [
     "tests/*",
@@ -47,6 +52,6 @@ omit = [
 show_missing = true
 # Coverage floor enforced by CI (pytest-cov reads this). CI runs a pgvector Postgres service
 # with the schema applied, so DB-backed tests run. The suite covers ~96% across agents,
-# harness, library, api, ops, and state; the floor is held at 90 with headroom for the few
-# DB-only error paths and the dormant market-era experiment runners.
+# harness, library, api, ops, state, and the eval harnesses; the floor is held at 90 with
+# headroom for the few DB-only error paths and the dormant market-era experiment runners.
 fail_under = 90
