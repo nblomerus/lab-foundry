@@ -1,11 +1,25 @@
-"""Pure unit tests for the Researcher feedback seam's steering math (agents.researcher.feedback).
+"""Unit tests for the Researcher feedback seam (agents.researcher.feedback).
 
 disposition / finding_feedback / aggregate_direction are pure — they turn a finding into the
-confidence/acquire proposal Ariadne's reflection reads. (refine_disposition / apply_feedback hit
-the DB and are exercised live, not here.) No DB / no network."""
+confidence/acquire proposal Ariadne's reflection reads. refine_disposition (escalation read) and
+apply_feedback (the live write path) hit the DB; here they run against a ScriptedPool with the
+acquire ledger / claim rows scripted and request_acquire monkeypatched. No real DB / no network."""
 
-from agents.researcher.feedback import aggregate_direction, disposition, finding_feedback
+from __future__ import annotations
+
+import pytest
+
+from agents.researcher import feedback as fb_mod
+from agents.researcher.feedback import (
+    DirectionFeedback,
+    aggregate_direction,
+    apply_feedback,
+    disposition,
+    finding_feedback,
+    refine_disposition,
+)
 from agents.researcher.grounded import GroundedFinding
+from tests._helpers import ScriptedPool, make_state
 
 _CTX = {"task_id": 1}
 
@@ -81,3 +95,200 @@ def test_aggregate_dedups_acquire_union():
     fb = aggregate_direction(7, "dir", items)
     assert fb.acquire_queries == ["a", "b", "c"]
     assert fb.dominant == "thin_corpus"
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# refine_disposition — the thin_corpus → corpus_exhausted escalation (async read)
+# ════════════════════════════════════════════════════════════════════════════════
+def _df(claim_id=7, *, confidence_delta=0.0, dominant="inconclusive", set_last_evidence=False, acquire_queries=None):
+    return DirectionFeedback(
+        claim_id=claim_id,
+        direction="dir",
+        n_findings=1,
+        confidence_delta=confidence_delta,
+        dominant=dominant,
+        set_last_evidence=set_last_evidence,
+        acquire_queries=acquire_queries or [],
+        items=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_returns_base_when_not_thin_corpus():
+    # non-thin base never reads the ledger — the pool must stay untouched
+    pool = ScriptedPool()
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 7, "supported") == "supported"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_returns_base_when_claim_id_none():
+    pool = ScriptedPool()
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, None, "thin_corpus") == "thin_corpus"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_escalates_when_all_already_have():
+    # >=2 ledger rows, all 'already_have' → the Library can't be enriched → corpus_exhausted
+    pool = ScriptedPool(rules=[("acquire.fulfilled", [{"status": "already_have"}, {"status": "already_have"}])])
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 7, "thin_corpus") == "corpus_exhausted"
+    assert pool.calls[0][2] == (7,)  # claim_id bound to the query
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_no_escalation_when_mixed_statuses():
+    # a genuine new ingest among the replies → still acquirable → stays thin_corpus
+    pool = ScriptedPool(rules=[("acquire.fulfilled", [{"status": "already_have"}, {"status": "ingested"}])])
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 7, "thin_corpus") == "thin_corpus"
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_no_escalation_when_too_few_rows():
+    # only one reply (< 2) → not enough history to call it exhausted
+    pool = ScriptedPool(rules=[("acquire.fulfilled", [{"status": "already_have"}])])
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 7, "thin_corpus") == "thin_corpus"
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_no_escalation_when_no_history():
+    # no claim-attributed replies yet → empty ledger → stays thin_corpus
+    pool = ScriptedPool(rules=[("acquire.fulfilled", [])])
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 7, "thin_corpus") == "thin_corpus"
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# apply_feedback — the live write path (advisory/active only)
+# ════════════════════════════════════════════════════════════════════════════════
+def _active_pool(confidence=0.5):
+    """A pool whose claims SELECT returns an ACTIVE claim's current confidence."""
+    return ScriptedPool(rules=[("SELECT confidence FROM claims", confidence)])
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_skips_when_no_claim_id():
+    state = make_state()
+    res = await apply_feedback(state, _df(claim_id=None))
+    assert res == {"skipped": "no claim_id"}
+    state.update_claim_confidence.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_moves_confidence_on_active_claim(monkeypatch):
+    monkeypatch.setattr(fb_mod, "request_acquire", _noop_acquire)
+    pool = _active_pool(0.5)
+    state = make_state(pool=pool)
+    res = await apply_feedback(state, _df(confidence_delta=0.08, dominant="supported"), run_id=42)
+    # 0.5 + 0.08 = 0.58, clamped into [0,1]
+    assert res["confidence"] == [0.5, 0.58]
+    _args, kwargs = state.update_claim_confidence.call_args
+    assert _args[0] == 7 and abs(_args[1] - 0.58) < 1e-9
+    assert kwargs["reason"] == "researcher findings: supported"
+    assert kwargs["run_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_clamps_new_confidence_to_unit_interval(monkeypatch):
+    monkeypatch.setattr(fb_mod, "request_acquire", _noop_acquire)
+    pool = _active_pool(0.95)
+    state = make_state(pool=pool)
+    res = await apply_feedback(state, _df(confidence_delta=0.20, dominant="supported"))
+    assert res["confidence"] == [0.95, 1.0]  # 1.15 clamped to 1.0
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_skips_confidence_when_claim_not_active(monkeypatch):
+    monkeypatch.setattr(fb_mod, "request_acquire", _noop_acquire)
+    # default_val None → the active-status SELECT finds no row (invalidated/merged/retired)
+    pool = ScriptedPool()
+    state = make_state(pool=pool)
+    res = await apply_feedback(state, _df(confidence_delta=-0.12, dominant="contradicted"))
+    assert "confidence" not in res
+    state.update_claim_confidence.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_swallows_value_error_from_race(monkeypatch):
+    monkeypatch.setattr(fb_mod, "request_acquire", _noop_acquire)
+    pool = _active_pool(0.5)
+    state = make_state(pool=pool)
+    state.update_claim_confidence.side_effect = ValueError("claim 7 not active")
+    res = await apply_feedback(state, _df(confidence_delta=0.08, dominant="supported"))
+    # the race is logged, not raised, and no confidence pair recorded
+    assert "confidence" not in res
+    state.update_claim_confidence.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_sets_last_evidence(monkeypatch):
+    monkeypatch.setattr(fb_mod, "request_acquire", _noop_acquire)
+    pool = ScriptedPool()
+    state = make_state(pool=pool)
+    res = await apply_feedback(state, _df(set_last_evidence=True))
+    assert res["last_evidence_at"] == "now"
+    assert any("UPDATE claims SET last_evidence_at = now()" in c[1] for c in pool.calls)
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_fires_acquires(monkeypatch):
+    seen = []
+
+    async def _acq(state, mreq):
+        seen.append(mreq)
+
+    monkeypatch.setattr(fb_mod, "request_acquire", _acq)
+    pool = ScriptedPool()
+    state = make_state(pool=pool)
+    res = await apply_feedback(state, _df(acquire_queries=["q1", "q2"]))
+    assert res["acquires_fired"] == 2
+    assert [m.query for m in seen] == ["q1", "q2"]
+    assert all(m.requester == "researcher" and m.claim_id == 7 and m.kind == "paper" for m in seen)
+    assert all(len(m.why) >= 30 for m in seen)  # AcquireRequest.why min_length=30 satisfied
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_swallows_acquire_failure(monkeypatch):
+    calls = {"n": 0}
+
+    async def _boom(state, mreq):
+        calls["n"] += 1
+        raise RuntimeError("acquire blew up")
+
+    monkeypatch.setattr(fb_mod, "request_acquire", _boom)
+    state = make_state()
+    res = await apply_feedback(state, _df(acquire_queries=["q1", "q2"]))
+    # both attempts raised, all swallowed → no acquires_fired key, no propagation
+    assert "acquires_fired" not in res
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_feedback_full_path_combines_all_effects(monkeypatch):
+    seen = []
+
+    async def _acq(state, mreq):
+        seen.append(mreq)
+
+    monkeypatch.setattr(fb_mod, "request_acquire", _acq)
+    pool = _active_pool(0.5)
+    state = make_state(pool=pool)
+    res = await apply_feedback(
+        state,
+        _df(confidence_delta=-0.12, dominant="contradicted", set_last_evidence=True, acquire_queries=["q"]),
+        run_id=9,
+    )
+    assert res["claim_id"] == 7 and res["dominant"] == "contradicted"
+    assert res["confidence"] == [0.5, 0.38]
+    assert res["last_evidence_at"] == "now"
+    assert res["acquires_fired"] == 1
+    assert len(seen) == 1
+
+
+async def _noop_acquire(state, mreq):
+    return None
