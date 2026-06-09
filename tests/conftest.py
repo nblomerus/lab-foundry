@@ -11,8 +11,16 @@ never touch the corpus (they never create the pool).
 
 import os
 
+# Tests must NOT inherit the developer's local .env (CI has none). Several modules call
+# dotenv.load_dotenv() at import time (e.g. api.main), which would otherwise leak real config —
+# LIBRARY_SCOUTS, DATABASE_URL, API keys — into os.environ and break test isolation (e.g. making
+# the collectors sweep run real network scouts). conftest is imported before any test module, so
+# neutralizing it here lands before those imports and makes local runs match CI.
+import dotenv as _dotenv
 import pytest
 import pytest_asyncio
+
+_dotenv.load_dotenv = lambda *a, **k: False
 
 
 @pytest_asyncio.fixture
