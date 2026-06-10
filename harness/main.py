@@ -32,6 +32,11 @@ from agents.ariadne.handler import handle_ariadne_deliberate, handle_ariadne_ref
 from agents.critic.handler import handle_finding_high_signal
 from agents.evaluation.handler import handle_task_completed
 from agents.evaluation.slop_handler import handle_audit_slop_detected
+from agents.experiments.handler import (
+    handle_experiment_completed,
+    handle_experiment_failed,
+    handle_experiment_requested,
+)
 from agents.planner.decompose import handle_planner_decompose
 from agents.planner.handler import handle_queue_empty
 from agents.reflection.handler import handle_reflection_requested
@@ -270,6 +275,13 @@ async def main() -> int:
     # mode dial gates it (off/shadow = no-op, advisory/active = executes tasks → findings →
     # confidence feedback). Supersedes the market-era web researcher.
     dispatcher.register("task.created", handle_grounded_research)
+    # Experiments agent (Stage 4) — registered ALWAYS; the 'experiments' mode dial gates it.
+    # `experiment.requested` (from the researcher's needs_experiment) designs + queues a code
+    # experiment; the Quartermaster runs the design→run→debug loop; `experiment.completed`/`.failed`
+    # interpret the result into confidence feedback + a first-party Library note.
+    dispatcher.register("experiment.requested", handle_experiment_requested)
+    dispatcher.register("experiment.completed", handle_experiment_completed)
+    dispatcher.register("experiment.failed", handle_experiment_failed)
 
     # Mimir — Warden of the Library. ONE agent owns ingest + trust: on a
     # discovered source it stages, classify_trust-gates, then finalizes or
@@ -308,6 +320,16 @@ async def main() -> int:
         pace_task = asyncio.create_task(ariadne_pacemaker(pool, stop_event))
         log.info("ariadne pacemaker ENABLED (ARIADNE_PACE)")
 
+    # Quartermaster — resource manager + experiment execution pool (its own tasks, off the
+    # dispatcher slots). Gated on QUARTERMASTER (default OFF); only acts when its mode dial is
+    # advisory|active. Gets the router/curator so the experiment design→run→debug loop can call the LLM.
+    qm_task = None
+    if os.environ.get("QUARTERMASTER", "").lower() in {"on", "1", "true"}:
+        from harness.quartermaster import quartermaster_watchdog
+
+        qm_task = asyncio.create_task(quartermaster_watchdog(pool, stop_event, router=router, curator=curator))
+        log.info("quartermaster ENABLED (QUARTERMASTER)")
+
     log.info("harness ready; entering dispatch loop")
     runner = asyncio.create_task(dispatcher.run())
 
@@ -321,6 +343,9 @@ async def main() -> int:
         if pace_task is not None:
             pace_task.cancel()
             await pace_task
+        if qm_task is not None:
+            qm_task.cancel()
+            await qm_task
 
     await router.close()
     await pool.close()

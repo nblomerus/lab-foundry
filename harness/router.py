@@ -59,6 +59,7 @@ class Tier(enum.Enum):
     WORKHORSE = "workhorse"
     FAST = "fast"
     CODE = "code"
+    EXPERIMENT = "experiment"  # the experiments agent's code design/debug loop — premium (DeepSeek) lead
 
 
 class Provider(enum.Enum):
@@ -124,6 +125,17 @@ MODELS: dict[Tier, ModelSpec] = {
         cost_per_1k_input=0.0,
         cost_per_1k_output=0.0,
     ),
+    # The experiments agent writes + debugs real ML/AI experiment code — a complex,
+    # iterative task. It leads with DeepSeek (premium, see PREMIUM_TIERS below) and
+    # falls back to the local coder model when DeepSeek is capped/down.
+    Tier.EXPERIMENT: ModelSpec(
+        tier=Tier.EXPERIMENT,
+        model_name="qwen2.5-coder:7b",
+        context_limit=32_000,
+        temperature=0.2,
+        cost_per_1k_input=0.0,
+        cost_per_1k_output=0.0,
+    ),
 }
 
 # -------------------------------------------------------------------------
@@ -167,7 +179,7 @@ def build_cloud_chain(env: dict) -> list[CloudProvider]:
 # strategy/planning brain (planner.generate_tasks, PI synthesis/rescore/spawn,
 # contradiction-hunt) — high-leverage and quality-sensitive, and cheap enough on
 # DeepSeek (~$0.0006/call) to be worth it. FAST/CODE stay free-local (volume).
-PREMIUM_TIERS = {Tier.REASONING, Tier.WORKHORSE}
+PREMIUM_TIERS = {Tier.REASONING, Tier.WORKHORSE, Tier.EXPERIMENT}
 
 
 def build_premium_chain(env: dict) -> list[CloudProvider]:
@@ -276,6 +288,9 @@ DAILY_CAPS: dict[Tier, int] = {
     Tier.WORKHORSE: 4000,
     Tier.FAST: 2000,
     Tier.CODE: 500,
+    # The experiment design/debug loop can iterate several times per experiment;
+    # ~2000 DeepSeek calls/day caps spend ~$1.2/day worst case before degrading to local.
+    Tier.EXPERIMENT: 2000,
 }
 
 

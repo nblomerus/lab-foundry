@@ -272,6 +272,7 @@ async def run_shadow(
 
     # The agenda tree (claim_kind='mission'/'direction'/'hypothesis'). Empty on a fresh
     # lab — shadow Ariadne frames from scratch. Kept defensive: any read failure → empty.
+    claims = []
     try:
         claims = await state.get_active_claims()
         agenda = (
@@ -280,6 +281,17 @@ async def run_shadow(
         )
     except Exception:  # noqa: BLE001
         agenda = "(empty — frame from scratch)"
+
+    # First-party experiment results on the active directions — so Ariadne re-frames over what the
+    # lab actually RAN (numbers + the researcher's narrative note), not just confidence deltas.
+    try:
+        notes = await state.get_recent_experiment_notes_for_claims([c.id for c in claims], limit=8)
+        if notes:
+            agenda += "\n\n## Experiment results so far (first-party — what the lab ran)\n" + "\n".join(
+                f"- T{n['claim_id']}: {(n.get('researcher_notes') or n.get('interpretation') or '')[:240]}" for n in notes
+            )
+    except Exception:  # noqa: BLE001 — experiment context is best-effort
+        pass
 
     prior_art, _gaps = await recall_prior_art(  # gaps are embedded in prior_art
         seed, pool=state.pool, state=(state if emit_conversation else None)

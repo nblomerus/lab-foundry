@@ -913,6 +913,189 @@ class PostgresClient:
                 experiment_id,
             )
 
+    # ---- Sandboxed code experiments + Quartermaster lifecycle -------------
+
+    @staticmethod
+    def _parse_experiment_row(r) -> dict:
+        d = dict(r)
+        for k in ("params", "result", "provenance", "dataset_refs", "resource_usage"):
+            v = d.get(k)
+            if isinstance(v, str):
+                with contextlib.suppress(Exception):
+                    d[k] = json.loads(v)
+        return d
+
+    async def queue_experiment(
+        self,
+        task_id: int,
+        inquiry_id: int | None,
+        kind: str,
+        params: dict,
+        *,
+        code: str | None = None,
+        wall_clock_budget_s: int = 600,
+        mem_budget_mb: int = 2048,
+        requires_gpu: bool = False,
+        gpu_mem_mb: int | None = None,
+        priority: int = 5,
+        provenance: dict | None = None,
+        dataset_refs: list | dict | None = None,
+    ) -> int:
+        """Enqueue a code experiment for the Quartermaster to schedule (status='queued')."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                INSERT INTO experiment_runs (
+                    task_id, inquiry_id, kind, params, status, code,
+                    wall_clock_budget_s, mem_budget_mb, requires_gpu, gpu_mem_mb,
+                    priority, provenance, dataset_refs
+                )
+                VALUES ($1, $2, $3, $4::jsonb, 'queued', $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)
+                RETURNING id
+                """,
+                task_id,
+                inquiry_id,
+                kind,
+                json.dumps(params),
+                code,
+                wall_clock_budget_s,
+                mem_budget_mb,
+                requires_gpu,
+                gpu_mem_mb,
+                priority,
+                json.dumps(provenance) if provenance is not None else None,
+                json.dumps(dataset_refs) if dataset_refs is not None else None,
+            )
+
+    async def get_queued_experiments(self, limit: int = 20) -> list[dict]:
+        """Queued experiments, highest priority + oldest first (the QM's run order)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM experiment_runs WHERE status = 'queued' ORDER BY priority DESC, started_at ASC LIMIT $1",
+                limit,
+            )
+            return [self._parse_experiment_row(r) for r in rows]
+
+    async def get_running_experiments(self) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM experiment_runs WHERE status = 'running' ORDER BY started_at ASC")
+            return [self._parse_experiment_row(r) for r in rows]
+
+    async def mark_experiment_running(self, experiment_id: int, worker: str) -> bool:
+        """Atomically claim a queued experiment for execution. Returns False if it
+        was already taken (lost the race) — the QM only launches on a True."""
+        async with self.pool.acquire() as conn:
+            status = await conn.fetchval(
+                "UPDATE experiment_runs "
+                "SET status = 'running', worker = $2, started_at = NOW(), heartbeat_at = NOW() "
+                "WHERE id = $1 AND status = 'queued' RETURNING status",
+                experiment_id,
+                worker,
+            )
+            return status == "running"
+
+    async def heartbeat_experiment(self, experiment_id: int) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE experiment_runs SET heartbeat_at = NOW() WHERE id = $1", experiment_id)
+
+    async def update_experiment_code(self, experiment_id: int, code: str, provenance: dict | None = None) -> None:
+        """Persist the current code (the coding loop rewrites it each debug attempt;
+        the final WORKING code is what's stored for reproducibility)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs SET code = $2, provenance = COALESCE($3::jsonb, provenance) WHERE id = $1",
+                experiment_id,
+                code,
+                json.dumps(provenance) if provenance is not None else None,
+            )
+
+    async def record_experiment_result(
+        self,
+        experiment_id: int,
+        *,
+        status: str,
+        result: dict | None = None,
+        error: str | None = None,
+        resource_usage: dict | None = None,
+    ) -> None:
+        """Write the sandbox outcome (status in completed|failed) — the QM calls this
+        when the container exits. Interpretation + notes land later via the handler."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE experiment_runs
+                SET status = $2,
+                    result = COALESCE($3::jsonb, result),
+                    error = COALESCE($4, error),
+                    resource_usage = COALESCE($5::jsonb, resource_usage),
+                    completed_at = NOW()
+                WHERE id = $1
+                """,
+                experiment_id,
+                status,
+                json.dumps(result) if result is not None else None,
+                (error or "")[:2000] if error is not None else None,
+                json.dumps(resource_usage) if resource_usage is not None else None,
+            )
+
+    async def kill_experiment(self, experiment_id: int, reason: str) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs "
+                "SET status = 'killed', kill_reason = $2, killed_at = NOW(), completed_at = NOW() "
+                "WHERE id = $1 AND status IN ('running', 'queued')",
+                experiment_id,
+                reason[:500],
+            )
+
+    async def set_experiment_interpretation(
+        self,
+        experiment_id: int,
+        interpretation: str | None,
+        interpret_run_id: int | None = None,
+        researcher_notes: str | None = None,
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs "
+                "SET interpretation = $2, interpret_run_id = $3, researcher_notes = $4 WHERE id = $1",
+                experiment_id,
+                interpretation,
+                interpret_run_id,
+                researcher_notes,
+            )
+
+    async def set_experiment_ingested_doc(self, experiment_id: int, doc_id: int) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE experiment_runs SET ingested_doc_id = $2 WHERE id = $1", experiment_id, doc_id)
+
+    async def get_experiment(self, experiment_id: int) -> dict | None:
+        async with self.pool.acquire() as conn:
+            r = await conn.fetchrow("SELECT * FROM experiment_runs WHERE id = $1", experiment_id)
+            return self._parse_experiment_row(r) if r else None
+
+    async def get_recent_experiment_notes_for_claims(self, claim_ids: list[int], limit: int = 12) -> list[dict]:
+        """Recent experiment narrative notes for a set of directions — Ariadne reads
+        these so she reasons over what the lab actually ran, not just confidence deltas."""
+        if not claim_ids:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT t.claim_id, e.id AS experiment_id, e.kind, e.status,
+                       e.researcher_notes, e.interpretation, e.completed_at
+                FROM experiment_runs e
+                JOIN tasks t ON t.id = e.task_id
+                WHERE t.claim_id = ANY($1)
+                  AND (e.researcher_notes IS NOT NULL OR e.interpretation IS NOT NULL)
+                ORDER BY e.completed_at DESC NULLS LAST, e.id DESC
+                LIMIT $2
+                """,
+                claim_ids,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
     async def get_research_tree(self, task_id: int) -> dict:
         """
         Return everything the Debug research-tree view needs: the task itself,
