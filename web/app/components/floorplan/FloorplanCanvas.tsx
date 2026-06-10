@@ -18,11 +18,13 @@ import { NODE_TYPES, ActivityMeter, type FloorNodeData, type Selected } from "./
 import { EDGE_TYPES } from "./FlowEdge";
 import { type FloorData } from "./useFloorData";
 import { useFlowHeat } from "./useFlowHeat";
-import { useNodeActivity, BUSY_MS } from "./useNodeActivity";
+import { useNodeActivity, NodeActivityContext, BUSY_MS } from "./useNodeActivity";
 import { AriadneInspector, GateInspector, LibraryInspector, MimirInspector, OpsInspector, PlannerInspector, QueueInspector, ResearcherInspector, ScoutInspector } from "./inspectors";
 
-function nodeData(def: NodeDef, fd: FloorData, priority: string | null, activeAt: Record<string, number>, series: Record<string, number[]>, now: number, onOpen: (s: Selected) => void): FloorNodeData {
-  const base: FloorNodeData = { def, onOpen, activeAt: activeAt[def.id] ?? null, activitySeries: series[def.id] ?? [], now };
+function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: (s: Selected) => void): FloorNodeData {
+  // NOTE: no activity fields here — live activity is read from NodeActivityContext per node,
+  // so this stays structural and the nodes array reference is stable across event ticks.
+  const base: FloorNodeData = { def, onOpen };
   switch (def.type) {
     case "scout":
       return { ...base, panel: fd.scouts[def.sourceKind ?? ""] ?? null, series: fd.scoutSeries[def.sourceKind ?? ""] ?? [] };
@@ -117,7 +119,8 @@ function InspectorShell({ title, planned, onClose, children }: { title: string; 
 
 function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot | null; floorData: FloorData; className?: string }) {
   const { hot, connected, events } = useFlowHeat();
-  const { activeAt, series, total, rate, now } = useNodeActivity();
+  const activity = useNodeActivity();
+  const { activeAt, total, rate, now } = activity;
   const [selected, setSelected] = useState<Selected | null>(null);
   const [activityOpen, setActivityOpen] = useState(true);
   const stats = floorData.pulse.stats;
@@ -148,10 +151,10 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
           selectable: !backdrop,
           connectable: false,
           zIndex: backdrop ? 0 : 1,
-          data: nodeData(def, floorData, priority, activeAt, series, now, onOpen),
+          data: nodeData(def, floorData, priority, onOpen),
         };
       }),
-    [floorData, priority, activeAt, series, now, onOpen],
+    [floorData, priority, onOpen],
   );
 
   const edges = useMemo(
@@ -186,6 +189,7 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
   }, []);
 
   return (
+    <NodeActivityContext.Provider value={activity}>
     <div className={cx("bg-blueprint relative overflow-hidden rounded-wing border border-slate-200 shadow-card", className ?? "h-[calc(100vh-15rem)] min-h-[620px]")}>
       <ReactFlow
         nodes={nodes}
@@ -285,6 +289,7 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
         )}
       </AnimatePresence>
     </div>
+    </NodeActivityContext.Provider>
   );
 }
 

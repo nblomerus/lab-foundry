@@ -12,7 +12,7 @@
 // This replaces the old per-node labels that showed MODE ("advisory") or 24h
 // totals ("Collecting") — neither of which told you who's actually working now.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useSharedEvents } from "../../lib/event-stream";
 import type { LabFoundryEvent, StreamMessage } from "../../lib/types";
 import { sourceKindOf } from "./inspectors";
@@ -159,7 +159,7 @@ export function useNodeActivity(): NodeActivity {
       }
       globalRef.current = globalRef.current.filter((x) => n - x < ACT_WINDOW_MS);
       setNow(n);
-    }, 2000);
+    }, 5000);
     return () => clearInterval(t);
   }, []);
 
@@ -173,4 +173,28 @@ export function useNodeActivity(): NodeActivity {
   }, [now, activeAt]);
 
   return { activeAt, series, total, rate, now, connected };
+}
+
+// Live activity is provided through context so the React-Flow `nodes` array can stay
+// STRUCTURALLY STABLE (it no longer depends on activeAt/series/now). Without this, every
+// event + the per-tick `now` rebuilt all ~25 node objects → React Flow re-diffed and
+// re-rendered the whole canvas constantly, freezing the page under load. Now the node
+// array is built once from structural data, and each node reads its own meter from context
+// via `useNodeMeter` — only the small meters re-render on activity, not the canvas.
+export const NodeActivityContext = createContext<NodeActivity | null>(null);
+
+const _EMPTY_SERIES: number[] = [];
+
+export function useNodeMeter(
+  nodeId: string,
+  enabled: boolean,
+): { state: ActivityState; ago: string | null; series: number[] } {
+  const a = useContext(NodeActivityContext);
+  const now = a?.now ?? Date.now();
+  const last = a?.activeAt[nodeId] ?? null;
+  return {
+    state: deriveActivity(enabled, last, now),
+    ago: last != null ? agoLabel(now - last) : null,
+    series: a?.series[nodeId] ?? _EMPTY_SERIES,
+  };
 }

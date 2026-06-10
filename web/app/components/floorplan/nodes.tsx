@@ -7,7 +7,7 @@ import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { AlertTriangle, CheckCircle2, Cpu, Gauge, Library, ShieldCheck, Zap } from "lucide-react";
 import { MiniBar, cx } from "../ui";
 import { compact } from "../../lib/format";
-import { deriveActivity, agoLabel, type ActivityState } from "./useNodeActivity";
+import { useNodeMeter, type ActivityState } from "./useNodeActivity";
 import type { AriadneOverview, DebugCosts, HostStats, KnowledgeStats, MimirPanel, ScoutPanel } from "../../lib/api";
 import type { NodeDef } from "./topology";
 
@@ -97,12 +97,6 @@ function busyRing(state: ActivityState): string {
   return state === "busy" ? "busy-halo" : "";
 }
 
-function activity(data: FloorNodeData, enabled: boolean): { state: ActivityState; ago: string | null } {
-  const now = data.now ?? Date.now();
-  const last = data.activeAt ?? null;
-  return { state: deriveActivity(enabled, last, now), ago: last != null ? agoLabel(now - last) : null };
-}
-
 // Live activity meter — a lightweight bar-sparkline of an agent's recent event
 // rate (newest bar on the right). Fills + brightens during bursts, flat when
 // quiet. Pure CSS bars (no chart lib) so ~30 of them can refresh every 2s cheaply.
@@ -132,7 +126,7 @@ export function ScoutNode({ data }: NodeProps<FN>) {
   const added = panel?.added_today ?? null;
   const inCorpus = panel?.in_corpus ?? null;
   const topics = panel?.last_searched?.topics ?? [];
-  const { state, ago } = activity(data, true); // scouts are always-on collectors
+  const { state, ago, series } = useNodeMeter(data.def.id, true); // scouts are always-on collectors
   return (
     <div className={cx("group flex h-full w-full cursor-pointer flex-col rounded-node border border-emerald-200/70 bg-white/90 p-3 shadow-card backdrop-blur transition hover:border-emerald-300 hover:shadow-panel", busyRing(state))}>
       <NodeHandles />
@@ -156,7 +150,7 @@ export function ScoutNode({ data }: NodeProps<FN>) {
         </div>
       </div>
       <div className="mt-1">
-        <ActivityMeter series={data.activitySeries} state={state} className="h-[26px]" />
+        <ActivityMeter series={series} state={state} className="h-[26px]" />
       </div>
       {topics.length > 0 && (
         <div className="mt-auto truncate pt-1 text-[9px] text-slate-400" title={topics.join(" · ")}>
@@ -183,7 +177,7 @@ export function MimirNode({ data }: NodeProps<FN>) {
   const g = mimir?.at_a_glance;
   const nodes = stats?.graph?.status === "ok" ? stats.graph.nodes ?? 0 : null;
   const mix = (mimir?.source_mix ?? []).filter((m) => m.count > 0);
-  const { state, ago } = activity(data, mimir?.status === "ok");
+  const { state, ago, series } = useNodeMeter(data.def.id, mimir?.status === "ok");
   return (
     <div className={cx("flex h-full w-full cursor-pointer flex-col rounded-wing border border-emerald-300 bg-white/92 p-3.5 shadow-panel backdrop-blur transition hover:shadow-float", busyRing(state))}>
       <NodeHandles />
@@ -199,7 +193,7 @@ export function MimirNode({ data }: NodeProps<FN>) {
         </div>
         <div className="flex flex-col items-end gap-1">
           <ActivityBadge state={state} ago={ago} />
-          <ActivityMeter series={data.activitySeries} state={state} className="h-3 w-16" />
+          <ActivityMeter series={series} state={state} className="h-3 w-16" />
         </div>
       </div>
 
@@ -408,8 +402,8 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
 export function DormantNode({ data }: NodeProps<FN>) {
   const { def, ariadne } = data;
   const lv = dormantLive(def, ariadne);
+  const { state, ago, series } = useNodeMeter(data.def.id, lv?.enabled ?? false);
   if (lv) {
-    const { state, ago } = activity(data, lv.enabled);
     return (
       <div className={cx("flex h-full w-full cursor-pointer flex-col rounded-node border border-slate-200 bg-white/90 p-3 shadow-card backdrop-blur transition hover:shadow-panel", busyRing(state))}>
         <NodeHandles />
@@ -425,7 +419,7 @@ export function DormantNode({ data }: NodeProps<FN>) {
         </div>
         <div className="mt-2 text-xl font-semibold tabular-nums text-slate-900">{lv.value}</div>
         <div className="text-[10px] text-slate-400">{lv.sub}</div>
-        <ActivityMeter series={data.activitySeries} state={state} className="mt-auto h-3 pt-1.5" />
+        <ActivityMeter series={series} state={state} className="mt-auto h-3 pt-1.5" />
       </div>
     );
   }
