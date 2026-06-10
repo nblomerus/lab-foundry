@@ -23,7 +23,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 
 import asyncpg
@@ -203,6 +203,20 @@ class Dispatcher:
         # further downstream by the router's GPULock.
         self.max_concurrent_handlers = max_concurrent_handlers
         self._handler_sem = asyncio.Semaphore(max_concurrent_handlers)
+        # Reserve handler slots for non-ingest agents. Mimir's continuous library
+        # intake (acquire.requested / source.discovered / sweep) otherwise holds
+        # ALL of the slots indefinitely (observed live: dispatch.saturated
+        # held_by=["mimir"], in_flight=4), starving the experiment lane's
+        # design/interpret steps and any other agent — they sit `pending` forever.
+        # Fix: throttled agents must ALSO hold a slot in a smaller _ingest_sem
+        # (capped at max - reserved), so >= reserved global slots stay grabbable by
+        # everyone else. Default reserves 1; both knobs are env-overridable.
+        reserved = int(os.environ.get("DISPATCH_RESERVED_SLOTS", "1"))
+        self._throttled_agents = frozenset(
+            a.strip() for a in os.environ.get("DISPATCH_THROTTLED_AGENTS", "mimir").split(",") if a.strip()
+        )
+        self._ingest_cap = max(1, max_concurrent_handlers - max(0, reserved))
+        self._ingest_sem = asyncio.Semaphore(self._ingest_cap)
         # Serializes the liveness pump so the startup pass and the watchdog's
         # first pass don't both read deficit=N and each emit N triggers.
         self._revive_lock = asyncio.Lock()
@@ -222,6 +236,23 @@ class Dispatcher:
         # handlers and saturation, which the DB (reaped/stale rows) can't show.
         self._inflight: dict[int, dict] = {}
         self._inflight_seq = itertools.count(1)
+
+    @asynccontextmanager
+    async def _slot(self, agent: str | None):
+        """Acquire a concurrency slot for a handler. Throttled (ingest) agents
+        additionally take an _ingest_sem slot, capping them at max - reserved so
+        at least `reserved` global slots always stay free for everyone else —
+        this is what keeps Mimir's continuous intake from monopolising the pool
+        and starving the experiment lane (and any other agent)."""
+        throttled = agent in self._throttled_agents
+        if throttled:
+            await self._ingest_sem.acquire()
+        try:
+            async with self._handler_sem:
+                yield
+        finally:
+            if throttled:
+                self._ingest_sem.release()
 
     def register(self, event_type: str, handler: Handler) -> None:
         if event_type in self._handlers:
@@ -323,7 +354,8 @@ class Dispatcher:
         # Gate the execution behind the concurrency semaphore so a burst of
         # events doesn't launch unbounded handlers at once. Gate checks above
         # run first (and cheaply), so suppressed events never occupy a slot.
-        async with self._handler_sem:
+        # _slot() also enforces the per-ingest-agent reservation (see __init__).
+        async with self._slot(agent):
             session = Session(
                 handler_name=handler.__name__,
                 triggered_by_event_id=event_id,

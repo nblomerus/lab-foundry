@@ -250,3 +250,102 @@ async def test_concurrent_revive_passes_do_not_double_emit():
         disp._revive_stranded_tasks(conn),
     )
     assert conn.insert_count == 10, f"double-emit: expected 10 triggers, got {conn.insert_count}"
+
+
+# --------------------------------------------------------------------------
+# Per-ingest-agent slot reservation (Mimir can't starve the other lanes)
+# --------------------------------------------------------------------------
+
+
+class _MultiConn:
+    """Fake conn returning a per-id event so different ids dispatch different handlers."""
+
+    def __init__(self, events: dict[int, dict], executed: list[str]):
+        self._events = events
+        self._executed = executed
+
+    async def fetchrow(self, query: str, *args):
+        if "FROM events" in query:
+            ev = self._events.get(args[0])
+            return dict(ev) if ev else None
+        return None
+
+    async def fetchval(self, query: str, *args):
+        return None
+
+    async def execute(self, query: str, *args):
+        self._executed.append(query)
+        return "UPDATE 1"
+
+
+class _MultiPool:
+    def __init__(self, events: dict[int, dict]):
+        self._events = events
+        self.executed: list[str] = []
+
+    def acquire(self):
+        return _AcquireCtx(_MultiConn(self._events, self.executed))
+
+
+async def _always_active(pool, agent):  # patches get_agent_mode so the mode dial never gates
+    return "active"
+
+
+@pytest.mark.asyncio
+async def test_throttled_agent_cannot_starve_other_lanes(monkeypatch):
+    # max=3, reserved=1 (default) -> Mimir (a throttled ingest agent) may hold at
+    # most 2 of the 3 slots, leaving >=1 always free for the experiment lane.
+    monkeypatch.setattr("harness.dispatch.get_agent_mode", _always_active)
+
+    events: dict[int, dict] = {}
+    for i in range(1, 9):  # 8 mimir ingest events, all firing at once
+        events[i] = {
+            "id": i,
+            "event_type": "source.discovered",
+            "target_type": "source",
+            "target_id": i,
+            "payload": {},
+            "status": "pending",
+        }
+    for i in range(101, 104):  # 3 experiment-lane events
+        events[i] = {
+            "id": i,
+            "event_type": "experiment.completed",
+            "target_type": "experiment",
+            "target_id": i,
+            "payload": {},
+            "status": "pending",
+        }
+
+    disp = Dispatcher(pool=_MultiPool(events), max_concurrent_handlers=3)
+    assert disp._ingest_cap == 2  # max - reserved
+
+    mimir_live = mimir_peak = 0
+    exp_ran_while_mimir_saturated = False
+
+    async def mimir_h(ev, d):
+        nonlocal mimir_live, mimir_peak
+        mimir_live += 1
+        mimir_peak = max(mimir_peak, mimir_live)
+        await asyncio.sleep(0.05)  # hold the slot so the pool stays under pressure
+        mimir_live -= 1
+        return None
+
+    mimir_h.__module__ = "agents.mimir.handler"  # agent_of -> "mimir" (throttled)
+
+    async def exp_h(ev, d):
+        nonlocal exp_ran_while_mimir_saturated
+        if mimir_live >= disp._ingest_cap:  # mimir is at its cap, yet we still got a slot
+            exp_ran_while_mimir_saturated = True
+        return None
+
+    exp_h.__module__ = "agents.experiments.handler"  # agent_of -> "experiments" (not throttled)
+
+    disp.register("source.discovered", mimir_h)
+    disp.register("experiment.completed", exp_h)
+
+    await asyncio.gather(*[disp._process_event(i) for i in list(range(1, 9)) + list(range(101, 104))])
+
+    assert mimir_peak <= 2, f"mimir exceeded its ingest cap: peaked at {mimir_peak}"
+    assert mimir_peak == 2, "mimir never reached its cap; test wouldn't catch a regression"
+    assert exp_ran_while_mimir_saturated, "experiment lane was starved while mimir saturated the pool"
