@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import itertools
 import json
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 
 import asyncpg
@@ -90,6 +93,95 @@ PHASE_BUDGET_DAYS = {
 
 
 # -------------------------------------------------------------------------
+# Stall / liveness guards
+# -------------------------------------------------------------------------
+# Each handler runs inside a bounded concurrency pool (max_concurrent_handlers).
+# If one HANGS it holds its slot forever — and the watchdog's stale-row reap
+# can't help: it only rewrites the agent_runs ROW, it cannot cancel a live
+# coroutine. Enough hung handlers and the whole dispatcher wedges while the DB
+# reads idle (the indicators lie; only the external restart recovers it). So we
+# bound every handler with a hard wall-clock timeout — on overrun
+# asyncio.wait_for CANCELS the coroutine, freeing the slot, and we flag it.
+# Default 30m matches the stale-task / orphan-run reap horizon so the three
+# mechanisms agree. Env-override for any legitimately longer handler.
+HANDLER_TIMEOUT_S = float(os.environ.get("HANDLER_TIMEOUT_S", "1800"))
+# Soft warn: a handler still in flight past this is flagged (agent.slow) BEFORE
+# the hard cancel, so a degrading agent surfaces early, not at the cliff.
+HANDLER_SLOW_WARN_S = float(os.environ.get("HANDLER_SLOW_WARN_S", "600"))
+# Saturation: when every slot is occupied AND at least this many events are
+# backed up, the lab is held up behind the in-flight agents (dispatch.saturated).
+SATURATION_BACKLOG = int(os.environ.get("DISPATCH_SATURATION_BACKLOG", "5"))
+# Broken: an agent with >= this many recent runs, ALL failed (0 completed in the
+# last hour), is flagged broken — it's silently flatlining its slice of the loop.
+BROKEN_AGENT_MIN_RUNS = int(os.environ.get("BROKEN_AGENT_MIN_RUNS", "3"))
+
+
+# -------------------------------------------------------------------------
+# Closure guard — "work ran but the loop never closed"
+# -------------------------------------------------------------------------
+# An event-driven lab fails SILENTLY when something is produced but the consumer
+# that should advance it never runs (a direction worked then left mid-loop, a
+# fetched corpus that never re-triggers its requester, an event whose handler is
+# unregistered in the current run mode). `no_handler` was treated as benign, so
+# every such dead-end hid. The closure guard makes non-closure (a) always VISIBLE
+# (loop.unclosed indicators + lab_doctor) and (b) auto-RESOLVED for the research
+# ladder below.
+#
+# Events that are intentionally NOT dispatched to a handler — flagging these as
+# non-closure would cry wolf. Two kinds: lifecycle/telemetry (streamed to the UI,
+# never handled) and poll-consumed (read by an agent's own next run, not event-
+# driven). Anything emitted and landing `no_handler` that is NOT here is a wiring
+# regression (a real loop-closing event silently dropped) → flagged.
+CLOSURE_EXEMPT_EVENTS = frozenset(
+    {
+        # lifecycle / telemetry (streamed, never handled by design)
+        "session.started",
+        "session.completed",
+        "session.failed",
+        "step.started",
+        "step.completed",
+        "step.failed",
+        "document.parsed",
+        "document.ingested",
+        "document.staged",
+        "library.ingest_rejected",
+        "mimir.ingest_blocked",
+        "library.trends",
+        "cost.cap_reached",
+        "lessons.reconciled",
+        # the guard's own indicators (must never recurse into themselves)
+        "agent.stalled",
+        "agent.slow",
+        "agent.broken",
+        "dispatch.saturated",
+        "loop.unclosed",
+        # direct-call ask channel — handled by ops.mimir_ask, not the dispatcher
+        "mimir.ask",
+        "mimir.answered",
+        # poll-consumed: the researcher's next run reads these (feedback.refine_disposition)
+        "acquire.fulfilled",
+        "acquire.rejected",
+        # market-PI lifecycle — DELIBERATELY unhandled (Stage 0 neutralization, see harness/main.py).
+        # Dead by design, not a wiring regression; the closure ladder also emits claim.invalidated.
+        "claim.invalidated",
+        "claim.confidence_changed",
+        "phase.transition_proposed",
+        "phase.budget_exceeded",
+    }
+)
+# How long a non-exempt event type may sit `no_handler` in the window before it's
+# flagged (so a one-off during a restart doesn't trip it).
+UNCLOSED_EVENT_MIN = int(os.environ.get("CLOSURE_UNCLOSED_EVENT_MIN", "3"))
+
+# Auto-close ladder (research directions): thin_corpus → acquire → ONE targeted
+# scout sweep → re-attempt → still-thin ⇒ genuine gap (invalidate). All bounds are
+# generous and env-tunable; the ladder is idempotent (one step per eligible tick).
+ACTIVE_CLAIM = ("proposed", "tested", "weakly_supported", "replicated")
+SCOUT_SETTLE_MIN = float(os.environ.get("CLOSURE_SCOUT_SETTLE_MIN", "20"))  # let a scout sweep ingest
+CLOSURE_LOOKBACK_DAYS = int(os.environ.get("CLOSURE_LOOKBACK_DAYS", "3"))
+
+
+# -------------------------------------------------------------------------
 # Dispatcher
 # -------------------------------------------------------------------------
 
@@ -123,6 +215,12 @@ class Dispatcher:
         # is dark). Condition-driven, not interval-driven — see _discovery_pump.
         self._pump_task: asyncio.Task | None = None
         self._last_pump_emit: datetime | None = None
+        # Live in-flight handler registry: token -> {agent, handler, event_id,
+        # started_at(monotonic)}. The authoritative view of what is holding a
+        # concurrency slot RIGHT NOW — the watchdog reads it to flag slow
+        # handlers and saturation, which the DB (reaped/stale rows) can't show.
+        self._inflight: dict[int, dict] = {}
+        self._inflight_seq = itertools.count(1)
 
     def register(self, event_type: str, handler: Handler) -> None:
         if event_type in self._handlers:
@@ -237,10 +335,43 @@ class Dispatcher:
                 # behaving exactly like the pre-session path.
                 log.exception("session.start failed for event %s; running without trace", event_id)
             token = _current_session.set(session)
+            inflight_id = next(self._inflight_seq)
+            self._inflight[inflight_id] = {
+                "agent": agent or handler.__name__,
+                "handler": handler.__name__,
+                "event_id": event_id,
+                "started_at": time.monotonic(),
+            }
             try:
-                result = await handler(event, self)
+                # Hard wall-clock bound: on overrun wait_for CANCELS the handler
+                # coroutine, so it can never hold its concurrency slot forever
+                # (the watchdog's row reap can't do that — it only rewrites rows).
+                result = await asyncio.wait_for(handler(event, self), timeout=HANDLER_TIMEOUT_S)
                 await self._mark_consumed(event_id, handler.__name__, result)
                 await session.finish("completed")
+            except TimeoutError:
+                # wait_for already cancelled the handler; the slot frees the moment
+                # we leave this block. Flag the stall so it's visible, not silent.
+                log.error(
+                    "handler %s TIMED OUT after %.0fs on event %s — cancelled (slot freed)",
+                    handler.__name__,
+                    HANDLER_TIMEOUT_S,
+                    event_id,
+                )
+                await self._mark_failed(event_id, f"handler timed out after {HANDLER_TIMEOUT_S:.0f}s (cancelled)")
+                await self._emit_indicator(
+                    "agent.stalled",
+                    {
+                        "agent": agent or handler.__name__,
+                        "handler": handler.__name__,
+                        "event_id": event_id,
+                        "timeout_s": HANDLER_TIMEOUT_S,
+                        "action": "cancelled",
+                    },
+                    dedup=f"stalled-{agent or handler.__name__}-{event_id}",
+                )
+                with suppress(Exception):
+                    await session.finish("failed", error="handler timeout")
             except Exception as e:
                 log.exception("handler %s failed for event %s", handler.__name__, event_id)
                 await self._mark_failed(event_id, str(e))
@@ -249,6 +380,7 @@ class Dispatcher:
                 except Exception:
                     log.exception("session.finish failed for event %s", event_id)
             finally:
+                self._inflight.pop(inflight_id, None)
                 _current_session.reset(token)
 
     # -- Event state transitions ----------------------------------------
@@ -452,6 +584,293 @@ class Dispatcher:
                 pending_tasks,
             )
 
+    # -- Stall / broken-agent indicators --------------------------------
+
+    async def _emit_indicator(self, event_type: str, payload: dict, *, dedup: str) -> None:
+        """Write a telemetry/indicator event. No handler is registered for these,
+        so they self-suppress as 'no_handler' (the same convention cost.cap_reached
+        uses) — the point is the row, which /events + lab_doctor read. target_id=0
+        is the sentinel so the UNIQUE (event_type,target_type,target_id,dedup_key)
+        dedups (a NULL target_id would defeat it). Best-effort: telemetry must never
+        break the loop it is observing."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO events (event_type, target_type, target_id, payload, dedup_key)
+                    VALUES ($1, 'agent', 0, $2::jsonb, $3)
+                    ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                    """,
+                    event_type,
+                    json.dumps(payload),
+                    dedup,
+                )
+            log.warning("indicator %s: %s", event_type, json.dumps(payload))
+        except Exception:  # noqa: BLE001 — an indicator failing must not sink the watchdog
+            log.exception("failed to emit indicator %s", event_type)
+
+    async def _detect_stalls(self) -> None:
+        """Read the LIVE in-flight registry (not the DB) and surface what the
+        reaped-row view can't: (1) any handler past the soft-warn age → agent.slow,
+        an early warning before the hard cancel; (2) every slot occupied while
+        events back up → dispatch.saturated, i.e. the lab is held up behind these
+        agents. Both are deduped on a coarse time bucket so a long stall doesn't
+        spam an event every watchdog tick."""
+        now = time.monotonic()
+        warn_window = max(int(HANDLER_SLOW_WARN_S), 1)
+        for r in list(self._inflight.values()):
+            age = int(now - r["started_at"])
+            if age >= HANDLER_SLOW_WARN_S:
+                await self._emit_indicator(
+                    "agent.slow",
+                    {"agent": r["agent"], "handler": r["handler"], "event_id": r["event_id"], "age_s": age},
+                    dedup=f"slow-{r['event_id']}-{age // warn_window}",  # ~once per warn-window
+                )
+        if len(self._inflight) < self.max_concurrent_handlers:
+            return  # a slot is free → by definition nothing is held up
+        try:
+            async with self.pool.acquire() as conn:
+                backlog = (
+                    await conn.fetchval(
+                        "SELECT count(*) FROM events WHERE status = 'pending' "
+                        "AND emitted_at < now() - interval '2 minutes'"
+                    )
+                    or 0
+                )
+        except Exception:  # noqa: BLE001 — a probe failure must not kill the watchdog
+            log.exception("saturation backlog probe failed")
+            return
+        if backlog >= SATURATION_BACKLOG:
+            held_by = sorted({r["agent"] for r in self._inflight.values()})
+            await self._emit_indicator(
+                "dispatch.saturated",
+                {
+                    "in_flight": len(self._inflight),
+                    "max": self.max_concurrent_handlers,
+                    "backlog": int(backlog),
+                    "held_by": held_by,
+                },
+                dedup=f"saturated-{int(now // warn_window)}",
+            )
+
+    async def _detect_broken_agents(self, conn) -> None:
+        """An agent whose recent runs ALL failed (>= BROKEN_AGENT_MIN_RUNS, zero
+        completed in the last hour) is broken — it keeps consuming its trigger
+        events and producing nothing, silently flatlining its slice of the loop
+        while the rest of the lab looks fine. Emit agent.broken (deduped per agent
+        per hour) naming it + a sample error so it surfaces instead of hiding."""
+        rows = await conn.fetch(
+            """
+            SELECT agent_name,
+                   count(*) FILTER (WHERE status = 'failed')    AS failed,
+                   count(*) FILTER (WHERE status = 'completed') AS completed,
+                   max(left(error, 200))                        AS sample
+            FROM agent_runs
+            WHERE started_at > now() - interval '1 hour'
+            GROUP BY agent_name
+            HAVING count(*) FILTER (WHERE status = 'failed') >= $1
+               AND count(*) FILTER (WHERE status = 'completed') = 0
+            """,
+            BROKEN_AGENT_MIN_RUNS,
+        )
+        hour = datetime.now(UTC).strftime("%Y-%m-%dT%H")
+        for r in rows:
+            await self._emit_indicator(
+                "agent.broken",
+                {"agent": r["agent_name"], "failed": r["failed"], "window": "1h", "sample_error": r["sample"]},
+                dedup=f"broken-{r['agent_name']}-{hour}",
+            )
+
+    # -- Closure guard: detection ---------------------------------------
+
+    async def _detect_unclosed_events(self, conn) -> None:
+        """Universal event-wiring guard: any event type that lands `no_handler`
+        and is NOT on CLOSURE_EXEMPT_EVENTS is a loop-closing event being silently
+        dropped (a handler unregistered in the current run mode, a typo'd emit, a
+        new event type nobody wired). This converts every such dead-end — current
+        OR future — from silent to a loud loop.unclosed indicator."""
+        rows = await conn.fetch(
+            "SELECT event_type, count(*) AS n, max(emitted_at) AS last FROM events "
+            "WHERE status = 'suppressed' AND suppression_reason = 'no_handler' "
+            "AND emitted_at > now() - ($1||' days')::interval "
+            "GROUP BY event_type HAVING count(*) >= $2 ORDER BY 2 DESC",
+            str(CLOSURE_LOOKBACK_DAYS),
+            UNCLOSED_EVENT_MIN,
+        )
+        hour = datetime.now(UTC).strftime("%Y-%m-%dT%H")
+        for r in rows:
+            et = r["event_type"]
+            if et in CLOSURE_EXEMPT_EVENTS:
+                continue
+            await self._emit_indicator(
+                "loop.unclosed",
+                {"kind": "unhandled_event", "event_type": et, "count": r["n"], "window_days": CLOSURE_LOOKBACK_DAYS},
+                dedup=f"unclosed-event-{et}-{hour}",
+            )
+
+    async def _detect_stuck_directions(self, conn) -> None:
+        """A direction that is approved + active but has ≥1 task, ALL terminal, and
+        no OPEN task is committed work that has gone quiet mid-loop — it blocks new
+        deliberation while producing nothing. The research-closure ladder resolves
+        the thin_corpus ones; this surfaces any residual (e.g. a grounded direction
+        nothing ever advanced) so it can't hide. Deduped per claim per day."""
+        rows = await conn.fetch(
+            "SELECT c.id, c.status FROM claims c "
+            "JOIN direction_gate dg ON dg.claim_id = c.id AND dg.status = 'approved' "
+            "WHERE c.claim_kind = 'direction' AND c.status = ANY($1) "
+            "AND EXISTS (SELECT 1 FROM tasks t WHERE t.claim_id = c.id) "
+            "AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.claim_id = c.id AND t.status IN ('pending','running'))",
+            list(ACTIVE_CLAIM),
+        )
+        day = datetime.now(UTC).strftime("%Y-%m-%d")
+        for r in rows:
+            await self._emit_indicator(
+                "loop.unclosed",
+                {"kind": "direction_stalled", "claim_id": r["id"], "status": r["status"]},
+                dedup=f"unclosed-dir-{r['id']}-{day}",
+            )
+
+    # -- Closure guard: auto-close (research ladder) --------------------
+
+    async def _emit_targeted_sweep(self, conn, claim_id: int, topics: list[str], dedup: str) -> None:
+        """Fire ONE scout sweep aimed at a direction's thin topics (library.sweep_requested
+        → run_discovery_sweep → web/arXiv/GitHub/OpenML scouts). claim_id is carried so the
+        ladder can tell 'we already scouted this direction' on a later tick."""
+        await conn.execute(
+            "INSERT INTO events (event_type, target_type, target_id, payload, dedup_key) "
+            "VALUES ('library.sweep_requested', 'ingest_source', $1, $2::jsonb, $3) "
+            "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+            claim_id,
+            json.dumps(
+                {
+                    "claim_id": claim_id,
+                    "topics": topics,
+                    "sort": "relevance",  # targeted niche search → relevance, not newest arXiv-wide
+                    "reason": "closure: scout before declaring a gap",
+                }
+            ),
+            dedup,
+        )
+
+    async def _requeue_direction(self, conn, claim_id: int, statement: str, stage: str) -> None:
+        """Insert a fresh pending research task for a direction (fires trg_emit_task_created
+        → task.created → researcher re-attempts against the now-richer corpus). The closure
+        stage rides on the payload so a later tick knows where on the ladder we are."""
+        await conn.execute(
+            "INSERT INTO tasks (department, task_type, description, payload, priority, status, claim_id) "
+            "VALUES ('research', 'survey', $1, $2::jsonb, 8, 'pending', $3)",
+            f"Re-attempt ({stage}) after corpus growth: {(statement or '')[:120]}",
+            json.dumps({"from": "closure", "closure": {"stage": stage, "of_claim": claim_id}}),
+            claim_id,
+        )
+
+    async def _declare_gap(self, claim_id: int, reason: str) -> None:
+        """Retire a direction that genuinely can't progress (corpus exhausted AFTER a targeted
+        scout) → frees the approved-direction budget slot for the next direction. Without a state
+        client (e.g. tests), falls back to a loop.unclosed indicator. Best-effort — a failure here
+        must not kill the watchdog."""
+        state = getattr(self, "state", None)
+        if state is None:
+            await self._emit_indicator(
+                "loop.unclosed",
+                {"kind": "research_gap", "claim_id": claim_id, "note": reason},
+                dedup=f"gap-{claim_id}",
+            )
+            return
+        try:
+            await state.invalidate_claim(claim_id, reason=reason, verdict_id=None)
+            log.info("closure: direction %s retired as a research gap — %s", claim_id, reason)
+        except Exception:  # noqa: BLE001 — a gap-declaration failure must not kill the watchdog
+            log.exception("closure: failed to retire direction %s", claim_id)
+
+    async def _advance_research_closure(self, conn) -> None:
+        """Auto-close the thin_corpus research loop, one bounded step per eligible tick:
+
+            thin_corpus → acquire delivered NEW corpus?  → re-queue (acquire_retry)
+                        → else no scout yet               → ONE targeted scout sweep
+                        → else scout settled              → re-queue (scouted_retry)
+                        → else still thin after scouting  → genuine gap → invalidate
+
+        Idempotent: a re-queue creates an OPEN task, which removes the direction from
+        the candidate set until it completes, so no step double-fires. Only runs while
+        the researcher is active (else the lab isn't researching — nothing to close)."""
+        if await get_agent_mode(self.pool, "researcher") not in {"advisory", "active"}:
+            return
+        candidates = await conn.fetch(
+            "SELECT c.id, c.statement FROM claims c "
+            "JOIN direction_gate dg ON dg.claim_id = c.id AND dg.status = 'approved' "
+            "WHERE c.claim_kind = 'direction' AND c.status = ANY($1) "
+            "AND EXISTS (SELECT 1 FROM tasks t WHERE t.claim_id = c.id) "
+            "AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.claim_id = c.id AND t.status IN ('pending','running'))",
+            list(ACTIVE_CLAIM),
+        )
+        for c in candidates:
+            cid = c["id"]
+            latest = await conn.fetchrow(
+                "SELECT completed_at, result->>'disposition' AS disp, payload->'closure'->>'stage' AS stage "
+                "FROM tasks WHERE claim_id = $1 ORDER BY id DESC LIMIT 1",
+                cid,
+            )
+            if latest is None:
+                continue
+            if latest["disp"] == "corpus_exhausted":
+                # Researcher confirmed a genuine gap (only reachable AFTER a scout now, via the
+                # refine_disposition fix). With a 1-direction budget, RETIRING it is what frees the
+                # slot for the next direction — else a concluded dead-end holds the only slot forever
+                # and the whole research pipeline halts behind it.
+                await self._declare_gap(cid, "research gap: corpus exhausted after acquire + targeted scout")
+                continue
+            if latest["disp"] != "thin_corpus":
+                continue  # grounded/other → the detector surfaces it; the ladder skips
+            # An acquire still being adjudicated? Wait for the batch to resolve.
+            if await conn.fetchval(
+                "SELECT count(*) FROM events WHERE event_type='acquire.requested' AND status='pending' "
+                "AND payload->>'claim_id' = $1",
+                str(cid),
+            ):
+                continue
+            since = latest["completed_at"]
+            fulfilled_new = await conn.fetchval(
+                "SELECT count(*) FROM events WHERE event_type='acquire.fulfilled' "
+                "AND payload->>'claim_id' = $1 AND payload->>'status' = 'fulfilled' AND emitted_at > $2",
+                str(cid),
+                since,
+            )
+            stage = latest["stage"]
+            # (2a) acquire delivered new corpus and we haven't retried on it yet → retry.
+            if fulfilled_new and stage not in ("acquire_retry", "scouted_retry"):
+                await self._requeue_direction(conn, cid, c["statement"], "acquire_retry")
+                log.info("closure: re-queued direction %s (acquire delivered %d new source(s))", cid, fulfilled_new)
+                continue
+            scout_at = await conn.fetchval(
+                "SELECT max(emitted_at) FROM events WHERE event_type='library.sweep_requested' "
+                "AND payload->>'claim_id' = $1",
+                str(cid),
+            )
+            # (2b) never scouted → fire ONE targeted scout sweep on this direction's thin topics.
+            if scout_at is None:
+                topics = [
+                    r["q"]
+                    for r in await conn.fetch(
+                        "SELECT DISTINCT payload->>'query' AS q FROM events WHERE event_type='acquire.requested' "
+                        "AND payload->>'claim_id' = $1 AND payload->>'query' IS NOT NULL LIMIT 6",
+                        str(cid),
+                    )
+                ] or [(c["statement"] or "")[:120]]
+                await self._emit_targeted_sweep(conn, cid, topics, f"closure-scout-{cid}")
+                log.info("closure: fired targeted scout sweep for direction %s (topics=%d)", cid, len(topics))
+                continue
+            now = await conn.fetchval("SELECT now()")
+            if (now - scout_at).total_seconds() < SCOUT_SETTLE_MIN * 60:
+                continue  # let the scout's sources discover + ingest
+            # (3) scout settled, not yet re-attempted post-scout → scouted retry.
+            if stage != "scouted_retry":
+                await self._requeue_direction(conn, cid, c["statement"], "scouted_retry")
+                log.info("closure: re-queued direction %s (scouted_retry — scout has settled)", cid)
+                continue
+            # (4) STILL thin after acquire + a targeted scout → a genuine research gap. Pivot.
+            await self._declare_gap(cid, "research gap: corpus still thin after acquire + targeted scout")
+
     # -- Watchdog -------------------------------------------------------
 
     async def _watchdog_loop(self) -> None:
@@ -464,6 +883,11 @@ class Dispatcher:
                     await self._sweep_pending_events(conn)
                     await self._check_phase_budget(conn)
                     await self._refresh_slop_view(conn)
+                    await self._detect_broken_agents(conn)
+                    await self._detect_unclosed_events(conn)
+                    await self._advance_research_closure(conn)  # auto-close the research ladder
+                    await self._detect_stuck_directions(conn)  # flag any residual the ladder didn't clear
+                await self._detect_stalls()
                 await self._reconcile_lessons_if_due()
                 await self._sweep_library_if_due()
             except Exception:

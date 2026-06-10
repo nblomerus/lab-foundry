@@ -10,8 +10,10 @@ the /trace step-DAG (a session), Langfuse (an LLM call), or `ops.why` (causality
     python -m ops.lab_doctor [--hours 1]
 
 Checks: activity/liveness · errors · stuck/orphaned runs · events not draining ·
-friction gates (cooldown/cost-cap/slop) · cost today · Mimir intake + holds · per-agent
-last-seen. Thresholds are deliberately loose — a ⚠ is a pointer, not a verdict.
+stall/saturation/broken-agent indicators · unclosed-loop indicators · friction gates
+(cooldown/cost-cap/slop) · cost today · Mimir intake + holds · per-agent last-seen.
+Thresholds are deliberately loose — a ⚠ is a pointer, not a verdict. For the full
+non-closure inventory run `python -m ops.closure_audit`.
 """
 
 from __future__ import annotations
@@ -88,6 +90,41 @@ async def _stuck(conn) -> None:
         "SELECT count(*) FROM events WHERE status = 'pending' AND emitted_at < now() - interval '5 minutes'"
     )
     _line(_OK if not stale_pending else _WARN, f"events pending >5m (not draining): {stale_pending}")
+
+
+async def _stalls(conn, hours: int) -> None:
+    _h("Stall / saturation / broken agents (in-process guards the watchdog's row-reap can't see)")
+    rows = await conn.fetch(
+        "SELECT event_type, count(*) AS n, max(emitted_at) AS last FROM events "
+        "WHERE event_type IN ('agent.stalled','dispatch.saturated','agent.broken','agent.slow') "
+        "AND emitted_at > now() - ($1||' hours')::interval "
+        "GROUP BY event_type ORDER BY 2 DESC",
+        str(hours),
+    )
+    if not rows:
+        _line(_OK, "no stall / saturation / broken-agent indicators")
+        return
+    # stalled/saturated/broken are hard problems; slow is an early-warning ⚠.
+    sev = {"agent.stalled": _BAD, "dispatch.saturated": _BAD, "agent.broken": _BAD, "agent.slow": _WARN}
+    for r in rows:
+        _line(sev.get(r["event_type"], _WARN), f"{r['event_type']}: {r['n']}  (last {r['last']})")
+
+
+async def _closure(conn, hours: int) -> None:
+    _h("Closure — work produced but the loop never closed (guard auto-closes the research ladder)")
+    rows = await conn.fetch(
+        "SELECT payload->>'kind' AS kind, count(*) AS n, max(emitted_at) AS last FROM events "
+        "WHERE event_type = 'loop.unclosed' AND emitted_at > now() - ($1||' hours')::interval "
+        "GROUP BY payload->>'kind' ORDER BY 2 DESC",
+        str(hours),
+    )
+    if not rows:
+        _line(_OK, "no unclosed-loop indicators")
+        return
+    # an unhandled event is a wiring regression (✗); stalled/gap directions are the ladder's work (⚠).
+    sev = {"unhandled_event": _BAD}
+    for r in rows:
+        _line(sev.get(r["kind"], _WARN), f"loop.unclosed [{r['kind']}]: {r['n']}  (last {r['last']})")
 
 
 async def _gates(conn, hours: int) -> None:
@@ -169,9 +206,9 @@ async def run(hours: int) -> int:
     print("=" * 78 + f"\nLAB DOCTOR  (read-only; window={hours}h)\n" + "=" * 78)
     conn = await asyncpg.connect(dsn)
     try:
-        for check in (_activity, _errors, _stuck, _gates, _cost, _mimir, _modes, _agents):
+        for check in (_activity, _errors, _stuck, _stalls, _closure, _gates, _cost, _mimir, _modes, _agents):
             try:
-                await (check(conn, hours) if check in (_activity, _gates, _mimir) else check(conn))
+                await (check(conn, hours) if check in (_activity, _stalls, _closure, _gates, _mimir) else check(conn))
             except Exception as e:  # noqa: BLE001 — one check failing must not sink the report
                 _line(_BAD, f"{check.__name__} check errored: {str(e)[:120]}")
     finally:

@@ -561,6 +561,7 @@ async def search_arxiv(
     max_results: int = 10,
     *,
     start: int = 0,
+    sort: str = "submittedDate",
     client: httpx.AsyncClient | None = None,
 ) -> list[ArxivResult]:
     """Search the arXiv Atom API and return typed `ArxivResult` rows.
@@ -569,21 +570,26 @@ async def search_arxiv(
     augmented generation"). On any transport error or unparseable feed this
     returns [] — discovery is best-effort and must not raise into a scout loop.
 
-    Results are sorted newest-first (submittedDate desc) so a *repeated* sweep of
-    the same topic keeps surfacing fresh papers rather than re-returning the same
-    relevance-ranked top-N (which the corpus already holds). `start` pages deeper
-    into the back catalogue — the discovery sweep rotates it to widen coverage.
+    `sort` ∈ {"submittedDate", "relevance"} maps to arXiv's `sortBy`:
+      * "submittedDate" (default) — newest-first; right for the STANDING sweep on
+        broad topics, where a repeated sweep should surface fresh papers (paged via
+        `start`) rather than re-return the same relevance top-N already in the corpus.
+      * "relevance" — best-match-first; REQUIRED for TARGETED searches (acquire / the
+        closure scout) on a NICHE query. With newest-first a niche query that matches
+        little makes arXiv fall back to the newest submissions arXiv-WIDE — i.e. random
+        off-topic papers. Relevance returns on-topic hits, or genuinely nothing (a real
+        gap) instead of off-topic noise.
 
-    Pass `client` to reuse a shared httpx.AsyncClient (the scout passes one so a
-    multi-topic sweep shares connections); otherwise a short-lived client is
-    created and closed here.
+    `start` pages deeper into the result set — the discovery sweep rotates it to widen
+    coverage. Pass `client` to reuse a shared httpx.AsyncClient (the scout passes one so
+    a multi-topic sweep shares connections); otherwise one is created and closed here.
     """
     params = urlencode(
         {
             "search_query": query,
             "start": max(0, start),
             "max_results": max_results,
-            "sortBy": "submittedDate",
+            "sortBy": sort,
             "sortOrder": "descending",
         }
     )

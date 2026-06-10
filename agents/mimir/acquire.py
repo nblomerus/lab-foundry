@@ -104,12 +104,15 @@ async def _resolve_candidates(req: AcquireRequest, *, n: int = 8) -> list[Source
     if req.url:
         return [SourceDescriptor(kind=req.kind, source_kind="web", canonical_key=req.url, url=req.url, why=req.why)]
     if req.query:
-        # Walk a few pages (newest → older) so a relevant paper the scouts haven't reached can
-        # still be found, not just the newest hits the scouts already pulled.
+        # RELEVANCE-ranked, walking a few pages of the best matches. An acquire is a TARGETED
+        # fetch for a specific claim — newest-first makes a niche query fall back to the newest
+        # arXiv-WIDE submissions (random off-topic papers, which is what we observed getting
+        # ingested against a thin direction). Relevance returns on-topic hits, or genuinely
+        # nothing (→ already_have/rejected = a real gap) instead of off-topic noise.
         pages = int(os.environ.get("MIMIR_ACQUIRE_PAGES", "3"))
         out: list[SourceDescriptor] = []
         for pg in range(max(1, pages)):
-            hits = await scout_arxiv([req.query], per_topic=n, start=pg * n)
+            hits = await scout_arxiv([req.query], per_topic=n, start=pg * n, sort="relevance")
             if not hits:
                 break
             out.extend(d.model_copy(update={"why": req.why}) for d in hits)

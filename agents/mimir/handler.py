@@ -358,5 +358,9 @@ async def handle_sweep_requested(event: dict, dispatcher) -> dict | None:
     if not _loop_enabled():
         return None
 
-    topics = (event.get("payload") or {}).get("topics")
-    return await run_discovery_sweep(topics, dispatcher.state)
+    payload = event.get("payload") or {}
+    topics = payload.get("topics")
+    # A targeted closure scout (library.sweep_requested carrying a claim_id) asks for relevance
+    # ranking so a niche direction's sweep finds on-topic papers; the standing sweep stays newest.
+    sort = payload.get("sort", "submittedDate")
+    return await run_discovery_sweep(topics, dispatcher.state, sort=sort)

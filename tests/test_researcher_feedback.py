@@ -131,12 +131,28 @@ async def test_refine_disposition_returns_base_when_claim_id_none():
 
 
 @pytest.mark.asyncio
-async def test_refine_disposition_escalates_when_all_already_have():
-    # >=2 ledger rows, all 'already_have' → the Library can't be enriched → corpus_exhausted
-    pool = ScriptedPool(rules=[("acquire.fulfilled", [{"status": "already_have"}, {"status": "already_have"}])])
+async def test_refine_disposition_escalates_only_after_acquire_AND_scout_exhausted():
+    # >=2 'already_have' AND a targeted scout sweep already ran for this direction → genuine gap
+    pool = ScriptedPool(
+        rules=[
+            ("acquire.fulfilled", [{"status": "already_have"}, {"status": "already_have"}]),
+            ("library.sweep_requested", 1),  # a closure scout sweep fired for this claim
+        ]
+    )
     state = make_state(pool=pool)
     assert await refine_disposition(state, 7, "thin_corpus") == "corpus_exhausted"
     assert pool.calls[0][2] == (7,)  # claim_id bound to the query
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_holds_thin_when_acquire_exhausted_but_not_scouted():
+    # 2 'already_have' but NO scout sweep yet → acquire ≠ scouting → NOT a gap → stays thin_corpus
+    # (the closure ladder will fire the targeted scout sweep before this can escalate)
+    pool = ScriptedPool(rules=[("acquire.fulfilled", [{"status": "already_have"}, {"status": "already_have"}])])
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 7, "thin_corpus") == "thin_corpus"
+    # it DID consult the scout ledger (the new gate) before holding
+    assert any("library.sweep_requested" in sql for _, sql, _ in pool.calls)
 
 
 @pytest.mark.asyncio

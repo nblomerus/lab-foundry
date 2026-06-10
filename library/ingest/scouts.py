@@ -96,14 +96,17 @@ async def scout_arxiv(
     per_topic: int = 5,
     *,
     start: int = 0,
+    sort: str = "submittedDate",
 ) -> list[SourceDescriptor]:
     """Scout arXiv for papers matching `topics`.
 
-    Queries arXiv once per topic (up to `per_topic` results each, newest-first),
-    dedupes by arXiv id across topics (first topic to surface a paper wins, and
-    its topic is recorded in `why`), and returns `SourceDescriptor`s with
-    kind='paper', source_kind='arxiv', canonical_key=<arxiv_id>. `start` pages
-    deeper into each topic's back catalogue (the sweep can rotate it).
+    Queries arXiv once per topic (up to `per_topic` results each), dedupes by arXiv
+    id across topics (first topic to surface a paper wins, and its topic is recorded
+    in `why`), and returns `SourceDescriptor`s with kind='paper', source_kind='arxiv',
+    canonical_key=<arxiv_id>. `start` pages deeper into each topic's results.
+
+    `sort` ∈ {"submittedDate" (default, newest-first — the standing sweep),
+    "relevance" (best-match-first — TARGETED searches on niche topics; see search_arxiv)}.
 
     PURE: returns descriptors only. It does NOT emit `source.discovered` events
     and does NOT touch the DB — the Librarian handler wires emission + dedupe
@@ -115,7 +118,7 @@ async def scout_arxiv(
             await asyncio.sleep(_SCOUT_TOPIC_DELAY)  # space arXiv calls across topics
         query = topic if ":" in topic else f"all:{topic}"
         try:
-            results = await search_arxiv(query, max_results=per_topic, start=start)
+            results = await search_arxiv(query, max_results=per_topic, start=start, sort=sort)
         except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
             log.warning("scout_arxiv: topic %r failed: %s", topic, e)
             continue

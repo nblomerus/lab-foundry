@@ -35,19 +35,21 @@ export function FlowEdge({ id, sourceX, sourceY, targetX, targetY, sourcePositio
         d={path}
         fill="none"
         stroke={color}
-        strokeWidth={live ? 2.2 : 1.6}
+        strokeWidth={active ? 3 : live ? 2.2 : 1.6}
         strokeDasharray={live ? undefined : "6 5"}
         strokeLinecap="round"
         style={{
           opacity: live ? (hot ? 1 : 0.7) : 0.4,
-          filter: active ? `drop-shadow(0 0 1.5px ${particle})` : "none",
-          transition: "opacity .4s ease, filter .4s ease",
+          filter: active ? `drop-shadow(0 0 3px ${particle})` : "none",
+          transition: "opacity .4s ease, filter .4s ease, stroke-width .3s ease",
         }}
       />
+      {/* When data is actually moving, stream brighter/larger/faster particles so you
+          can watch work flow scout→Mimir→Library / acquire asks travel. */}
       {active &&
-        [0, 1, 2].map((i) => (
-          <circle key={`${id}-${i}-${hot}`} r={i === 0 ? 3.6 : 2.6} fill={particle} opacity={i === 0 ? 1 : 0.7} style={{ filter: `drop-shadow(0 0 2px ${particle})` }}>
-            <animateMotion dur="1.5s" repeatCount="indefinite" begin={`${i * 0.5}s`} path={path} />
+        [0, 1, 2, 3].map((i) => (
+          <circle key={`${id}-${i}-${hot}`} r={i === 0 ? 4.4 : 3} fill={particle} opacity={i === 0 ? 1 : 0.78} style={{ filter: `drop-shadow(0 0 4px ${particle})` }}>
+            <animateMotion dur="1.2s" repeatCount="indefinite" begin={`${i * 0.3}s`} path={path} />
           </circle>
         ))}
     </>

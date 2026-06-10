@@ -59,10 +59,12 @@ def disposition(f: GroundedFinding) -> str:
 
 
 async def refine_disposition(state, claim_id: int | None, base: str) -> str:
-    """Escalate thin_corpus → corpus_exhausted when this direction's own researcher-acquires have
-    already come back 'already_have' (the Library can't be enriched here, so acquiring again is a
-    no-op and the right answer is PIVOT). Needs claim_id-attributed acquire replies; returns the
-    base disposition unchanged if there's no such history yet."""
+    """Escalate thin_corpus → corpus_exhausted ONLY once acquiring AND a targeted scout sweep have
+    both come up empty for this direction — that's a genuine research gap. A pile of 'already_have'
+    acquire replies is NOT a gap on its own: acquire only checks the known candidate set, it does
+    not SCOUT the web/arXiv/GitHub for new material. So we hold at thin_corpus (the closure ladder
+    fires one targeted scout sweep) and only escalate once that scout has run and the corpus is
+    still thin. Returns the base disposition unchanged if there's no such history yet."""
     if base != "thin_corpus" or claim_id is None:
         return base
     rows = await state.pool.fetch(
@@ -71,9 +73,15 @@ async def refine_disposition(state, claim_id: int | None, base: str) -> str:
         "AND (payload->>'claim_id')::int = $1 AND emitted_at > now() - interval '2 days'",
         claim_id,
     )
-    if len(rows) >= 2 and all(r["status"] == "already_have" for r in rows):
-        return "corpus_exhausted"
-    return base
+    if not (len(rows) >= 2 and all(r["status"] == "already_have" for r in rows)):
+        return base
+    # acquire is exhausted — but that only means the KNOWN candidates are all already in the corpus.
+    # NOT a gap until a targeted scout sweep has also run for this direction and turned up nothing.
+    scouted = await state.pool.fetchval(
+        "SELECT 1 FROM events WHERE event_type = 'library.sweep_requested' AND (payload->>'claim_id')::int = $1 LIMIT 1",
+        claim_id,
+    )
+    return "corpus_exhausted" if scouted else base
 
 
 class FindingFeedback(BaseModel):

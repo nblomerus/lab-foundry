@@ -218,7 +218,9 @@ def _source_target_id(canonical_key: str) -> int:
     return int.from_bytes(hashlib.blake2b(canonical_key.encode(), digest_size=7).digest(), "big")
 
 
-async def run_discovery_sweep(topics: list[str] | None, state, *, per_topic: int | None = None) -> dict:
+async def run_discovery_sweep(
+    topics: list[str] | None, state, *, per_topic: int | None = None, sort: str = "submittedDate"
+) -> dict:
     """Run the scouts over `topics` and emit `source.discovered` for genuinely-new
     sources. Each scout pages deeper via a per-source cursor (so it doesn't keep
     re-fetching the same newest-N), and a novelty gate — corpus check + seen-ledger
@@ -252,7 +254,13 @@ async def run_discovery_sweep(topics: list[str] | None, state, *, per_topic: int
             log.exception("collectors: discovery cursor for %s failed", name)
             offset = 0
         try:
-            descriptors.extend(await scout(topics, per_topic=scout_per_topic, start=offset))
+            # `sort` only applies to arXiv (relevance vs newest) — a targeted closure scout
+            # passes sort="relevance" so a niche direction's sweep finds on-topic papers
+            # rather than the newest arXiv-wide. Other scouts don't take it.
+            kw = {"per_topic": scout_per_topic, "start": offset}
+            if name == "arxiv":
+                kw["sort"] = sort
+            descriptors.extend(await scout(topics, **kw))
         except Exception:  # noqa: BLE001 — one scout failing must not sink the sweep
             log.exception("collectors: scout %s failed", name)
 

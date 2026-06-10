@@ -5,11 +5,27 @@ before any fetch."""
 
 import pytest
 
-from agents.mimir.acquire import AcquireRequest, handle_acquire_requested, request_acquire
+import agents.mimir.acquire as acquire_mod
+from agents.mimir.acquire import AcquireRequest, _resolve_candidates, handle_acquire_requested, request_acquire
 
 pytestmark = pytest.mark.asyncio
 
 _WHY = "this source grounds the speculative-decoding claim we are testing now"
+
+
+async def test_resolve_candidates_query_uses_relevance_sort(monkeypatch):
+    """A targeted acquire query must search arXiv by RELEVANCE, not newest-first — else a niche
+    query falls back to the newest arXiv-wide submissions (off-topic papers). No DB needed."""
+    seen: list[dict] = []
+
+    async def _fake_scout(topics, per_topic, *, start=0, sort="submittedDate"):
+        seen.append({"topics": topics, "sort": sort})
+        return []  # empty → resolver stops after page 0
+
+    monkeypatch.setattr(acquire_mod, "scout_arxiv", _fake_scout)
+    await _resolve_candidates(AcquireRequest(requester="researcher", why=_WHY, query="deep kernel learning GP"))
+    assert seen and all(c["sort"] == "relevance" for c in seen)
+    assert seen[0]["topics"] == ["deep kernel learning GP"]
 
 
 class _Disp:
