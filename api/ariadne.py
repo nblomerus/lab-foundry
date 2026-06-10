@@ -264,8 +264,13 @@ async def _queue_health(pool) -> dict:
         row = await conn.fetchrow(
             """
             WITH req AS (
+                -- Genuine queue only: a SUPPRESSED request (mimir paused, cooldown,
+                -- or a manual backlog clear) was SKIPPED and will never get a reply,
+                -- so it must not count as "in queue" / inflate the oldest-wait lag.
                 SELECT target_id, emitted_at FROM events
-                WHERE event_type = 'acquire.requested' AND emitted_at > now() - interval '24 hours'
+                WHERE event_type = 'acquire.requested'
+                  AND status NOT IN ('suppressed', 'failed')
+                  AND emitted_at > now() - interval '24 hours'
             ),
             pend AS (
                 SELECT r.emitted_at FROM req r
@@ -275,6 +280,7 @@ async def _queue_health(pool) -> dict:
                 (SELECT count(*) FROM pend) AS pending,
                 (SELECT EXTRACT(EPOCH FROM (now() - min(emitted_at)))::int FROM pend) AS oldest_pending_age,
                 (SELECT count(*) FROM events WHERE event_type = 'acquire.requested'
+                    AND status NOT IN ('suppressed', 'failed')
                     AND emitted_at > now() - interval '1 hour') AS requested_1h,
                 (SELECT count(*) FROM events WHERE event_type IN ('acquire.fulfilled', 'acquire.rejected')
                     AND emitted_at > now() - interval '1 hour') AS resolved_1h

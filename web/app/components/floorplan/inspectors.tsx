@@ -976,23 +976,29 @@ function fmtDur(s: number): string {
 
 function QueueHealthBanner({ h }: { h: QueueHealth }) {
   const age = h.oldest_pending_age_seconds;
-  const lagging = h.pending > 0 && age != null && age >= QUEUE_LAG_THRESHOLD_S;
   const drained = h.pending === 0;
-  const dot = drained ? "bg-emerald-500" : lagging ? "bg-amber-500" : "bg-sky-500";
+  // "Backing up" means the queue is GROWING — asks arrive faster than Mimir resolves
+  // them — not merely "deep". Acquire backpressure intentionally holds the queue near
+  // its cap, so a healthy draining queue still sits at ~the cap with a minutes-old tail;
+  // that's "flowing", not stuck. Gate on inflow > outflow (1h), with the oldest-wait
+  // threshold as a secondary guard so a brief blip doesn't trip it.
+  const backingUp =
+    !drained && h.requested_1h > h.resolved_1h && age != null && age >= QUEUE_LAG_THRESHOLD_S;
+  const dot = drained ? "bg-emerald-500" : backingUp ? "bg-amber-500" : "bg-sky-500";
   const label = drained
     ? "Drained — no asks waiting"
-    : lagging
-      ? "Backing up — Mimir slow or not draining"
+    : backingUp
+      ? "Backing up — asks arriving faster than Mimir resolves"
       : "Flowing — asks in flight";
   return (
-    <div className={cx("rounded-xl border p-2.5", lagging ? "border-amber-200 bg-amber-50/40" : "border-slate-100")}>
+    <div className={cx("rounded-xl border p-2.5", backingUp ? "border-amber-200 bg-amber-50/40" : "border-slate-100")}>
       <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600">
         <span className={cx("inline-block h-2 w-2 rounded-full", dot, !drained && "pulse-dot")} />
         {label}
       </div>
       <div className="mt-2 grid grid-cols-3 gap-2">
-        <StatTile label="In queue" value={h.pending} tone={lagging ? "amber" : drained ? "emerald" : "blue"} />
-        <StatTile label="Oldest wait" value={age != null ? fmtDur(age) : "—"} tone={lagging ? "amber" : "slate"} />
+        <StatTile label="In queue" value={h.pending} tone={backingUp ? "amber" : drained ? "emerald" : "blue"} />
+        <StatTile label="Oldest wait" value={age != null ? fmtDur(age) : "—"} tone={backingUp ? "amber" : "slate"} />
         <StatTile label="Resolved / h" value={h.resolved_1h} tone={h.resolved_1h > 0 ? "emerald" : "slate"} />
       </div>
       <p className="mt-1.5 text-[10px] text-slate-400">Last hour: {h.requested_1h} asked · {h.resolved_1h} resolved</p>
