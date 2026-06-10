@@ -105,13 +105,16 @@ async def overview(request: Request) -> dict:
         modes = {
             r["agent_name"]: r["mode"]
             for r in await conn.fetch(
-                "SELECT agent_name, mode FROM agent_modes WHERE agent_name IN ('planner','researcher')"
+                "SELECT agent_name, mode FROM agent_modes "
+                "WHERE agent_name IN ('planner','researcher','experiments','quartermaster')"
             )
         }
         research_tasks = await conn.fetchval("SELECT count(*) FROM tasks WHERE department = 'research'")
         research_pending = await conn.fetchval(
             "SELECT count(*) FROM tasks WHERE department = 'research' AND status = 'pending'"
         )
+        exp_running = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE status IN ('running','queued')")
+        exp_total = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE code IS NOT NULL")
         focus = [
             r["concept_name"]
             for r in await conn.fetch(
@@ -147,6 +150,10 @@ async def overview(request: Request) -> dict:
             "researcher_mode": modes.get("researcher", "off"),
             "research_tasks": research_tasks,
             "research_tasks_pending": research_pending,
+            "experiments_mode": modes.get("experiments", "off"),
+            "quartermaster_mode": modes.get("quartermaster", "off"),
+            "experiments_running": exp_running,
+            "experiments_total": exp_total,
         },
         "mission": {
             "id": mission["id"],

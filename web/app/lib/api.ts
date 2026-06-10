@@ -333,6 +333,8 @@ export interface AriadneOverview {
     claims_total: number; acquire_requests_24h: number;
     planner_mode: string; researcher_mode: string;
     research_tasks: number; research_tasks_pending: number;
+    experiments_mode: string; quartermaster_mode: string;
+    experiments_running: number; experiments_total: number;
   };
   mission: { id: number; statement: string; framed_at: string } | null;
   directions: AriadneDirection[];

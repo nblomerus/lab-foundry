@@ -58,9 +58,11 @@ def _overview_rules(*, mission, directions, lessons, focus, modes):
         ("FROM lessons", lessons),
         ("SELECT count(*) FROM claims", [{"count": 42}]),
         ("acquire.requested", [{"count": 7}]),
-        ("WHERE agent_name IN ('planner','researcher')", modes),
+        ("WHERE agent_name IN ('planner','researcher','experiments','quartermaster')", modes),
         ("FROM tasks WHERE department = 'research' AND status = 'pending'", [{"count": 1}]),
         ("FROM tasks WHERE department = 'research'", [{"count": 3}]),
+        ("FROM experiment_runs WHERE status IN ('running','queued')", [{"count": 2}]),
+        ("FROM experiment_runs WHERE code IS NOT NULL", [{"count": 9}]),
         ("FROM field_model WHERE trend_state IN ('hot','emerging')", focus),
     ]
     if mission:
@@ -95,7 +97,12 @@ def test_overview_full_mission_scored_directions_lessons():
         }
     ]
     focus = [{"concept_name": "graphrag"}, {"concept_name": "rerank"}]
-    modes = [{"agent_name": "planner", "mode": "shadow"}, {"agent_name": "researcher", "mode": "off"}]
+    modes = [
+        {"agent_name": "planner", "mode": "shadow"},
+        {"agent_name": "researcher", "mode": "off"},
+        {"agent_name": "experiments", "mode": "active"},
+        {"agent_name": "quartermaster", "mode": "active"},
+    ]
     client = make_client(_overview_rules(mission=mission, directions=dirs, lessons=lessons, focus=focus, modes=modes))
 
     body = client.get("/ariadne/overview").json()
@@ -117,6 +124,10 @@ def test_overview_full_mission_scored_directions_lessons():
     assert g["researcher_mode"] == "off"
     assert g["research_tasks"] == 3
     assert g["research_tasks_pending"] == 1
+    assert g["experiments_mode"] == "active"
+    assert g["quartermaster_mode"] == "active"
+    assert g["experiments_running"] == 2
+    assert g["experiments_total"] == 9
     assert body["mission"]["id"] == 5
     assert body["mission"]["framed_at"] == _NOW.isoformat()
 

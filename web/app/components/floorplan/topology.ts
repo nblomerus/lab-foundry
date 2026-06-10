@@ -45,6 +45,7 @@ export interface EdgeDef {
 const SCOUT_EVENTS = ["source.discovered", "library.sweep_requested", "library.trends"];
 const LIB_EVENTS = ["document.ingested", "document.parsed"];
 const ACQUIRE_EVENTS = ["acquire.requested", "acquire.fulfilled", "acquire.rejected"];
+const EXP_EVENTS = ["experiment.requested", "experiment.completed", "experiment.failed"];
 
 // --- Wing backdrops (rendered behind, non-interactive) -------------------
 const WINGS: NodeDef[] = [
@@ -76,7 +77,7 @@ const RESEARCH: NodeDef[] = [
     description: "Turns Ariadne's approved directions into concrete, falsifiable research tasks." },
   { id: "researchers", x: 1450, y: 112, w: 186, h: 156, title: "Researchers", sub: "Investigate & gather", icon: Users,
     inspector: "researcher" as const,
-    description: "Execute the planner's tasks against the Library — grounded findings that steer each direction." },
+    description: "A pool of up to 4 researchers runs in parallel, each executing one task against the Library — grounded findings that steer each direction. When a direction needs a test, a researcher requests an experiment." },
 ].map((n) => ({ ...n, type: "dormant" as const, live: false }));
 
 // --- Knowledge core: Mimir + request queue + storage row ----------------
@@ -99,29 +100,38 @@ const STORAGE_SRC: Array<Pick<NodeDef, "id" | "storageVariant" | "title" | "sub"
   { id: "context-graph", storageVariant: "graph", title: "Context Graph", sub: "Nodes & relationships", icon: Network, live: true, inspector: "library" },
   { id: "claim-ledger", storageVariant: "claims", title: "Claim Ledger", sub: "Claims", icon: ScrollText, live: false, inspector: "ariadne",
     description: "The research claim ledger — Ariadne's mission + directions." },
-  { id: "experiment-ledger", storageVariant: "experiments", title: "Run Ledger", sub: "Experiments", icon: FlaskConical, live: false, inspector: "info",
-    description: "Benchmark/experiment runs. Populated once the experiments agent is live." },
+  { id: "experiment-ledger", storageVariant: "experiments", title: "Run Ledger", sub: "Experiments", icon: FlaskConical, live: true, inspector: "ops",
+    description: "Every sandboxed experiment run — code, budgets, resource usage, result, and the researcher's note — provenance for reproducibility." },
 ];
 // First 3 cards sit in the LIBRARY box; the 2 ledgers (i >= 3) shift right into the LEDGERS box.
 const STORAGE: NodeDef[] = STORAGE_SRC.map((s, i) => ({
   ...s, type: "storage" as const, x: 56 + i * 192 + (i >= 3 ? 40 : 0), y: 600, w: 178, h: 128,
 }));
 
-// --- Evaluation & output (dormant) --------------------------------------
+// --- Evaluation & output (mixed: experiments live, rest dormant) ---------
 const EVALUATION: NodeDef[] = [
   { id: "critic", x: 1088, y: 372, w: 264, h: 120, title: "Critic", sub: "Challenges & tests", icon: Microscope,
     description: "Challenges claims and probes their weaknesses before they advance." },
   { id: "gate-promotion", x: 1372, y: 372, w: 252, h: 120, title: "Gate", sub: "Promotion & approval", icon: ShieldCheck,
     description: "Runs the promotion gate — approve, hold, reject, or merge a claim." },
-  { id: "experiments", x: 1088, y: 512, w: 264, h: 120, title: "Experiments Lab", sub: "Benchmarks & evals", icon: FlaskConical,
-    description: "Runs benchmarks and evaluations against the corpus." },
+  // LIVE: the sandboxed-experiment lane. A researcher's needs_experiment designs a
+  // self-contained script (DeepSeek), the Quartermaster runs it in an isolated Docker
+  // container, then it's interpreted into confidence feedback + a first-party Library note.
+  { id: "experiments", x: 1088, y: 512, w: 264, h: 120, title: "Experiments", sub: "Sandboxed code runs", icon: FlaskConical,
+    live: true, inspector: "ops" as const,
+    description: "Designs and runs sandboxed ML experiments in isolated Docker containers (CPU + GPU). A researcher requests one, the agent writes the code, the Quartermaster allocates compute and runs it, and the result becomes confidence feedback + a Library note." },
   { id: "publication", x: 1372, y: 512, w: 252, h: 120, title: "Publication", sub: "Write & assemble", icon: PenLine,
     description: "Assembles and publishes the lab's findings." },
-].map((n) => ({ ...n, type: "dormant" as const, live: false, inspector: "info" as const }));
+].map((n) => ({
+  ...n,
+  type: "dormant" as const,
+  live: (n as NodeDef).live ?? false,
+  inspector: (n as NodeDef).inspector ?? ("info" as const),
+}));
 
 // --- Operations (live) ---------------------------------------------------
 const OPERATIONS: NodeDef[] = [
-  { id: "ops", type: "ops", x: 56, y: 812, w: 1572, h: 170, title: "Ops / Quartermaster", sub: "Infrastructure & resources",
+  { id: "ops", type: "ops", x: 56, y: 812, w: 1572, h: 170, title: "Ops / Quartermaster", sub: "Compute & experiment allocation",
     icon: Cpu, live: true, inspector: "ops" },
 ];
 
@@ -154,6 +164,15 @@ export const EDGE_DEFS: EdgeDef[] = [
   // confidence/last_evidence, which Ariadne's reflection reads to steer. Routed top→top so it
   // arcs OVER the Planner (both top handles are otherwise free) — crosses no block. Amber.
   { id: "w-research-aria", source: "researchers", target: "ariadne", sourceHandle: "ts", targetHandle: "t", kind: "feedback", live: true, hotEvents: ["claim.confidence_changed", "task.completed"] },
-  // dormant handoffs (planned, never heat)
-  { id: "w-eval", source: "library-box", target: "experiments", sourceHandle: "r", targetHandle: "l", kind: "workflow", live: false, hotEvents: [] },
+  // --- Experiment lane (live) ---------------------------------------------------------------
+  // A researcher that hits needs_experiment asks the Experiments agent for a test (it designs a
+  // self-contained script). Pulses on experiment.requested.
+  { id: "w-research-exp", source: "researchers", target: "experiments", sourceHandle: "b", targetHandle: "t", kind: "workflow", live: true, hotEvents: EXP_EVENTS },
+  // The Experiments agent hands the queued run to the Quartermaster, which allocates compute and
+  // runs it in an isolated Docker container (CPU/GPU). Pulses across the run's lifecycle.
+  { id: "w-exp-ops", source: "experiments", target: "ops", sourceHandle: "b", targetHandle: "t", kind: "workflow", live: true, hotEvents: EXP_EVENTS },
+  // The loop closes: the result + the researcher's note become a first-party Library document
+  // (via Mimir's trust gate), so the lab's own experiments compound into the corpus. Pulses on
+  // the result's source.discovered.
+  { id: "w-exp-lib", source: "experiments", target: "library-box", sourceHandle: "l", targetHandle: "r", kind: "knowledge", live: true, hotEvents: ["source.discovered", "experiment.completed"] },
 ];

@@ -396,6 +396,11 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
     const pending = ag.research_tasks_pending ?? 0;
     return { value: `${ag.research_tasks ?? 0} tasks`, sub: on(m) ? (pending > 0 ? `${pending} investigating` : "findings ready") : "paused", enabled: on(m), mode: m };
   }
+  if (def.id === "experiments") {
+    const m = ag.experiments_mode ?? "off";
+    const running = ag.experiments_running ?? 0;
+    return { value: `${ag.experiments_total ?? 0} runs`, sub: on(m) ? (running > 0 ? `${running} in flight` : "idle — awaiting a request") : "paused", enabled: on(m), mode: m };
+  }
   return null;
 }
 
