@@ -239,10 +239,15 @@ ROUTE: dict[str, Tier] = {
     "researcher.summarize_source": Tier.CODE,
     # Agentic researcher loop (replaces the legacy single-shot when
     # RESEARCHER_LOOP != 'legacy'). plan / synthesize / gap_check / interpret
-    # need reasoning + multi-source synthesis (WORKHORSE, DeepSeek-led);
-    # extract_evidence is per-page, high-volume, JSON-strict (CODE, local).
+    # need reasoning + multi-source synthesis (WORKHORSE, DeepSeek-led).
+    # extract_evidence is per-page + high-volume; it WAS CODE (local qwen2.5-coder),
+    # but the local model serializes on the per-model GPU lock, so concurrent
+    # researchers queued there — the bottleneck to running a pool of researchers in
+    # parallel. Moved to WORKHORSE (DeepSeek-led, local qwen3:14b fallback) so the
+    # whole researcher loop is cloud and N researchers truly parallelize. Bumped
+    # DAILY_CAPS[WORKHORSE] to cover the added per-source volume.
     "researcher.plan_inquiry": Tier.WORKHORSE,
-    "researcher.extract_evidence": Tier.CODE,
+    "researcher.extract_evidence": Tier.WORKHORSE,
     "researcher.synthesize": Tier.WORKHORSE,
     "researcher.gap_check": Tier.WORKHORSE,
     "researcher.interpret_experiment": Tier.WORKHORSE,
@@ -277,15 +282,17 @@ ROUTE: dict[str, Tier] = {
 
 DAILY_CAPS: dict[Tier, int] = {
     Tier.REASONING: 50,
-    # Bumped 800 → 4000 (2026-05-28). Two compounding pressures: (1) every
-    # researcher loop hits WORKHORSE 4-5× (plan_inquiry, interpret_experiment,
-    # synthesize, gap_check), (2) the v2 reworks add more WORKHORSE calls per
-    # invocation (adversary plan_attack + judge_verdict, evaluation cross_check
-    # per-finding, planner assess+propose+critique). At 800 we capped daily
-    # and degraded everything to local qwen3:14b — 30-60s per call — which
-    # starved the dispatcher's 4 concurrent slots. DeepSeek is ~$0.0006/call,
-    # so 4000 caps spend at $2.40/day worst case.
-    Tier.WORKHORSE: 4000,
+    # Bumped 800 → 4000 (2026-05-28), then 4000 → 12000 (2026-06-10) when
+    # researcher.extract_evidence moved here from CODE: it's the highest-volume
+    # researcher call (one per source) and is now cloud so a pool of researchers
+    # parallelizes instead of queueing on the local GPU lock. Three pressures:
+    # (1) every researcher loop hits WORKHORSE for plan/synthesize/gap/interpret
+    # AND now extract (per-source), (2) up to 4 researchers run in parallel,
+    # (3) the v2 reworks add WORKHORSE calls (adversary, evaluation cross_check,
+    # planner assess+propose+critique). DeepSeek is ~$0.0006/call, so 12000 caps
+    # spend at ~$7.20/day worst case. The cap is a safety ceiling; if hit, calls
+    # degrade to local qwen3:14b (slower) rather than failing.
+    Tier.WORKHORSE: 12000,
     Tier.FAST: 2000,
     Tier.CODE: 500,
     # The experiment design/debug loop can iterate several times per experiment;

@@ -187,6 +187,21 @@ CLOSURE_LOOKBACK_DAYS = int(os.environ.get("CLOSURE_LOOKBACK_DAYS", "3"))
 # -------------------------------------------------------------------------
 
 
+def _parse_agent_caps(spec: str) -> dict[str, int]:
+    """Parse an AGENT_CONCURRENCY spec ("researcher=4,mimir=3,experiments=1") into
+    {agent: cap}. Malformed parts are skipped so a bad env value can't crash boot."""
+    caps: dict[str, int] = {}
+    for part in spec.split(","):
+        name, sep, val = part.strip().partition("=")
+        if not sep:
+            continue
+        try:
+            caps[name.strip()] = int(val)
+        except ValueError:
+            continue
+    return caps
+
+
 class Dispatcher:
     def __init__(self, pool: asyncpg.Pool, max_concurrent_handlers: int = 4):
         self.pool = pool
@@ -203,20 +218,18 @@ class Dispatcher:
         # further downstream by the router's GPULock.
         self.max_concurrent_handlers = max_concurrent_handlers
         self._handler_sem = asyncio.Semaphore(max_concurrent_handlers)
-        # Reserve handler slots for non-ingest agents. Mimir's continuous library
-        # intake (acquire.requested / source.discovered / sweep) otherwise holds
-        # ALL of the slots indefinitely (observed live: dispatch.saturated
-        # held_by=["mimir"], in_flight=4), starving the experiment lane's
-        # design/interpret steps and any other agent — they sit `pending` forever.
-        # Fix: throttled agents must ALSO hold a slot in a smaller _ingest_sem
-        # (capped at max - reserved), so >= reserved global slots stay grabbable by
-        # everyone else. Default reserves 1; both knobs are env-overridable.
-        reserved = int(os.environ.get("DISPATCH_RESERVED_SLOTS", "1"))
-        self._throttled_agents = frozenset(
-            a.strip() for a in os.environ.get("DISPATCH_THROTTLED_AGENTS", "mimir").split(",") if a.strip()
-        )
-        self._ingest_cap = max(1, max_concurrent_handlers - max(0, reserved))
-        self._ingest_sem = asyncio.Semaphore(self._ingest_cap)
+        # Per-agent concurrency caps (on top of the global cap). Without this a
+        # single high-volume agent monopolises the pool: Mimir's continuous library
+        # intake (acquire.requested / source.discovered / sweep) held ALL the slots
+        # (observed live: dispatch.saturated held_by=["mimir"], in_flight=4) and
+        # starved every other lane (the experiment lane sat `pending` forever). With
+        # caps each agent's concurrent handlers are bounded, so one busy lane can't
+        # crowd out the rest AND each lane gets predictable parallelism — e.g.
+        # AGENT_CONCURRENCY="researcher=4,mimir=3,experiments=1" gives researchers a
+        # dedicated pool of 4 while Mimir keeps 3 and experiments 1. Agents without a
+        # cap use the global pool freely. Default caps Mimir so it can't hog the pool.
+        self._agent_caps = _parse_agent_caps(os.environ.get("AGENT_CONCURRENCY", "mimir=3"))
+        self._agent_sems = {a: asyncio.Semaphore(n) for a, n in self._agent_caps.items() if n > 0}
         # Serializes the liveness pump so the startup pass and the watchdog's
         # first pass don't both read deficit=N and each emit N triggers.
         self._revive_lock = asyncio.Lock()
@@ -239,20 +252,20 @@ class Dispatcher:
 
     @asynccontextmanager
     async def _slot(self, agent: str | None):
-        """Acquire a concurrency slot for a handler. Throttled (ingest) agents
-        additionally take an _ingest_sem slot, capping them at max - reserved so
-        at least `reserved` global slots always stay free for everyone else —
-        this is what keeps Mimir's continuous intake from monopolising the pool
-        and starving the experiment lane (and any other agent)."""
-        throttled = agent in self._throttled_agents
-        if throttled:
-            await self._ingest_sem.acquire()
+        """Acquire a concurrency slot for a handler. An agent with a per-agent cap
+        (AGENT_CONCURRENCY) must also hold one of its own semaphore's slots, so its
+        concurrent handlers never exceed that cap — one busy lane (e.g. Mimir's
+        intake) can't monopolise the global pool and starve the others, and each
+        capped lane gets a predictable degree of parallelism."""
+        sem = self._agent_sems.get(agent)
+        if sem is not None:
+            await sem.acquire()
         try:
             async with self._handler_sem:
                 yield
         finally:
-            if throttled:
-                self._ingest_sem.release()
+            if sem is not None:
+                sem.release()
 
     def register(self, event_type: str, handler: Handler) -> None:
         if event_type in self._handlers:

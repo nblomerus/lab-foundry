@@ -139,7 +139,10 @@ def test_route_table_resolves_known_invocation_types():
     assert router_mod.ROUTE["pi.claim_verdict"] == Tier.REASONING
     assert router_mod.ROUTE["planner.generate_tasks"] == Tier.WORKHORSE
     assert router_mod.ROUTE["evaluation.relevance_verify"] == Tier.FAST
-    assert router_mod.ROUTE["researcher.extract_evidence"] == Tier.CODE
+    # extract_evidence moved CODE -> WORKHORSE (2026-06-10) so researchers run on
+    # cloud and parallelize instead of queueing on the local GPU lock.
+    assert router_mod.ROUTE["researcher.extract_evidence"] == Tier.WORKHORSE
+    assert router_mod.ROUTE["researcher.parse_pricing"] == Tier.CODE  # a still-local CODE route
 
 
 def test_call_order_local_only_when_no_chains():
