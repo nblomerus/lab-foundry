@@ -91,7 +91,7 @@ async def _build_adversary_task_data(ctx: dict, state, memory) -> PromptLayer:
 
     content = f"""## Target claim under adversarial review
 
-**Claim:** {claim.claim}
+**Claim:** {claim.statement}
 **Status:** {claim.status}  |  Current confidence: {claim.confidence:.2f}
 **Born:** {claim.created_at:%Y-%m-%d}{trigger_line}
 
@@ -168,7 +168,7 @@ async def handle_finding_high_signal(event: dict, dispatcher) -> dict | None:
         from agents.critic.loop import run_adversary_loop
 
         verdict, run_id, _counter_evidence = await run_adversary_loop(
-            claim_id=claim_id,
+            thesis_id=claim_id,
             triggering_finding_id=triggering_finding_id,
             dispatcher=dispatcher,
             triggered_by_event_id=event["id"],

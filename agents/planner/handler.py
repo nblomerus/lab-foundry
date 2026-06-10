@@ -83,7 +83,7 @@ created. The PI needs to spawn new claims before research can resume.
             )
         else:
             f_lines = "  (no findings yet)"
-        blocks.append(f"### T{claim.id} (conf {claim.confidence:.2f}): {claim.claim}\n{f_lines}")
+        blocks.append(f"### T{claim.id} (conf {claim.confidence:.2f}): {claim.statement}\n{f_lines}")
 
     content = f"""## Queue refill — research queue is empty
 

@@ -73,8 +73,8 @@ pytestmark = pytest.mark.asyncio
 _BORN = datetime(2026, 1, 2, tzinfo=UTC)
 
 
-def _claim(cid=10, *, claim="thesis claim", status="active", conf=0.6):
-    return SimpleNamespace(id=cid, claim=claim, status=status, confidence=conf, created_at=_BORN)
+def _claim(cid=10, *, claim="thesis claim", status="proposed", conf=0.6):
+    return SimpleNamespace(id=cid, statement=claim, claim=claim, status=status, confidence=conf, created_at=_BORN)
 
 
 def _finding(fid=1, *, source="web", rel=9, supports=True, audit="pass", claim_id=10):
@@ -212,8 +212,8 @@ async def test_handler_v2_watch(monkeypatch):
     sessions = [c.kwargs["session_id"] for c in d.memory.write_message.await_args_list]
     assert sessions == ["dissent"]
     critic_loop.run_adversary_loop.assert_awaited_once()
-    # the loop was called with claim_id (the handler's keyword)
-    assert critic_loop.run_adversary_loop.await_args.kwargs["claim_id"] == 10
+    # the loop's keyword-only param is thesis_id; the handler passes claim_id through it
+    assert critic_loop.run_adversary_loop.await_args.kwargs["thesis_id"] == 10
 
 
 async def test_handler_v2_kill(monkeypatch):
@@ -243,7 +243,7 @@ async def test_handler_v2_kill_not_actually_killed(monkeypatch):
     d.state.create_critic_verdict = AsyncMock(return_value=1)
     d.state.get_claim = AsyncMock(return_value=_claim(10))
     # invalidate returns a non-killed status (e.g. race) → result["killed"] False
-    d.state.invalidate_claim = AsyncMock(return_value=SimpleNamespace(status="active", statement="s", confidence=0.4))
+    d.state.invalidate_claim = AsyncMock(return_value=SimpleNamespace(status="proposed", statement="s", confidence=0.4))
     res = await handle_finding_high_signal({"id": 3, "target_id": 10, "payload": {}}, d)
     assert res["killed"] is False
 
@@ -337,8 +337,8 @@ async def test_handler_payload_missing(monkeypatch):
 # =================================================================================
 # critic.loop — prompt builders
 # =================================================================================
-def _thesis(tid=10, *, claim="thesis claim", status="active", conf=0.6):
-    return SimpleNamespace(id=tid, claim=claim, status=status, confidence=conf, created_at=_BORN)
+def _thesis(tid=10, *, claim="thesis claim", status="proposed", conf=0.6):
+    return SimpleNamespace(id=tid, statement=claim, claim=claim, status=status, confidence=conf, created_at=_BORN)
 
 
 async def test_build_plan_attack_with_findings():
@@ -821,9 +821,11 @@ async def test_eval_handler_skips_no_findings(monkeypatch):
 # reachable with no pass-scored findings.
 
 
-async def test_eval_handler_v2_pass_score_raises_relevance_bug(monkeypatch):
-    # Derived verdict "pass" (score 0.9) hits the buggy score.relevance_score
-    # access on handler.py:295 and raises (genuine production bug).
+async def test_eval_handler_v2_pass_score_writes_high_signal_to_graph(monkeypatch):
+    # Derived verdict "pass" (score 0.9) with a high-relevance finding (rel=9) grounds
+    # the finding -> claim in the graph. Regression guard: handler.py:295 used to read
+    # relevance_score off the AuditScore (which has no such field) and crash; it now
+    # resolves the Finding first and gates on finding.relevance_score.
     _patch_graph(monkeypatch)
     findings = [_finding(1, rel=9, supports=True, claim_id=10)]
     batch = AuditBatch(scores=[_audit_score(1, 0.9)])
@@ -832,10 +834,14 @@ async def test_eval_handler_v2_pass_score_raises_relevance_bug(monkeypatch):
     d.state.get_unaudited_findings_for_task = AsyncMock(return_value=findings)
     d.state.get_evidence_for_task = AsyncMock(return_value=[])
     d.state.get_experiment_runs_for_task = AsyncMock(return_value=[])
-    with pytest.raises(AttributeError, match="relevance_score"):
-        await handle_task_completed({"id": 9, "target_id": 5}, d)
-    # the verdict was persisted before the crash
+    d.state.get_claim = AsyncMock(return_value=_claim(10, conf=0.5))  # reinforce-confidence path
+    d.state.detect_slop_breaker = AsyncMock(return_value=False)
+    # no crash on the pass path; verdict persisted and the high-signal finding grounded.
+    await handle_task_completed({"id": 9, "target_id": 5}, d)
     d.state.update_finding_audit.assert_awaited_once()
+    graph_tools.merge_finding_grounds_claim.assert_awaited_once()
+    # pass + high-relevance + supporting → claim confidence reinforced upward
+    d.state.update_claim_confidence.assert_awaited_once()
 
 
 async def test_eval_handler_v2_all_cross_checks_failed(monkeypatch):
@@ -1100,7 +1106,7 @@ def _slop_dispatcher(*, claim=None, claim_exc=None, halted=2):
 
 
 async def test_slop_handler_active_claim_lowers_confidence():
-    d = _slop_dispatcher(claim=_claim(10, status="active", conf=0.6), halted=3)
+    d = _slop_dispatcher(claim=_claim(10, status="proposed", conf=0.6), halted=3)
     event = {"target_id": 10, "payload": {"slop_rate": 0.55}}
     res = await handle_audit_slop_detected(event, d)
     assert res["claim_id"] == 10
@@ -1113,7 +1119,7 @@ async def test_slop_handler_active_claim_lowers_confidence():
 
 
 async def test_slop_handler_confidence_floored():
-    d = _slop_dispatcher(claim=_claim(10, status="active", conf=0.1))
+    d = _slop_dispatcher(claim=_claim(10, status="proposed", conf=0.1))
     res = await handle_audit_slop_detected({"target_id": 10, "payload": {"slop_rate": 0.9}}, d)
     assert res["new_confidence"] == "0.00"  # max(0.0, 0.1 - 0.2)
 
@@ -1133,7 +1139,7 @@ async def test_slop_handler_missing_claim():
 
 
 async def test_slop_handler_no_payload_defaults_rate_zero():
-    d = _slop_dispatcher(claim=_claim(10, status="active", conf=0.5))
+    d = _slop_dispatcher(claim=_claim(10, status="proposed", conf=0.5))
     res = await handle_audit_slop_detected({"target_id": 10}, d)
     assert res["slop_rate"] == 0.0
     assert res["new_confidence"] == "0.30"  # 0.5 - 0.2
@@ -1141,6 +1147,6 @@ async def test_slop_handler_no_payload_defaults_rate_zero():
 
 async def test_slop_handler_no_tasks_halted():
     # fetchval returns None → tasks_halted coerces to 0
-    d = _slop_dispatcher(claim=_claim(10, status="active", conf=0.5), halted=None)
+    d = _slop_dispatcher(claim=_claim(10, status="proposed", conf=0.5), halted=None)
     res = await handle_audit_slop_detected({"target_id": 10, "payload": {"slop_rate": 0.4}}, d)
     assert res["tasks_halted"] == 0

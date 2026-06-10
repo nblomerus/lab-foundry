@@ -103,7 +103,7 @@ async def _build_plan_attack(ctx: dict, state, memory) -> PromptLayer:
 
     content = f"""## Target thesis under adversarial review
 
-**Claim:** {thesis.claim}
+**Claim:** {thesis.statement}
 **Status:** {thesis.status}  |  Current confidence: {thesis.confidence:.2f}
 **Born:** {thesis.created_at:%Y-%m-%d}{trigger_line}
 
@@ -288,7 +288,7 @@ async def _build_judge_verdict(ctx: dict, state, memory) -> PromptLayer:
 
     content = f"""## Final adversarial verdict
 
-**Thesis:** {thesis.claim}
+**Thesis:** {thesis.statement}
 **Status:** {thesis.status}  |  Current confidence: {thesis.confidence:.2f}
 
 ## Weak points investigated
@@ -546,7 +546,7 @@ async def run_adversary_loop(
                 "kind": kind,
                 "params": params,
                 "result": result,
-                "thesis_claim": (await state.get_thesis(thesis_id)).claim,
+                "thesis_claim": (await state.get_thesis(thesis_id)).statement,
                 "weak_points": [wp.model_dump() for wp in plan.weak_points],
             },
         )

@@ -291,16 +291,17 @@ async def handle_task_completed(event: dict, dispatcher) -> dict | None:
             run_id=run_id,
         )
 
-        # Write high-signal findings to graph (non-fatal if Neo4j unavailable)
-        if verdict == "pass" and score.relevance_score >= 8:
+        # Write high-signal findings to graph (non-fatal if Neo4j unavailable).
+        # relevance_score lives on the Finding, not the AuditScore — resolve the
+        # finding first, then gate on it.
+        if verdict == "pass":
             try:
                 from library.graph.tools import merge_finding_grounds_claim
 
-                finding = by_id_for_graph.get(score.finding_id) if "by_id_for_graph" in locals() else None
+                finding = by_id_for_graph.get(score.finding_id)
                 if finding is None:
                     finding = await dispatcher.state.get_finding(score.finding_id)
-                if finding and finding.claim_id:
-                    claim = await dispatcher.state.get_claim(finding.claim_id)
+                if finding and finding.relevance_score >= 8 and finding.claim_id:
                     await merge_finding_grounds_claim(
                         finding_id=finding.id,
                         claim_id=finding.claim_id,

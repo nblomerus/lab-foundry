@@ -453,7 +453,7 @@ async def test_queue_empty_legacy_empty(monkeypatch):
 
 # ── handler.py: _build_planner_task_data ────────────────────────────────────────
 def _claim(cid=1, claim="claim text", conf=0.5):
-    return SimpleNamespace(id=cid, claim=claim, confidence=conf)
+    return SimpleNamespace(id=cid, statement=claim, claim=claim, confidence=conf)
 
 
 def _finding(fid=1):
@@ -489,7 +489,7 @@ async def test_build_planner_task_data_with_claims_and_findings():
 
 # ── loop.py: prompt builders ────────────────────────────────────────────────────
 def _thesis(tid=1, claim="thesis claim", conf=0.7):
-    return SimpleNamespace(id=tid, claim=claim, confidence=conf)
+    return SimpleNamespace(id=tid, statement=claim, claim=claim, confidence=conf)
 
 
 def _tfinding(fid=1):
@@ -553,9 +553,9 @@ async def test_build_propose_tasks_no_gaps():
 
 
 def _loop_task(thesis_id=1):
-    # PlannedTask has no thesis_id; loop builders/orchestrator read t.thesis_id, so use a stub.
+    # PlannedTask exposes claim_id; loop builders/orchestrator read t.claim_id, so use a stub.
     return SimpleNamespace(
-        thesis_id=thesis_id,
+        claim_id=thesis_id,
         task_type="deepen",
         description="probe",
         query="q?",
@@ -629,7 +629,7 @@ async def test_run_planner_loop_full_filters_unknown_theses():
     d.state.get_active_theses = AsyncMock(return_value=[_thesis(1)])
     d.state.get_company_state = AsyncMock(return_value=_company_state())
     final, run_id, summary, conf = await run_planner_loop(dispatcher=d, triggered_by_event_id=7)
-    assert [t.thesis_id for t in final] == [1]
+    assert [t.claim_id for t in final] == [1]
     assert run_id == 33 and summary == "kept one" and conf == 0.6
 
 

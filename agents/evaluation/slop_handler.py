@@ -52,7 +52,7 @@ async def handle_audit_slop_detected(event: dict, dispatcher) -> dict | None:
     new_conf_str: str
     try:
         claim = await dispatcher.state.get_claim(claim_id)
-        if claim.status == "active":
+        if claim.status in ("proposed", "tested", "weakly_supported", "replicated"):
             new_conf = max(0.0, claim.confidence - 0.20)
             await dispatcher.state.update_claim_confidence(
                 claim_id=claim_id,
