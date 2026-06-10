@@ -384,8 +384,11 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
     return { value: `${ag.active_directions} directions`, sub: ag.status, enabled: on(ariadne.mode), mode: ariadne.mode };
   }
   if (def.id === "request-queue") {
-    const n = ag.acquire_requests_24h ?? 0;
-    return { value: `${n} asks`, sub: "acquire · 24h", enabled: true, mode: null };
+    // Headline is the live QUEUE DEPTH (pending) — the real "backed up?" signal,
+    // bounded by acquire backpressure — with 24h volume as context.
+    const pending = ag.acquire_pending ?? 0;
+    const n24 = ag.acquire_requests_24h ?? 0;
+    return { value: `${pending} queued`, sub: `${n24} asks · 24h`, enabled: true, mode: null };
   }
   if (def.id === "planner") {
     const m = ag.planner_mode ?? "off";

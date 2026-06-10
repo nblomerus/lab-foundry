@@ -330,7 +330,7 @@ export interface AriadneOverview {
     active_directions: number; retired_directions: number; claim_goals: number; lessons: number;
     top_priority: string | null; focus: string[]; status: string;
     approved: number; gate_budget: number;
-    claims_total: number; acquire_requests_24h: number;
+    claims_total: number; acquire_requests_24h: number; acquire_pending: number;
     planner_mode: string; researcher_mode: string;
     research_tasks: number; research_tasks_pending: number;
     experiments_mode: string; quartermaster_mode: string;

@@ -101,6 +101,11 @@ async def overview(request: Request) -> dict:
             "SELECT count(*) FROM events WHERE event_type = 'acquire.requested' "
             "AND emitted_at > now() - interval '24 hours'"
         )
+        # Live queue DEPTH (pending), distinct from the 24h volume above — this is the
+        # real "is Mimir backed up?" signal (bounded by acquire backpressure).
+        acquire_pending = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE event_type = 'acquire.requested' AND status = 'pending'"
+        )
         # Execution-agent modes + research-task counts (floorplan Planner / Researchers nodes).
         modes = {
             r["agent_name"]: r["mode"]
@@ -146,6 +151,7 @@ async def overview(request: Request) -> dict:
             "gate_budget": GATE_BUDGET,
             "claims_total": claims_total,
             "acquire_requests_24h": acquire_24h,
+            "acquire_pending": acquire_pending,
             "planner_mode": modes.get("planner", "off"),
             "researcher_mode": modes.get("researcher", "off"),
             "research_tasks": research_tasks,

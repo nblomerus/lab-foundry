@@ -57,6 +57,7 @@ def _overview_rules(*, mission, directions, lessons, focus, modes):
         ("c.claim_kind = 'direction' AND c.parent_id", directions),
         ("FROM lessons", lessons),
         ("SELECT count(*) FROM claims", [{"count": 42}]),
+        ("'acquire.requested' AND status = 'pending'", [{"count": 3}]),  # live queue depth (must precede the 24h rule)
         ("acquire.requested", [{"count": 7}]),
         ("WHERE agent_name IN ('planner','researcher','experiments','quartermaster')", modes),
         ("FROM tasks WHERE department = 'research' AND status = 'pending'", [{"count": 1}]),
@@ -120,6 +121,7 @@ def test_overview_full_mission_scored_directions_lessons():
     assert g["gate_budget"] == ariadne.GATE_BUDGET
     assert g["claims_total"] == 42
     assert g["acquire_requests_24h"] == 7
+    assert g["acquire_pending"] == 3
     assert g["planner_mode"] == "shadow"
     assert g["researcher_mode"] == "off"
     assert g["research_tasks"] == 3
