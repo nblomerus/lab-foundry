@@ -621,8 +621,37 @@ export interface AgentRunResult {
   note?: string;
 }
 
+export interface QmExperiment {
+  id: number;
+  kind: string;
+  status: string;
+  claim_id?: number | null;
+  hypothesis?: string | null;
+  requires_gpu?: boolean | null;
+  gpu_mem_mb?: number | null;
+  priority?: number | null;
+  wall_clock_budget_s?: number | null;
+  mem_budget_mb?: number | null;
+  iterations?: number | null;
+  kill_reason?: string | null;
+  error?: string | null;
+  interpretation?: string | null;
+  researcher_notes?: string | null;
+  ingested_doc_id?: number | null;
+  at?: string | null;
+}
+export interface QmExperiments {
+  mode: string;
+  by_status: Record<string, number>;
+  running: number;
+  queued: number;
+  experiments: QmExperiment[];
+}
+
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
+  qmExperiments: (limit = 50) => jget<QmExperiments>(`/quartermaster/experiments?limit=${limit}`),
+  qmKillExperiment: (id: number) => jpost<{ killed: number }>(`/quartermaster/experiments/${id}/kill`, {}),
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
   recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),
   mimirPanel: () => jget<MimirPanel>("/knowledge/mimir"),

@@ -13,7 +13,8 @@ import {
 import {
   api, type AcquireRequestRow, type AriadneOverview, type CorpusHit, type DebugCosts,
   type GatePanel, type HostStats, type KnowledgeStats, type MimirPanel, type PlannerPanel,
-  type QueueHealth, type RecentIngest, type ResearcherOverview, type ScoutPanel,
+  type QmExperiment, type QmExperiments, type QueueHealth, type RecentIngest,
+  type ResearcherOverview, type ScoutPanel,
 } from "../../lib/api";
 import type { LabFoundryEvent, Snapshot } from "../../lib/types";
 import { ago } from "../../lib/format";
@@ -1212,6 +1213,7 @@ export function OpsInspector({ host, costs, mimir }: { host: HostStats | null; c
           <StatTile label="Power (proj)" value={projected != null ? `$${projected.toFixed(2)}/d` : "—"} />
         </div>
       </div>
+      <QmExperimentsPanel />
       <div>
         <SubHead label="Recent certifications" />
         {certs.length === 0 ? (
@@ -1227,6 +1229,87 @@ export function OpsInspector({ host, costs, mimir }: { host: HostStats | null; c
           </ul>
         )}
       </div>
+    </div>
+  );
+}
+
+const EXP_TONE: Record<string, string> = {
+  running: "text-emerald-600",
+  queued: "text-amber-600",
+  completed: "text-slate-500",
+  failed: "text-rose-600",
+  killed: "text-rose-600",
+};
+
+function ExperimentRow({ e, onKill }: { e: QmExperiment; onKill: (id: number) => void }) {
+  const live = e.status === "running" || e.status === "queued";
+  const budget = e.wall_clock_budget_s != null ? `${Math.round(e.wall_clock_budget_s / 60)}m` : null;
+  return (
+    <li className="rounded-md border border-slate-100 bg-slate-50/60 px-2 py-1.5">
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <span className="flex items-center gap-1.5 font-mono">
+          <span className={cx("font-semibold uppercase", EXP_TONE[e.status] ?? "text-slate-500")}>{e.status}</span>
+          <span className="text-slate-400">#{e.id}</span>
+          {e.requires_gpu && <span className="rounded bg-violet-100 px-1 text-[10px] font-semibold text-violet-700">GPU</span>}
+        </span>
+        <span className="flex items-center gap-2 text-slate-400">
+          {budget && <span>{budget}</span>}
+          {e.iterations != null && <span>{e.iterations} it</span>}
+          {live && (
+            <button onClick={() => onKill(e.id)} className="text-rose-500 hover:text-rose-700" title="Kill experiment">
+              <ShieldAlert className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </span>
+      </div>
+      {e.hypothesis && <p className="mt-0.5 line-clamp-2 text-[11px] text-slate-600">{e.hypothesis}</p>}
+      {e.kill_reason && <p className="mt-0.5 text-[10px] text-rose-500">killed: {e.kill_reason}</p>}
+      {!e.kill_reason && e.error && <p className="mt-0.5 line-clamp-1 text-[10px] text-rose-500">{e.error}</p>}
+      {e.ingested_doc_id != null && <p className="mt-0.5 text-[10px] text-emerald-600">→ Library doc #{e.ingested_doc_id}</p>}
+    </li>
+  );
+}
+
+function QmExperimentsPanel() {
+  const [data, setData] = useState<QmExperiments | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.qmExperiments(20)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoaded(true); });
+    load();
+    const t = setInterval(load, 5000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  const onKill = (id: number) => {
+    api.qmKillExperiment(id).then(() => api.qmExperiments(20).then(setData).catch(() => {})).catch(() => {});
+  };
+
+  const rows = (data?.experiments ?? []).slice(0, 10);
+  const mode = data?.mode ?? "off";
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <SubHead label="Experiments" />
+        <span className={cx("text-[10px] font-semibold uppercase", mode === "active" ? "text-emerald-600" : "text-slate-400")}>{mode}</span>
+      </div>
+      <div className="mb-1.5 grid grid-cols-2 gap-2">
+        <StatTile label="Running" value={data?.running ?? 0} tone={data?.running ? "emerald" : undefined} />
+        <StatTile label="Queued" value={data?.queued ?? 0} tone={data?.queued ? "blue" : undefined} />
+      </div>
+      {!loaded ? (
+        <p className="text-slate-400">Loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="text-slate-400">No experiments yet.</p>
+      ) : (
+        <ul className="space-y-1">
+          {rows.map((e) => <ExperimentRow key={e.id} e={e} onKill={onKill} />)}
+        </ul>
+      )}
     </div>
   );
 }
