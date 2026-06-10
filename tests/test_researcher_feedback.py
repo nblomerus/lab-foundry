@@ -257,12 +257,14 @@ async def test_apply_feedback_fires_acquires(monkeypatch):
 
     async def _acq(state, mreq):
         seen.append(mreq)
+        return True  # emitted (not held by backpressure)
 
     monkeypatch.setattr(fb_mod, "request_acquire", _acq)
     pool = ScriptedPool()
     state = make_state(pool=pool)
     res = await apply_feedback(state, _df(acquire_queries=["q1", "q2"]))
     assert res["acquires_fired"] == 2
+    assert "acquires_held_backpressure" not in res
     assert [m.query for m in seen] == ["q1", "q2"]
     assert all(m.requester == "researcher" and m.claim_id == 7 and m.kind == "paper" for m in seen)
     assert all(len(m.why) >= 30 for m in seen)  # AcquireRequest.why min_length=30 satisfied
@@ -290,6 +292,7 @@ async def test_apply_feedback_full_path_combines_all_effects(monkeypatch):
 
     async def _acq(state, mreq):
         seen.append(mreq)
+        return True  # emitted
 
     monkeypatch.setattr(fb_mod, "request_acquire", _acq)
     pool = _active_pool(0.5)
@@ -306,5 +309,23 @@ async def test_apply_feedback_full_path_combines_all_effects(monkeypatch):
     assert len(seen) == 1
 
 
+@pytest.mark.asyncio
+async def test_apply_feedback_records_backpressure_holds(monkeypatch):
+    # request_acquire returns False when Mimir's queue is deep → the acquires are
+    # HELD, surfaced as acquires_held_backpressure, and NOT counted as fired.
+    held = []
+
+    async def _held(state, mreq):
+        held.append(mreq)
+        return False
+
+    monkeypatch.setattr(fb_mod, "request_acquire", _held)
+    state = make_state(pool=ScriptedPool())
+    res = await apply_feedback(state, _df(acquire_queries=["q1", "q2", "q3"]))
+    assert res["acquires_held_backpressure"] == 3
+    assert "acquires_fired" not in res
+    assert len(held) == 3  # all attempted, all held
+
+
 async def _noop_acquire(state, mreq):
-    return None
+    return True

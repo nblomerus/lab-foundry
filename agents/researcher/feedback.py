@@ -179,10 +179,10 @@ async def apply_feedback(state, fb: DirectionFeedback, *, run_id: int | None = N
             await conn.execute("UPDATE claims SET last_evidence_at = now() WHERE id = $1", fb.claim_id)
         applied["last_evidence_at"] = "now"
 
-    fired = 0
+    fired = held = 0
     for q in fb.acquire_queries:
         try:
-            await request_acquire(
+            emitted = await request_acquire(
                 state,
                 MimirAcquireRequest(
                     requester="researcher",
@@ -192,9 +192,15 @@ async def apply_feedback(state, fb: DirectionFeedback, *, run_id: int | None = N
                     why=f"researcher: corpus thin on '{q[:60]}' while testing direction {fb.claim_id}",
                 ),
             )
-            fired += 1
+            if emitted:
+                fired += 1
+            else:
+                held += 1  # demand-side backpressure: Mimir's queue is already deep
         except Exception as e:  # noqa: BLE001 — demand side is best-effort
             log.warning("feedback acquire failed for %r: %s", q, e)
     if fired:
         applied["acquires_fired"] = fired
+    if held:
+        # The direction stays thin_corpus and will re-request once the queue drains.
+        applied["acquires_held_backpressure"] = held
     return applied
