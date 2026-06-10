@@ -422,7 +422,7 @@ export function BudgetBurn({
   findingsToday: number;
 }) {
   const calls =
-    cost.reasoning_calls + cost.workhorse_calls + cost.fast_calls + cost.code_calls;
+    cost.reasoning_calls + cost.workhorse_calls + cost.fast_calls + cost.code_calls + cost.experiment_calls;
   const perFinding = findingsToday > 0 ? cost.total_cost_usd / findingsToday : null;
 
   return (

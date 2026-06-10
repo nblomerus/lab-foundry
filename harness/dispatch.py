@@ -149,6 +149,7 @@ CLOSURE_EXEMPT_EVENTS = frozenset(
         "library.trends",
         "cost.cap_reached",
         "lessons.reconciled",
+        "quartermaster.snapshot",  # QM per-tick compute telemetry — streamed, never handled
         # the guard's own indicators (must never recurse into themselves)
         "agent.stalled",
         "agent.slow",
