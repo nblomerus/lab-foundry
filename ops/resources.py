@@ -74,11 +74,17 @@ async def sample_resources() -> dict:
     return {**host, "gpus": gpus}
 
 
-def best_gpu_with_headroom(gpus: list[dict], need_mb: float, reserve_mb: float) -> int | None:
+def best_gpu_with_headroom(
+    gpus: list[dict], need_mb: float, reserve_mb: float, allowed: set[int] | None = None
+) -> int | None:
     """Pick the GPU index with the most free VRAM that still leaves `reserve_mb`
-    free for Ollama after `need_mb` — or None if none has the headroom."""
+    free for Ollama after `need_mb` — or None if none has the headroom. `allowed`
+    restricts to specific device indices (e.g. to exclude a GPU whose compute
+    capability the pinned torch build doesn't support); None = any GPU."""
     best, best_free = None, -1.0
     for g in gpus:
+        if allowed is not None and g["index"] not in allowed:
+            continue
         free = g.get("mem_free_mb")
         if free is None:
             continue

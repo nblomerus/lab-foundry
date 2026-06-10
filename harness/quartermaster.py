@@ -36,6 +36,12 @@ MAX_GPU = int(os.environ.get("MAX_CONCURRENT_GPU_EXPERIMENTS", "1"))
 CPUS = float(os.environ.get("EXPERIMENT_CPUS", "1.0"))
 GPU_MEM_DEFAULT = int(os.environ.get("EXPERIMENT_GPU_MEM_MB", "4096"))
 GPU_RESERVE_MB = int(os.environ.get("EXPERIMENT_GPU_HEADROOM_MB", "2048"))
+# Restrict experiments to specific GPU indices (comma-separated). Use this to
+# EXCLUDE a card whose compute capability the pinned torch build can't run — e.g.
+# an RTX 5070 Ti (Blackwell sm_120) under torch 2.5.1+cu124, which only supports
+# up to sm_90. Empty/unset = any GPU with headroom.
+_gpu_devs = os.environ.get("EXPERIMENT_GPU_DEVICES", "").strip()
+GPU_ALLOWED: set[int] | None = {int(x) for x in _gpu_devs.split(",") if x.strip()} or None
 CPU_HEADROOM_PCT = float(os.environ.get("EXPERIMENT_CPU_HEADROOM_PCT", "80"))
 MEM_HEADROOM_PCT = float(os.environ.get("EXPERIMENT_MEM_HEADROOM_PCT", "85"))
 NO_PROGRESS_S = float(os.environ.get("EXPERIMENT_NO_PROGRESS_S", "180"))
@@ -123,7 +129,7 @@ async def allocate(state, router, curator, res: dict, running: dict, kill_reason
             if gpu_running >= MAX_GPU:
                 continue
             need = int(exp.get("gpu_mem_mb") or GPU_MEM_DEFAULT)
-            device = best_gpu_with_headroom(res.get("gpus") or [], need, GPU_RESERVE_MB)
+            device = best_gpu_with_headroom(res.get("gpus") or [], need, GPU_RESERVE_MB, GPU_ALLOWED)
             if device is None:
                 continue  # no GPU with VRAM headroom beyond Ollama's footprint
             exp["_gpu_device"] = str(device)

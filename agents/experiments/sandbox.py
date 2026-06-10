@@ -80,7 +80,11 @@ def _build_cmd(
         "256",
         "--read-only",
         "--tmpfs",
-        "/work:rw,size=512m,exec",
+        # Writable scratch (rootfs is read-only). mode=1777 so the non-root user
+        # (uid 10001) can actually write — a root-owned tmpfs makes tempfile find
+        # "no usable temporary directory" and `import torch` dies. Sized for torch's
+        # import-time caches (triton kernels, etc.), not just the script.
+        "/work:rw,size=1024m,exec,mode=1777",
         "-w",
         "/work",
         "--cap-drop",
@@ -89,6 +93,19 @@ def _build_cmd(
         "no-new-privileges",
         "-e",
         "PYTHONUNBUFFERED=1",
+        # The rootfs is --read-only, but torch & friends create temp/cache/config
+        # dirs at IMPORT time (torch.distributed does tempfile.TemporaryDirectory()
+        # on `import torch`). Point HOME / TMPDIR / the XDG + matplotlib caches at
+        # the writable /work tmpfs, or every torch (i.e. every GPU/deep-learning)
+        # experiment dies before it runs a line. CPU sklearn/xgboost don't need this.
+        "-e",
+        "HOME=/work",
+        "-e",
+        "TMPDIR=/work",
+        "-e",
+        "XDG_CACHE_HOME=/work/.cache",
+        "-e",
+        "MPLCONFIGDIR=/work/.mpl",
         "-v",
         f"{script_path}:/work/exp.py:ro",
     ]

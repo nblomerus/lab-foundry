@@ -154,6 +154,18 @@ def test_best_gpu_with_headroom_empty():
     assert resources.best_gpu_with_headroom([], need_mb=1, reserve_mb=1) is None
 
 
+def test_best_gpu_with_headroom_respects_allowlist():
+    gpus = [
+        {"index": 0, "mem_free_mb": 12000.0},  # most free, but NOT allowed (e.g. unsupported arch)
+        {"index": 1, "mem_free_mb": 6000.0},
+    ]
+    # Without the allowlist it would pick 0 (most free); restricted to {1} it picks 1.
+    assert resources.best_gpu_with_headroom(gpus, need_mb=1000, reserve_mb=1000) == 0
+    assert resources.best_gpu_with_headroom(gpus, need_mb=1000, reserve_mb=1000, allowed={1}) == 1
+    # Allowed device lacks headroom → None even though a disallowed one has plenty.
+    assert resources.best_gpu_with_headroom(gpus, need_mb=5500, reserve_mb=1000, allowed={1}) is None
+
+
 # ── sample_resources() ──────────────────────────────────────────────────────
 def test_sample_resources_combines_host_and_gpus(monkeypatch):
     monkeypatch.setattr(resources, "psutil", _FakePsutil())
