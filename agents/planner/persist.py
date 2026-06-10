@@ -28,7 +28,22 @@ async def persist_plan(state, out, valid_ids, *, run_id: int | None = None) -> d
         for p in out.plans:
             if p.claim_id not in vids:
                 continue
-            for t in p.tasks[:MAX_TASKS_PER_DIRECTION]:  # hard cap — leanest set per direction
+            # Cap PENDING tasks per direction (not per invocation). MAX_TASKS_PER_DIRECTION
+            # bounds one plan, but Ariadne re-emits planner.plan as she deliberates/reflects,
+            # so without this a direction accumulates dozens of pending tasks across calls
+            # (observed: 13-16 each). Only fill the remaining room up to the cap, so a
+            # direction never has more than its lean pending set — fewer tasks, higher focus.
+            existing = (
+                await conn.fetchval(
+                    "SELECT count(*) FROM tasks WHERE claim_id = $1 AND department = 'research' AND status = 'pending'",
+                    p.claim_id,
+                )
+                or 0
+            )
+            room = MAX_TASKS_PER_DIRECTION - existing
+            if room <= 0:
+                continue  # already has its lean pending set — don't pile on
+            for t in p.tasks[:room]:  # hard cap — leanest pending set per direction
                 if not t.description.strip() or t.task_type not in TASK_TYPES:
                     continue
                 await conn.execute(

@@ -273,6 +273,27 @@ async def test_persist_plan_caps_tasks_per_direction():
     assert len(_inserts(pool)) == MAX_TASKS_PER_DIRECTION
 
 
+async def test_persist_plan_skips_direction_already_at_pending_cap():
+    # Direction 10 already has MAX pending tasks -> add NONE. This is the per-direction
+    # PENDING cap (not per-invocation), so repeated planner.plan calls can't pile up.
+    pool = ScriptedPool(rules=[("FROM tasks WHERE claim_id", [{"count": MAX_TASKS_PER_DIRECTION}])])
+    state = make_state(pool)
+    out = PlanOutput(plans=[_plan(10, tasks=[_task(10), _task(10)])], notes="")
+    counts = await persist_plan(state, out, [10])
+    assert counts["tasks"] == 0
+    assert _inserts(pool) == []
+
+
+async def test_persist_plan_only_fills_remaining_pending_room():
+    # Direction 10 has 1 pending already -> only (MAX - 1) new tasks created.
+    pool = ScriptedPool(rules=[("FROM tasks WHERE claim_id", [{"count": 1}])])
+    state = make_state(pool)
+    many = [_task(10, title=f"t{i}") for i in range(MAX_TASKS_PER_DIRECTION + 2)]
+    out = PlanOutput(plans=[_plan(10, tasks=many)], notes="")
+    counts = await persist_plan(state, out, [10])
+    assert counts["tasks"] == MAX_TASKS_PER_DIRECTION - 1
+
+
 async def test_persist_plan_priority_default_for_unknown_label():
     pool = ScriptedPool()
     state = make_state(pool)
