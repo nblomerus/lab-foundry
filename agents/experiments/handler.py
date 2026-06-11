@@ -52,6 +52,16 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
     goal = ctx.get("goal") or ""
     claim_statement = ctx.get("claim_statement") or ""
     lab_constraints = ctx.get("lab_constraints") or _LAB_CONSTRAINTS
+    prior_hypotheses = ctx.get("prior_hypotheses") or []
+    prior_block = (
+        "## Experiments ALREADY run on this direction — test a DISTINCT facet, do NOT repeat these\n"
+        + "\n".join(f"- {h}" for h in prior_hypotheses)
+        + "\nDesign the NEXT experiment in the series: vary a factor, ablate a component, change the "
+        "dataset/model/metric, or probe a boundary the prior runs did not — so the accumulated runs "
+        "build a richer picture of the direction, not a repeat.\n\n"
+        if prior_hypotheses
+        else ""
+    )
 
     content = f"""## Direction under test
 {claim_statement or "(no direction statement)"}
@@ -62,7 +72,7 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
 ## Hypothesis to test
 {hypothesis or "(none stated — derive the most load-bearing testable claim from the direction)"}
 
-## Lab compute envelope (the experiment MUST fit this)
+{prior_block}## Lab compute envelope (the experiment MUST fit this)
 {lab_constraints}
 
 ---
@@ -273,12 +283,20 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
         return {"skipped": True, "reason": "no task_id in experiment.requested payload"}
 
     claim_statement = ""
+    prior_hypotheses: list[str] = []
     if claim_id is not None:
         try:
             claim = await state.get_claim(claim_id)
             claim_statement = claim.statement
         except ValueError:
             claim_statement = ""
+        # Prior experiments on this direction → tell the designer to test a DISTINCT facet, so a
+        # driven series accumulates a varied picture (ablations/sweeps), not three near-copies.
+        try:
+            prior = await state.get_completed_experiments_for_claim(claim_id, limit=10)
+            prior_hypotheses = [h for e in prior if (h := (e.get("params") or {}).get("hypothesis"))]
+        except Exception:  # noqa: BLE001 — best-effort context
+            prior_hypotheses = []
 
     prompt = await dispatcher.curator.build(
         invocation_type="experiments.design",
@@ -287,6 +305,7 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
             "goal": payload.get("goal") or "",
             "claim_statement": claim_statement,
             "lab_constraints": _LAB_CONSTRAINTS,
+            "prior_hypotheses": prior_hypotheses,
         },
     )
     design, run_id = await dispatcher.router.invoke(

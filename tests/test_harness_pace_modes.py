@@ -308,6 +308,38 @@ async def test_maybe_adjudicate_emits(monkeypatch):
     assert "direction.adjudicate" in inserts[0][1]
 
 
+# ── _maybe_drive_experiments ────────────────────────────────────────────────────
+@aio
+async def test_drive_experiments_drives_only_under_target_idle_directions(monkeypatch):
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    rows = [
+        {"id": 61, "done": 1, "attempts": 1, "inflight": 0, "task_id": 500},  # under target, idle → DRIVE
+        {"id": 62, "done": 3, "attempts": 3, "inflight": 0, "task_id": 501},  # at target → skip
+        {"id": 63, "done": 0, "attempts": 0, "inflight": 1, "task_id": 502},  # in flight → skip (serial/fair)
+        {"id": 64, "done": 0, "attempts": 0, "inflight": 0, "task_id": None},  # no task → skip
+        {"id": 65, "done": 0, "attempts": 9, "inflight": 0, "task_id": 503},  # give-up cap (>=3*3) → skip
+    ]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    n = await ariadne_pace._maybe_drive_experiments(pool)
+    assert n == 1
+    inserts = [c for c in pool.calls if c[0] == "execute" and "experiment.requested" in c[1]]
+    assert len(inserts) == 1
+    args = inserts[0][2]
+    assert args[0] == 61  # target_id = the under-target idle direction
+    payload = json.loads(args[1])
+    assert payload == {"claim_id": 61, "task_id": 500, "trigger": "coverage"}
+    assert args[2] == "drive-exp-61-1"  # dedup round keyed on attempts (so failures retry)
+
+
+@aio
+async def test_drive_experiments_none_when_all_covered(monkeypatch):
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    rows = [{"id": 61, "done": 3, "attempts": 3, "inflight": 0, "task_id": 1}]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 0
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
 # ── _emit ─────────────────────────────────────────────────────────────────────
 @aio
 async def test_emit_inserts_pending_event():

@@ -77,6 +77,8 @@ def _disp(*, design=None, report=None, run_id=7, **state_returns):
     # Default the synthesis trigger's experiment count to 0 so completed-handler tests that
     # don't care about synthesis don't fire it (the handler compares this int to a threshold).
     state_returns.setdefault("count_completed_experiments_for_claim", 0)
+    # The design path reads prior experiments to vary the series — empty by default.
+    state_returns.setdefault("get_completed_experiments_for_claim", [])
     state = make_state(**state_returns)
     disp = make_dispatcher(state)
     disp.curator = AsyncMock()
@@ -134,6 +136,27 @@ async def test_requested_curator_and_router_invoked_correctly():
     assert rkw["triggered_by_event_id"] == 8
     assert rkw["step_name"] == "experiments.design"
     assert rkw["session"] is disp.session
+
+
+async def test_requested_passes_prior_hypotheses_to_vary_the_series():
+    # A driven series: prior experiments' hypotheses flow into the design context so the next one
+    # tests a DISTINCT facet instead of repeating.
+    disp = _disp(
+        design=_design(),
+        get_claim=_claim(statement="GP vs XGBoost"),
+        queue_experiment=1,
+        get_completed_experiments_for_claim=[
+            {"params": {"hypothesis": "8-bit GP within 2% RMSE of XGBoost"}},
+            {"params": {"hypothesis": "GP calibration ECE beats XGBoost"}},
+            {"params": {}},  # no hypothesis → dropped
+        ],
+    )
+    await EH.handle_experiment_requested(_event(3, claim_id=7, task_id=1), disp)
+    _, ckw = disp.curator.build.await_args
+    assert ckw["context"]["prior_hypotheses"] == [
+        "8-bit GP within 2% RMSE of XGBoost",
+        "GP calibration ECE beats XGBoost",
+    ]
 
 
 async def test_requested_wall_clock_capped_at_1800():

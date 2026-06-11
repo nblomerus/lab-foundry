@@ -51,6 +51,9 @@ GATE_BUDGET = int(os.environ.get("ARIADNE_GATE_BUDGET", "3"))
 # the self-scores above are graded by the proposer; this is the external check. Default on; an
 # un-adjudicated direction then never auto-approves (the fail-safe), so the novelty agent must run.
 GATE_REQUIRE_ADJUDICATION = os.environ.get("ARIADNE_GATE_REQUIRE_ADJUDICATION", "on").lower() in {"on", "1", "true"}
+# Drive every approved direction to at least this many completed experiments so it can be synthesized
+# into a finding (matches SYNTHESIS_MIN_EXPERIMENTS). 0 disables the coverage driver.
+EXPERIMENT_COVERAGE_TARGET = int(os.environ.get("EXPERIMENT_COVERAGE_TARGET", "3"))
 
 _ACTIVE = "('proposed','tested','weakly_supported','replicated')"
 
@@ -143,6 +146,60 @@ async def _maybe_plan(pool) -> bool:
         )
     log.info("ariadne pace: emitted planner.plan (%d approved direction(s) unplanned)", unplanned)
     return True
+
+
+async def _maybe_drive_experiments(pool) -> int:
+    """Drive each APPROVED, active, non-concluded, non-HELD direction toward the experiment-coverage
+    target. A direction needs >= SYNTHESIS_MIN experiments to be synthesized into a finding, but the
+    planner caps tasks per direction and the researcher only flags `needs_experiment` sometimes — so
+    most directions never reach the threshold and the finding/conclude pipeline starves. This requests
+    the NEXT experiment for any under-target direction with nothing in flight: every approved direction
+    marches to a finding (breadth), not just whichever one a researcher happened to flag. Serial per
+    direction (the in-flight guard) → naturally fair; the QM's concurrency cap bounds the whole lane.
+    The dedup round keys on TOTAL attempts (completed + failed) so a failed run retries, with a give-up
+    cap so a broken direction can't churn forever. Held-by-adjudication directions are skipped (don't
+    spend compute on work the independent reviewer flagged as redundant)."""
+    emitted = 0
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT c.id,
+                   (SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id
+                      WHERE t.claim_id = c.id AND e.status = 'completed') AS done,
+                   (SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id
+                      WHERE t.claim_id = c.id AND e.status IN ('completed','failed','killed')) AS attempts,
+                   (SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id
+                      WHERE t.claim_id = c.id AND e.status NOT IN ('completed','failed','killed')) AS inflight,
+                   (SELECT t.id FROM tasks t WHERE t.claim_id = c.id AND t.department = 'research'
+                      ORDER BY t.id DESC LIMIT 1) AS task_id
+            FROM claims c JOIN direction_gate dg ON dg.claim_id = c.id
+            WHERE dg.status = 'approved' AND c.claim_kind = 'direction' AND c.status IN {_ACTIVE}
+              AND NOT EXISTS (
+                  SELECT 1 FROM direction_adjudications da WHERE da.claim_id = c.id AND da.verdict = 'hold'
+              )
+            """
+        )
+        for r in rows:
+            if (
+                r["done"] >= EXPERIMENT_COVERAGE_TARGET
+                or r["inflight"] > 0
+                or r["task_id"] is None
+                or r["attempts"] >= EXPERIMENT_COVERAGE_TARGET * 3  # give-up cap: a direction that can't produce runs
+            ):
+                continue
+            res = await conn.execute(
+                "INSERT INTO events (event_type, target_type, target_id, payload, status, dedup_key) "
+                "VALUES ('experiment.requested', 'claim', $1, $2::jsonb, 'pending', $3) "
+                "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+                r["id"],
+                json.dumps({"claim_id": r["id"], "task_id": r["task_id"], "trigger": "coverage"}),
+                f"drive-exp-{r['id']}-{r['attempts']}",
+            )
+            if res.endswith(" 1"):
+                emitted += 1
+    if emitted:
+        log.info("ariadne pace: drove %d direction(s) toward the experiment-coverage target", emitted)
+    return emitted
 
 
 def _corpus_of(row) -> float | None:
@@ -247,6 +304,10 @@ async def ariadne_pacemaker(pool, stop: asyncio.Event) -> None:
             await _maybe_adjudicate(pool)  # independent novelty/impact check before the gate
             await _auto_approve(pool)  # hands-off: approve her own top directions (adjudication-gated)
             await _maybe_plan(pool)  # trigger the Planner for approved-but-unplanned directions
+            # Drive every approved direction to the experiment-coverage target so it can reach a
+            # finding — but only when the experiments agent can actually run them.
+            if EXPERIMENT_COVERAGE_TARGET > 0 and await get_agent_mode(pool, "experiments") in {"advisory", "active"}:
+                await _maybe_drive_experiments(pool)
             event_type, corpus = await _decide(pool)
             if event_type:
                 await _refresh_field_model(pool)  # she reads the CURRENT landscape
