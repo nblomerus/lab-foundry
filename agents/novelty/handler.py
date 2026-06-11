@@ -1,0 +1,193 @@
+"""
+The novelty agent — the independent adjudicator (the output-gate prior-art reviewer).
+
+`direction.adjudicate` → for each scored, un-adjudicated direction: retrieve the ACTUAL
+nearest prior art from the corpus + the lab's OWN recent directions, then one independent
+LLM step (`novelty.adjudicate`) scores novelty + impact and flags rut-redundancy WITHOUT
+seeing the proposer's self-scores. A deterministic pass/hold verdict is derived from those
+fields and persisted; the gate (harness/ariadne_pace) requires verdict='pass'. The mode-dial
+agent name is `novelty`.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from agents.novelty.schemas import DirectionAdjudication
+from harness.curator import RECIPES, SYSTEM_PROMPTS, PromptLayer, Recipe
+from harness.router import ROUTE, Tier
+from library.corpus.tools import corpus_search
+
+log = logging.getLogger(__name__)
+
+# The independent floors a direction must clear to PASS (separate from the self-score floors
+# the gate also checks). Tunable via env; default 3 mirrors the self-score gate floors.
+ADJ_NOVELTY_MIN = int(os.environ.get("ADJUDICATE_NOVELTY_MIN", "3"))
+ADJ_IMPACT_MIN = int(os.environ.get("ADJUDICATE_IMPACT_MIN", "3"))
+
+
+# -------------------------------------------------------------------------
+# Curator task_data builder
+# -------------------------------------------------------------------------
+
+
+async def _build_adjudicate(ctx: dict, state, memory) -> PromptLayer:
+    direction = ctx.get("direction_statement") or "(no statement)"
+    prior_art = ctx.get("prior_art") or []
+    prior_directions = ctx.get("prior_directions") or []
+    pa = "\n".join(f"- {t}" for t in prior_art) or "(no closely-related prior art retrieved)"
+    pd = "\n".join(f"- {s}" for s in prior_directions) or "(none)"
+
+    content = f"""## Direction to adjudicate
+{direction}
+
+## Nearest prior art in the corpus (the closest existing work)
+{pa}
+
+## The lab's OWN recent directions (does this re-tread one?)
+{pd}
+
+---
+
+You are an independent, skeptical reviewer. You did NOT propose this direction and you do not see
+the proposer's own scores — assess it on its merits against the evidence above.
+
+- `novelty_independent` (1-5): does this clearly advance BEYOND the nearest prior art shown? Default LOW
+  if the retrieved papers already answer it. Do not reward a re-skin of known work.
+- `impact_independent` (1-5): would a CLEAR answer change a real build/deploy decision a named practitioner
+  faces? Score the decision value, not how interesting it sounds.
+- `is_novel`: true ONLY if it genuinely goes beyond the prior art shown.
+- `is_impactful`: true ONLY if you can name the concrete decision a clear answer changes.
+- `redundant`: true if it re-treads a topic in the lab's OWN recent directions above (a rut) — even if the
+  literature angle differs. If so, name it in `redundant_note`.
+- `rationale`: 2-3 sentences — the closest prior work, what's actually new (or not), and the decision at stake.
+
+Be honest and demanding. A gap nobody would act on, or a re-tread of the lab's own ground, should NOT pass.
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
+# -------------------------------------------------------------------------
+# Recipe + route + system-prompt registration (idempotent — guard double-import)
+# -------------------------------------------------------------------------
+
+SYSTEM_PROMPTS.setdefault(
+    "novelty",
+    (
+        "You are a tough, independent prior-art reviewer for an autonomous AI research lab. You judge whether a "
+        "proposed research direction is genuinely novel against the actual nearest literature and whether a clear "
+        "answer would change a real decision — and you flag re-treads of ground the lab already worked. You default "
+        "to skeptical: 'under-explored' is not 'worth doing', and a re-skin of known work is not novel. You never see "
+        "the proposer's own scores; your job is the external check they lack."
+    ),
+)
+
+if "novelty.adjudicate" not in RECIPES:
+    RECIPES["novelty.adjudicate"] = Recipe(
+        invocation_type="novelty.adjudicate",
+        description="Independently score a proposed direction's novelty + impact against the nearest prior art.",
+        agent="novelty",
+        total_budget=6_000,
+        use_cold_path=False,
+        recall_sessions=[],
+        recall_k=0,
+        output_schema="DirectionAdjudication",
+        task_data_builder=_build_adjudicate,
+    )
+
+ROUTE.setdefault("novelty.adjudicate", Tier.WORKHORSE)
+
+
+def _verdict(adj: DirectionAdjudication) -> str:
+    """Derive pass/hold deterministically from the independent scores + flags (not LLM-set)."""
+    passes = (
+        adj.novelty_independent >= ADJ_NOVELTY_MIN
+        and adj.impact_independent >= ADJ_IMPACT_MIN
+        and adj.is_novel
+        and adj.is_impactful
+        and not adj.redundant
+    )
+    return "pass" if passes else "hold"
+
+
+# -------------------------------------------------------------------------
+# Handler
+# -------------------------------------------------------------------------
+
+
+async def handle_direction_adjudicate(event: dict, dispatcher) -> dict | None:
+    """`direction.adjudicate` → independently adjudicate every scored, un-adjudicated direction."""
+    state = dispatcher.state
+    directions = await state.get_unadjudicated_directions()
+    if not directions:
+        return {"adjudicated": 0, "reason": "nothing to adjudicate"}
+
+    adjudicated = passed = held = 0
+    for d in directions:
+        statement = d["statement"]
+        # The ACTUAL nearest prior art (external signal the self-score lacks) + the lab's own
+        # recent directions (the anti-rut signal). Best-effort: a retrieval blip must not wedge it.
+        try:
+            chunks = await corpus_search(statement, k=8)
+        except Exception:  # noqa: BLE001
+            chunks = []
+        seen, prior_art = set(), []
+        for c in chunks:
+            t = (c.title or "").strip()
+            if t and t.lower() not in seen:
+                seen.add(t.lower())
+                prior_art.append(t)
+            if len(prior_art) >= 6:
+                break
+        prior_directions = await state.get_prior_direction_statements(exclude_claim_id=d["id"], limit=12)
+
+        prompt = await dispatcher.curator.build(
+            invocation_type="novelty.adjudicate",
+            context={
+                "direction_statement": statement,
+                "prior_art": prior_art,
+                "prior_directions": prior_directions,
+            },
+        )
+        try:
+            adj, run_id = await dispatcher.router.invoke(
+                prompt=prompt,
+                output_schema_class=DirectionAdjudication,
+                triggered_by_event_id=event["id"],
+                session=dispatcher.session,
+                step_name="novelty.adjudicate",
+            )
+        except Exception:  # noqa: BLE001 — leave it un-adjudicated; the pacemaker re-emits next tick
+            log.exception("novelty: adjudication failed for direction %s — will retry", d["id"])
+            continue
+
+        verdict = _verdict(adj)
+        await state.persist_direction_adjudication(
+            claim_id=d["id"],
+            novelty_independent=adj.novelty_independent,
+            impact_independent=adj.impact_independent,
+            is_novel=adj.is_novel,
+            is_impactful=adj.is_impactful,
+            redundant=adj.redundant,
+            redundant_note=adj.redundant_note,
+            verdict=verdict,
+            rationale=adj.rationale,
+            nearest_prior_art=prior_art,
+            run_id=run_id,
+        )
+        adjudicated += 1
+        passed += verdict == "pass"
+        held += verdict == "hold"
+        log.info(
+            "novelty: adjudicated direction %s → %s (novelty=%d impact=%d novel=%s impactful=%s redundant=%s)",
+            d["id"],
+            verdict,
+            adj.novelty_independent,
+            adj.impact_independent,
+            adj.is_novel,
+            adj.is_impactful,
+            adj.redundant,
+        )
+
+    return {"adjudicated": adjudicated, "passed": passed, "held": held}

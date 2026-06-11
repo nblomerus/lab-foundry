@@ -47,6 +47,10 @@ GATE_IMPACT_MIN = int(os.environ.get("ARIADNE_GATE_IMPACT_MIN", "3"))
 GATE_NOVELTY_MIN = int(os.environ.get("ARIADNE_GATE_NOVELTY_MIN", "3"))
 GATE_PAPER_MIN = int(os.environ.get("ARIADNE_GATE_PAPER_MIN", "3"))
 GATE_BUDGET = int(os.environ.get("ARIADNE_GATE_BUDGET", "3"))
+# Require the INDEPENDENT adjudicator (agents/novelty) to pass a direction before auto-approval —
+# the self-scores above are graded by the proposer; this is the external check. Default on; an
+# un-adjudicated direction then never auto-approves (the fail-safe), so the novelty agent must run.
+GATE_REQUIRE_ADJUDICATION = os.environ.get("ARIADNE_GATE_REQUIRE_ADJUDICATION", "on").lower() in {"on", "1", "true"}
 
 _ACTIVE = "('proposed','tested','weakly_supported','replicated')"
 
@@ -63,12 +67,20 @@ async def _auto_approve(pool) -> int:
         slots = GATE_BUDGET - approved
         if slots <= 0:
             return 0
+        # The independent adjudicator must have passed it — the external check on the self-scores.
+        # An un-adjudicated or held direction is excluded (fail-safe) while adjudication is required.
+        adj_clause = (
+            "AND EXISTS (SELECT 1 FROM direction_adjudications da WHERE da.claim_id = c.id AND da.verdict = 'pass') "
+            if GATE_REQUIRE_ADJUDICATION
+            else ""
+        )
         rows = await conn.fetch(
             f"SELECT c.id FROM claims c JOIN direction_scores ds ON ds.claim_id = c.id "
             f"LEFT JOIN direction_gate dg ON dg.claim_id = c.id "
             f"WHERE c.claim_kind = 'direction' AND c.status IN {_ACTIVE} "
             f"AND (dg.status IS NULL OR dg.status = 'pending') "
             f"AND ds.composite >= $1 AND ds.impact >= $3 AND ds.novelty >= $4 AND ds.paper_potential >= $5 "
+            f"{adj_clause}"
             f"ORDER BY ds.impact DESC, ds.composite DESC LIMIT $2",
             AUTO_APPROVE_MIN,
             slots,
@@ -86,6 +98,30 @@ async def _auto_approve(pool) -> int:
     if rows:
         log.info("ariadne pace: auto-approved %d direction(s)", len(rows))
     return len(rows)
+
+
+async def _maybe_adjudicate(pool) -> bool:
+    """Emit direction.adjudicate when scored directions still lack an independent verdict (and
+    none is queued) — so the gate has the external novelty/impact check it requires."""
+    async with pool.acquire() as conn:
+        unadjudicated = await conn.fetchval(
+            f"SELECT count(*) FROM claims c JOIN direction_scores ds ON ds.claim_id = c.id "
+            f"WHERE c.claim_kind = 'direction' AND c.status IN {_ACTIVE} "
+            f"AND NOT EXISTS (SELECT 1 FROM direction_adjudications da WHERE da.claim_id = c.id)"
+        )
+        if not unadjudicated:
+            return False
+        if await conn.fetchval(
+            "SELECT count(*) FROM events WHERE event_type = 'direction.adjudicate' AND status = 'pending'"
+        ):
+            return False
+        await conn.execute(
+            "INSERT INTO events (event_type, payload, status, dedup_key) "
+            "VALUES ('direction.adjudicate', '{}'::jsonb, 'pending', $1)",
+            f"pace-adjudicate-{int(time.time())}",
+        )
+    log.info("ariadne pace: emitted direction.adjudicate (%d scored direction(s) unadjudicated)", unadjudicated)
+    return True
 
 
 async def _maybe_plan(pool) -> bool:
@@ -208,7 +244,8 @@ async def ariadne_pacemaker(pool, stop: asyncio.Event) -> None:
         try:
             if await get_agent_mode(pool, "ariadne") not in {"advisory", "active"}:
                 continue  # the mode dial pauses her
-            await _auto_approve(pool)  # hands-off: approve her own top directions
+            await _maybe_adjudicate(pool)  # independent novelty/impact check before the gate
+            await _auto_approve(pool)  # hands-off: approve her own top directions (adjudication-gated)
             await _maybe_plan(pool)  # trigger the Planner for approved-but-unplanned directions
             event_type, corpus = await _decide(pool)
             if event_type:

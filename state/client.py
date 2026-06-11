@@ -1256,6 +1256,85 @@ class PostgresClient:
             )
             return [dict(r) for r in rows]
 
+    # ── independent novelty/impact adjudication (agents/novelty) ─────────────────────
+    async def get_unadjudicated_directions(self, limit: int = 20) -> list[dict]:
+        """Scored, active directions that have NO independent adjudication yet — the work the
+        novelty agent picks up so the gate has an external verdict to require."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.statement
+                FROM claims c JOIN direction_scores ds ON ds.claim_id = c.id
+                WHERE c.claim_kind = 'direction'
+                  AND c.status IN ('proposed', 'tested', 'weakly_supported', 'replicated')
+                  AND NOT EXISTS (SELECT 1 FROM direction_adjudications da WHERE da.claim_id = c.id)
+                ORDER BY c.id
+                LIMIT $1
+                """,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def get_prior_direction_statements(self, exclude_claim_id: int, limit: int = 12) -> list[str]:
+        """Recent direction statements (active OR invalidated, newest first) — the lab's own
+        explored ground, so the adjudicator can flag a re-tread (the anti-rut signal)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT statement FROM claims WHERE claim_kind = 'direction' AND id <> $1 ORDER BY id DESC LIMIT $2",
+                exclude_claim_id,
+                limit,
+            )
+            return [r["statement"] for r in rows]
+
+    async def persist_direction_adjudication(
+        self,
+        *,
+        claim_id: int,
+        novelty_independent: int,
+        impact_independent: int,
+        is_novel: bool,
+        is_impactful: bool,
+        redundant: bool,
+        redundant_note: str,
+        verdict: str,
+        rationale: str,
+        nearest_prior_art: list[str],
+        run_id: int | None = None,
+    ) -> None:
+        """Write (or replace) a direction's independent adjudication."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO direction_adjudications
+                    (claim_id, novelty_independent, impact_independent, is_novel, is_impactful,
+                     redundant, redundant_note, verdict, rationale, nearest_prior_art, created_by_run_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+                ON CONFLICT (claim_id) DO UPDATE SET
+                    novelty_independent = EXCLUDED.novelty_independent,
+                    impact_independent = EXCLUDED.impact_independent,
+                    is_novel = EXCLUDED.is_novel,
+                    is_impactful = EXCLUDED.is_impactful,
+                    redundant = EXCLUDED.redundant,
+                    redundant_note = EXCLUDED.redundant_note,
+                    verdict = EXCLUDED.verdict,
+                    rationale = EXCLUDED.rationale,
+                    nearest_prior_art = EXCLUDED.nearest_prior_art,
+                    created_by_run_id = EXCLUDED.created_by_run_id,
+                    created_at = now()
+                """,
+                claim_id,
+                novelty_independent,
+                impact_independent,
+                is_novel,
+                is_impactful,
+                redundant,
+                redundant_note,
+                verdict,
+                rationale,
+                json.dumps(nearest_prior_art),
+                run_id,
+            )
+
     async def get_research_tree(self, task_id: int) -> dict:
         """
         Return everything the Debug research-tree view needs: the task itself,

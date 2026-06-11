@@ -37,6 +37,7 @@ from agents.experiments.handler import (
     handle_experiment_failed,
     handle_experiment_requested,
 )
+from agents.novelty.handler import handle_direction_adjudicate
 from agents.planner.decompose import handle_planner_decompose
 from agents.planner.handler import handle_queue_empty
 from agents.reflection.handler import handle_reflection_requested
@@ -270,6 +271,10 @@ async def main() -> int:
     # (defaults 'off' under KNOWLEDGE_CORE_ONLY). Flip to advisory/active with ops.agent_mode.
     dispatcher.register("ariadne.deliberate", handle_ariadne_deliberate)
     dispatcher.register("ariadne.reflect", handle_ariadne_reflect)
+    # Novelty (independent adjudicator) — registered ALWAYS; the 'novelty' mode dial gates it.
+    # Scores each proposed direction's novelty/impact against the real nearest prior art + the
+    # lab's own prior directions; the gate (ariadne_pace) requires its verdict='pass'.
+    dispatcher.register("direction.adjudicate", handle_direction_adjudicate)
     # Planner (Stage 2) — registered ALWAYS; the 'planner' mode dial gates it (default off).
     dispatcher.register("planner.plan", handle_planner_decompose)
     # Researcher (Stage 3, research-era Library-grounded) — registered ALWAYS; the 'researcher'

@@ -273,6 +273,41 @@ async def test_maybe_plan_emits(monkeypatch):
     assert "planner.plan" in inserts[0][1]
 
 
+# ── _maybe_adjudicate ─────────────────────────────────────────────────────────
+@aio
+async def test_maybe_adjudicate_none_unadjudicated(monkeypatch):
+    pool = ScriptedPool([("NOT EXISTS (SELECT 1 FROM direction_adjudications", 0)])
+    assert await ariadne_pace._maybe_adjudicate(pool) is False
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_maybe_adjudicate_already_queued(monkeypatch):
+    pool = ScriptedPool(
+        [
+            ("NOT EXISTS (SELECT 1 FROM direction_adjudications", 3),
+            ("event_type = 'direction.adjudicate' AND status = 'pending'", 1),
+        ]
+    )
+    assert await ariadne_pace._maybe_adjudicate(pool) is False
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_maybe_adjudicate_emits(monkeypatch):
+    pool = ScriptedPool(
+        [
+            ("NOT EXISTS (SELECT 1 FROM direction_adjudications", 3),
+            ("event_type = 'direction.adjudicate' AND status = 'pending'", 0),
+        ]
+    )
+    assert await ariadne_pace._maybe_adjudicate(pool) is True
+    inserts = [c for c in pool.calls if c[0] == "execute"]
+    assert len(inserts) == 1
+    assert "INSERT INTO events" in inserts[0][1]
+    assert "direction.adjudicate" in inserts[0][1]
+
+
 # ── _emit ─────────────────────────────────────────────────────────────────────
 @aio
 async def test_emit_inserts_pending_event():
