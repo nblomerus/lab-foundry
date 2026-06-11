@@ -332,7 +332,7 @@ export interface AriadneOverview {
     approved: number; gate_budget: number;
     claims_total: number; acquire_requests_24h: number; acquire_pending: number;
     planner_mode: string; researcher_mode: string;
-    research_tasks: number; research_tasks_pending: number;
+    research_tasks: number; research_tasks_pending: number; research_tasks_running: number;
     experiments_mode: string; quartermaster_mode: string;
     experiments_running: number; experiments_total: number;
   };

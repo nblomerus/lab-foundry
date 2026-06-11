@@ -118,6 +118,9 @@ async def overview(request: Request) -> dict:
         research_pending = await conn.fetchval(
             "SELECT count(*) FROM tasks WHERE department = 'research' AND status = 'pending'"
         )
+        research_running = await conn.fetchval(
+            "SELECT count(*) FROM tasks WHERE department = 'research' AND status = 'running'"
+        )
         exp_running = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE status IN ('running','queued')")
         exp_total = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE code IS NOT NULL")
         focus = [
@@ -156,6 +159,7 @@ async def overview(request: Request) -> dict:
             "researcher_mode": modes.get("researcher", "off"),
             "research_tasks": research_tasks,
             "research_tasks_pending": research_pending,
+            "research_tasks_running": research_running,
             "experiments_mode": modes.get("experiments", "off"),
             "quartermaster_mode": modes.get("quartermaster", "off"),
             "experiments_running": exp_running,

@@ -61,6 +61,7 @@ def _overview_rules(*, mission, directions, lessons, focus, modes):
         ("acquire.requested", [{"count": 7}]),
         ("WHERE agent_name IN ('planner','researcher','experiments','quartermaster')", modes),
         ("FROM tasks WHERE department = 'research' AND status = 'pending'", [{"count": 1}]),
+        ("FROM tasks WHERE department = 'research' AND status = 'running'", [{"count": 2}]),
         ("FROM tasks WHERE department = 'research'", [{"count": 3}]),
         ("FROM experiment_runs WHERE status IN ('running','queued')", [{"count": 2}]),
         ("FROM experiment_runs WHERE code IS NOT NULL", [{"count": 9}]),
@@ -126,6 +127,7 @@ def test_overview_full_mission_scored_directions_lessons():
     assert g["researcher_mode"] == "off"
     assert g["research_tasks"] == 3
     assert g["research_tasks_pending"] == 1
+    assert g["research_tasks_running"] == 2
     assert g["experiments_mode"] == "active"
     assert g["quartermaster_mode"] == "active"
     assert g["experiments_running"] == 2
