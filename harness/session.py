@@ -53,6 +53,10 @@ class Session:
     # parent_step_id for the next step (linear chains). Multi-parent steps
     # (e.g. extract_evidence fan-out) override this explicitly.
     last_step_id: int | None = None
+    # The agent_runs.id of the most recent _chain_complete call on this session
+    # (the non-Router LLM path). Lets that path's caller credit the run (e.g.
+    # Ariadne's reflection crediting a re-derived lesson) without threading ids.
+    last_run_id: int | None = None
 
     # Held for emit_event(). Not on dataclass equality / repr.
     _pool: asyncpg.Pool | None = field(default=None, repr=False, compare=False)

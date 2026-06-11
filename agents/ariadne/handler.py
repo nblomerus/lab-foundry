@@ -17,6 +17,7 @@ from agents.ariadne.grade import grade, grade_reflection
 from agents.ariadne.loop import run_shadow
 from agents.ariadne.persist import persist_directions, persist_reflection, request_evidence
 from agents.ariadne.reflect import run_reflection
+from agents.llm import current_run_id
 from harness.agent_modes import get_agent_mode
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ async def handle_ariadne_reflect(event: dict, dispatcher) -> dict | None:
         log.warning("ariadne reflect: FAILED grading (invalid refs=%s) — not persisting", report.invalid_refs)
         return {**summary, "persisted": False, "reason": "failed_grading"}
 
-    counts = await persist_reflection(state, out, valid_ids)
+    # The reflect run is the last _chain_complete on this session — credit re-derived lessons to it.
+    counts = await persist_reflection(state, out, valid_ids, run_id=current_run_id())
     log.info("ariadne reflect: %s — applied %s", mode, counts)
     return {**summary, "persisted": True, **counts}

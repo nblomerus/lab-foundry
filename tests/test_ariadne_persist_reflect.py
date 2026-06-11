@@ -184,7 +184,7 @@ async def test_persist_reflection_all_assessment_branches():
     state = make_state(pool=pool)
     out = _reflection_out(verdicts=verdicts, lessons=[_lesson()])
     res = await persist.persist_reflection(state, out, [1, 2, 3, 4], run_id=5)
-    assert res == {"retired": 1, "reprioritized": 2, "advanced": 1, "lessons": 1}
+    assert res == {"retired": 1, "reprioritized": 2, "advanced": 1, "lessons": 1, "reinforced": 0}
     sqls = " || ".join(c[1] for c in pool.calls)
     assert "UPDATE claims SET status='invalidated'" in sqls
     assert "UPDATE direction_scores SET priority" in sqls
@@ -197,7 +197,7 @@ async def test_persist_reflection_skips_invalid_ids():
     pool = ScriptedPool()
     state = make_state(pool=pool)
     res = await persist.persist_reflection(state, _reflection_out(verdicts=verdicts, lessons=[]), [1, 2])
-    assert res == {"retired": 0, "reprioritized": 0, "advanced": 0, "lessons": 0}
+    assert res == {"retired": 0, "reprioritized": 0, "advanced": 0, "lessons": 0, "reinforced": 0}
 
 
 @pytest.mark.asyncio
@@ -227,6 +227,34 @@ async def test_persist_reflection_lesson_with_when_and_blank_skipped():
     # first lesson's applies_when serialized to {"when": ...}; third to {}
     assert json.loads(lesson_calls[0][2][0]) == {"when": "weak eval"}
     assert json.loads(lesson_calls[1][2][0]) == {}
+
+
+@pytest.mark.asyncio
+async def test_persist_reflection_dedup_credits_recurrence_instead_of_inserting():
+    # find_near_duplicate hits (trigram SELECT returns an id) → credit the original with a supportive
+    # application (promotion pressure) and DON'T insert a duplicate lesson row.
+    pool = ScriptedPool([("similarity(lesson_text", 42)])  # find_near_duplicate -> existing lesson id 42
+    state = make_state(pool=pool)
+    res = await persist.persist_reflection(state, _reflection_out(verdicts=[], lessons=[_lesson()]), [], run_id=7)
+    assert res["reinforced"] == 1
+    assert res["lessons"] == 0
+    sqls = " || ".join(c[1] for c in pool.calls)
+    assert "INSERT INTO lesson_applications" in sqls  # credited the original
+    assert "INSERT INTO lessons" not in sqls  # no duplicate row
+
+
+@pytest.mark.asyncio
+async def test_persist_reflection_dedup_without_run_id_skips_insert_no_credit():
+    # A near-duplicate but no run to credit (run_id=None) → still dedup (no duplicate row), but no
+    # application is written (degrades gracefully to plain dedup).
+    pool = ScriptedPool([("similarity(lesson_text", 42)])
+    state = make_state(pool=pool)
+    res = await persist.persist_reflection(state, _reflection_out(verdicts=[], lessons=[_lesson()]), [])
+    assert res["reinforced"] == 0
+    assert res["lessons"] == 0
+    sqls = " || ".join(c[1] for c in pool.calls)
+    assert "INSERT INTO lesson_applications" not in sqls
+    assert "INSERT INTO lessons" not in sqls
 
 
 # ════════════════════════════════════════════════════════════════════════════════

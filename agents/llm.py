@@ -97,11 +97,11 @@ async def _record_run(
     agent = invocation_type.split(".")[0]
     try:
         async with pool.acquire() as conn:
-            await conn.execute(
+            rid = await conn.fetchval(
                 "INSERT INTO agent_runs (department, agent_name, invocation_type, model_tier, model_name, "
                 "triggered_by_event_id, input_token_count, output_token_count, status, completed_at, "
                 "session_id, step_name, step_order, input_summary, output_summary) "
-                "VALUES ('research',$1,$2,'reasoning',$3,$4,$5,$6,'completed',now(),$7,$8,$9,$10,$11)",
+                "VALUES ('research',$1,$2,'reasoning',$3,$4,$5,$6,'completed',now(),$7,$8,$9,$10,$11) RETURNING id",
                 agent,
                 invocation_type,
                 model_name,
@@ -114,8 +114,18 @@ async def _record_run(
                 input_summary,
                 output_summary,
             )
+        # Surface the run id so the _chain_complete caller can credit it (e.g. Ariadne's reflection
+        # crediting a re-derived lesson against this reflect run — the only path that records it).
+        sess.last_run_id = rid
     except Exception as e:  # noqa: BLE001 — observability is best-effort
         log.debug("agent_run record skipped (%s): %s", step_name, e)
+
+
+def current_run_id() -> int | None:
+    """The agent_runs.id of the most recent _chain_complete call on the current handler session
+    (None outside a session / if recording was skipped). Used to credit a non-Router LLM run."""
+    sess = _current_session.get()
+    return getattr(sess, "last_run_id", None) if sess is not None else None
 
 
 async def _chain_complete(

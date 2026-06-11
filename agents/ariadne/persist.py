@@ -13,14 +13,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from agents.ariadne.grade import _toks
 from agents.ariadne.scoring import DIMENSIONS, composite, is_wellformed, priority_label
 from agents.mimir.acquire import AcquireRequest as MimirAcquireRequest
 from agents.mimir.acquire import request_acquire
 from library.corpus.tools import corpus_search
+from skills.client import LessonsClient
 
 log = logging.getLogger(__name__)
+
+# Trigram similarity at/above which a reflection lesson counts as a re-derivation of an existing one
+# (so it REINFORCES that lesson instead of inserting a duplicate). 0.62 collapses punctuation/wording
+# variants of the same insight while leaving genuinely distinct lessons apart (validated on the live set).
+LESSON_DEDUP_THRESHOLD = float(os.environ.get("LESSON_DEDUP_THRESHOLD", "0.62"))
 
 
 async def _coverage_score(text: str) -> int | None:
@@ -165,7 +172,7 @@ async def persist_reflection(state, out, valid_ids, *, run_id: int | None = None
                        into future deliberation via recall_lessons.
     """
     vids = set(valid_ids)
-    counts = {"retired": 0, "reprioritized": 0, "advanced": 0, "lessons": 0}
+    counts = {"retired": 0, "reprioritized": 0, "advanced": 0, "lessons": 0, "reinforced": 0}
     async with state.pool.acquire() as conn, conn.transaction():
         for v in out.verdicts:
             if v.claim_id not in vids:
@@ -185,15 +192,35 @@ async def persist_reflection(state, out, valid_ids, *, run_id: int | None = None
                 counts["reprioritized"] += 1
             elif v.assessment == "advance":
                 counts["advanced"] += 1
+
+    # Lessons — DEDUP ON RE-DERIVATION. Reflection re-emits the same ~30 insights; a blind INSERT piled
+    # up ~40% duplicates that crowded the recall window and a probationary lesson could NEVER graduate
+    # (it bypasses the Curator/Router that records lesson_applications). Now a near-duplicate REINFORCES
+    # the existing lesson with a synthetic supportive application — so re-derivation becomes promotion
+    # pressure (reconcile_lessons promotes at >=5) instead of table spam — and a genuinely new lesson is
+    # inserted probationary. Each insert auto-commits (no surrounding txn) so intra-run dupes also collapse.
+    lessons = LessonsClient(pool=state.pool)
+    async with state.pool.acquire() as conn:
         for les in out.lessons:
-            if not les.lesson.strip():
+            text = les.lesson.strip()
+            if not text:
+                continue
+            dup_id = await lessons.find_near_duplicate(
+                "ariadne.deliberate", text[:2000], threshold=LESSON_DEDUP_THRESHOLD
+            )
+            if dup_id is not None:
+                # Re-derived. Credit the original (promotion pressure) when we have a run to credit;
+                # either way DON'T insert the duplicate. A missing run_id degrades to plain dedup.
+                if run_id is not None:
+                    await lessons.credit_recurrence(dup_id, run_id)
+                    counts["reinforced"] += 1
                 continue
             await conn.execute(
                 "INSERT INTO lessons (applies_to_invocation, applies_when, lesson_text, rationale, "
                 "derived_from_run_id, derived_via, status, confidence) "
                 "VALUES ('ariadne.deliberate', $1, $2, $3, $4, 'reflection', 'probationary', 0.40)",
                 json.dumps({"when": les.applies_when} if les.applies_when else {}),
-                les.lesson[:2000],
+                text[:2000],
                 (les.rationale or "")[:2000],
                 run_id,
             )

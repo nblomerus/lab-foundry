@@ -146,10 +146,17 @@ async def recall_lessons(pool, *, limit: int = 10) -> str:
         return ""
     try:
         rows = await pool.fetch(
-            "SELECT lesson_text, applies_when, status FROM lessons "
-            "WHERE applies_to_invocation IN ('ariadne.deliberate', 'ariadne.reflect') "
-            "AND status IN ('active', 'probationary') "
-            "ORDER BY (status = 'active') DESC, confidence DESC LIMIT $1",
+            "SELECT l.lesson_text, l.applies_when, l.status "
+            "FROM lessons l LEFT JOIN LATERAL ("
+            "  SELECT count(*) AS supp, max(created_at) AS last_app FROM lesson_applications la "
+            "  WHERE la.lesson_id = l.id AND la.outcome = 'supportive'"
+            ") s ON true "
+            "WHERE l.applies_to_invocation IN ('ariadne.deliberate', 'ariadne.reflect') "
+            "AND l.status IN ('active', 'probationary') "
+            # active first, then most- / most-recently-reinforced, then confidence — so promoted and
+            # re-derived lessons win the limited recall window over one-off probationary noise.
+            "ORDER BY (l.status = 'active') DESC, COALESCE(s.supp, 0) DESC, "
+            "s.last_app DESC NULLS LAST, l.confidence DESC LIMIT $1",
             limit,
         )
     except Exception:  # noqa: BLE001 — lessons are best-effort context
