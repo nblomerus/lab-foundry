@@ -28,6 +28,19 @@ async def persist_plan(state, out, valid_ids, *, run_id: int | None = None) -> d
         for p in out.plans:
             if p.claim_id not in vids:
                 continue
+            # Hand a thin_corpus-STUCK direction to the closure ladder instead of refilling it.
+            # If its last 3 completed tasks were all thin_corpus, more tasks just churn — AND
+            # each fresh planner task (no closure stage) resets the ladder's scout→retry→retire
+            # state machine, so the direction never gets retired. Skip it; the watchdog ladder
+            # needs the direction to DRAIN to fire its scout sweep and then declare the gap.
+            stuck = await conn.fetchval(
+                "SELECT count(*) = 3 AND bool_and(result->>'disposition' = 'thin_corpus') "
+                "FROM (SELECT result FROM tasks WHERE claim_id = $1 AND status = 'completed' "
+                "      AND result->>'disposition' IS NOT NULL ORDER BY id DESC LIMIT 3) t",
+                p.claim_id,
+            )
+            if stuck:
+                continue
             # Cap PENDING tasks per direction (not per invocation). MAX_TASKS_PER_DIRECTION
             # bounds one plan, but Ariadne re-emits planner.plan as she deliberates/reflects,
             # so without this a direction accumulates dozens of pending tasks across calls

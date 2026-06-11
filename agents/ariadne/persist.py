@@ -14,11 +14,31 @@ from __future__ import annotations
 import json
 import logging
 
+from agents.ariadne.grade import _toks
 from agents.ariadne.scoring import DIMENSIONS, composite, is_wellformed, priority_label
 from agents.mimir.acquire import AcquireRequest as MimirAcquireRequest
 from agents.mimir.acquire import request_acquire
+from library.corpus.tools import corpus_search
 
 log = logging.getLogger(__name__)
+
+
+async def _coverage_score(text: str) -> int | None:
+    """Real corpus coverage for a direction → a 1..5 evidence_availability grade, so the
+    LLM's GUESS at "is there evidence to ground & test this" is grounded in what the Library
+    can ACTUALLY support. Counts distinct on-topic certified docs (title shares ≥2 topic
+    tokens) the corpus returns for the direction. Returns None when it can't assess (too few
+    tokens / search error) — then the LLM's score stands. Best-effort: never blocks deliberation."""
+    topic = _toks(text)
+    if len(topic) < 2:
+        return None
+    try:
+        chunks = await corpus_search(text, k=12)
+    except Exception:  # noqa: BLE001
+        return None
+    docs = {c.document_id for c in chunks if len(topic & _toks(c.title or "")) >= 2}
+    n = len(docs)
+    return 1 if n == 0 else 2 if n <= 1 else 3 if n <= 3 else 4 if n <= 6 else 5
 
 
 async def request_evidence(state, requests) -> int:
@@ -77,14 +97,21 @@ async def persist_directions(state, out, *, run_id: int | None = None) -> dict:
             )
             n_dir += 1
             if is_wellformed(d.scores):
-                comp = composite(d.scores)
+                scores = {dim: getattr(d.scores, dim) for dim in DIMENSIONS}
+                # Ground evidence_availability in REAL corpus coverage — the more conservative
+                # of the LLM's guess and what the Library actually holds — so Ariadne stops
+                # picking niches with no literature (the root cause of the thin_corpus churn).
+                cov = await _coverage_score(f"{d.title} {d.statement}")
+                if cov is not None:
+                    scores["evidence_availability"] = min(scores["evidence_availability"], cov)
+                comp = composite(scores)
                 await conn.execute(
                     "INSERT INTO direction_scores "
                     "(claim_id, novelty, feasibility, evidence_availability, paper_potential, reviewer_interest, "
                     " technical_depth, differentiation, cost_efficiency, lab_alignment, composite, priority, rationale) "
                     "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
                     dir_id,
-                    *[getattr(d.scores, dim) for dim in DIMENSIONS],
+                    *[scores[dim] for dim in DIMENSIONS],
                     comp,
                     priority_label(comp),
                     d.scores.rationale,
