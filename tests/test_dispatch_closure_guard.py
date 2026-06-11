@@ -121,7 +121,7 @@ def _ladder_pool(latest, *, pending_acq=0, fulfilled_new=0, scout_at=None, topic
     rules = [
         ("c.id, c.statement", candidates),
         ("result->>'disposition' AS disp", latest),
-        ("status='pending' AND payload", pending_acq),
+        ("status='pending' AND emitted_at", pending_acq),  # the ladder's RECENT-pending-acquire wait
         ("'status' = 'fulfilled'", fulfilled_new),
         ("max(emitted_at) FROM events WHERE event_type='library.sweep_requested'", scout_at),
         ("DISTINCT payload->>'query'", topics or [{"q": "deep kernel GP"}, {"q": "spectral mixture kernel"}]),

@@ -179,6 +179,12 @@ UNCLOSED_EVENT_MIN = int(os.environ.get("CLOSURE_UNCLOSED_EVENT_MIN", "3"))
 # generous and env-tunable; the ladder is idempotent (one step per eligible tick).
 ACTIVE_CLAIM = ("proposed", "tested", "weakly_supported", "replicated")
 SCOUT_SETTLE_MIN = float(os.environ.get("CLOSURE_SCOUT_SETTLE_MIN", "20"))  # let a scout sweep ingest
+# The ladder waits for a direction's IN-FLIGHT acquire batch to resolve before advancing.
+# But acquires stuck deep in Mimir's backlog stay 'pending' for a long time (and mostly
+# resolve to rejected/already_have anyway), which would BLOCK the ladder forever. Only
+# wait on RECENT pending acquires; older ones are treated as not-in-flight so a genuinely
+# stuck direction can still progress to a scout sweep and retirement.
+CLOSURE_ACQUIRE_WAIT_MIN = float(os.environ.get("CLOSURE_ACQUIRE_WAIT_MIN", "10"))
 CLOSURE_LOOKBACK_DAYS = int(os.environ.get("CLOSURE_LOOKBACK_DAYS", "3"))
 
 
@@ -868,11 +874,13 @@ class Dispatcher:
                 continue
             if latest["disp"] != "thin_corpus":
                 continue  # grounded/other → the detector surfaces it; the ladder skips
-            # An acquire still being adjudicated? Wait for the batch to resolve.
+            # A RECENT acquire still being adjudicated? Wait for the batch to resolve. Stale
+            # pending acquires (stuck in Mimir's backlog) don't count — else they block forever.
             if await conn.fetchval(
                 "SELECT count(*) FROM events WHERE event_type='acquire.requested' AND status='pending' "
-                "AND payload->>'claim_id' = $1",
+                "AND emitted_at > now() - make_interval(mins => $2::int) AND payload->>'claim_id' = $1",
                 str(cid),
+                int(CLOSURE_ACQUIRE_WAIT_MIN),
             ):
                 continue
             since = latest["completed_at"]
