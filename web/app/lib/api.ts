@@ -649,10 +649,37 @@ export interface QmExperiments {
   queued: number;
   experiments: QmExperiment[];
 }
+export interface QmExperimentDetail {
+  id: number;
+  kind: string;
+  status: string;
+  claim_id?: number | null;
+  hypothesis?: string | null;
+  dataset_plan?: string | null;
+  code?: string | null;
+  result?: unknown;
+  error?: string | null;
+  interpretation?: string | null;
+  researcher_notes?: string | null;
+  provenance?: Record<string, unknown>;
+  dataset_refs?: unknown;
+  resource_usage?: Record<string, unknown>;
+  requires_gpu?: boolean | null;
+  gpu_mem_mb?: number | null;
+  wall_clock_budget_s?: number | null;
+  mem_budget_mb?: number | null;
+  kill_reason?: string | null;
+  worker?: string | null;
+  ingested_doc_id?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_s?: number | null;
+}
 
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
   qmExperiments: (limit = 50) => jget<QmExperiments>(`/quartermaster/experiments?limit=${limit}`),
+  qmExperimentDetail: (id: number) => jget<QmExperimentDetail>(`/quartermaster/experiments/${id}`),
   qmKillExperiment: (id: number) => jpost<{ killed: number }>(`/quartermaster/experiments/${id}/kill`, {}),
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
   recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),

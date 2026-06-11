@@ -4,16 +4,16 @@
 // the intake Gate. Lifted from the original SVG Floorplan (retired in this
 // upgrade) so the React Flow rebuild reuses the exact, working /knowledge/* panels.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
-  Boxes, CheckCircle2, Clock, Compass, Database, Download, FileCode, FileText,
+  Boxes, CheckCircle2, ChevronRight, Clock, Compass, Database, Download, FileCode, FileText,
   Github, Globe, Network, Search, ShieldAlert, ShieldCheck,
 } from "lucide-react";
 import {
   api, type AcquireRequestRow, type AriadneOverview, type CorpusHit, type DebugCosts,
   type GatePanel, type HostStats, type KnowledgeStats, type MimirPanel, type PlannerPanel,
-  type QmExperiment, type QmExperiments, type QueueHealth, type RecentIngest,
+  type QmExperiment, type QmExperimentDetail, type QmExperiments, type QueueHealth, type RecentIngest,
   type ResearcherOverview, type ScoutPanel,
 } from "../../lib/api";
 import type { LabFoundryEvent, Snapshot } from "../../lib/types";
@@ -1247,17 +1247,96 @@ const EXP_TONE: Record<string, string> = {
   killed: "text-rose-600",
 };
 
+function DetailBlock({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function ExperimentDetailView({ d }: { d: QmExperimentDetail }) {
+  const prov = d.provenance ?? {};
+  const pre = "mt-0.5 max-h-44 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-[10px] leading-snug text-slate-100 whitespace-pre-wrap break-words";
+  return (
+    <div className="mt-1.5 space-y-2 border-t border-slate-200 pt-1.5">
+      {d.dataset_plan && (
+        <DetailBlock label="Dataset — how it was assembled">
+          <p className="mt-0.5 text-[11px] text-slate-600">{d.dataset_plan}</p>
+        </DetailBlock>
+      )}
+      {d.researcher_notes && (
+        <DetailBlock label="Researcher note">
+          <p className="mt-0.5 whitespace-pre-wrap text-[11px] text-slate-700">{d.researcher_notes}</p>
+        </DetailBlock>
+      )}
+      {d.interpretation && (
+        <DetailBlock label="Interpretation">
+          <p className="mt-0.5 whitespace-pre-wrap text-[11px] text-slate-700">{d.interpretation}</p>
+        </DetailBlock>
+      )}
+      {d.result != null && (
+        <DetailBlock label="Result">
+          <pre className={pre}>{JSON.stringify(d.result, null, 2)}</pre>
+        </DetailBlock>
+      )}
+      {d.error && (
+        <DetailBlock label="Error">
+          <pre className={cx(pre, "text-rose-200")}>{d.error}</pre>
+        </DetailBlock>
+      )}
+      {d.code && (
+        <DetailBlock label="Code that ran">
+          <pre className={pre}>{d.code}</pre>
+        </DetailBlock>
+      )}
+      <DetailBlock label="Provenance (reproducibility)">
+        <div className="mt-0.5 space-y-0.5 font-mono text-[10px] text-slate-500">
+          <div>image: {String(prov.image ?? "—")}</div>
+          {prov.image_digest != null && <div className="break-all">digest: {String(prov.image_digest)}</div>}
+          <div>seed: {String(prov.seed ?? "—")} · code_hash: {String(prov.code_hash ?? "—")}</div>
+          {d.duration_s != null && <div>duration: {d.duration_s}s {d.worker ? `· ${d.worker}` : ""}</div>}
+        </div>
+      </DetailBlock>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px]">
+        {d.ingested_doc_id != null && <span className="text-emerald-600">→ Library note #{d.ingested_doc_id}</span>}
+        {Array.isArray(d.dataset_refs) && d.dataset_refs.length > 0 && (
+          <span className="text-emerald-600">→ dataset card captured</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ExperimentRow({ e, onKill }: { e: QmExperiment; onKill: (id: number) => void }) {
   const live = e.status === "running" || e.status === "queued";
   const budget = e.wall_clock_budget_s != null ? `${Math.round(e.wall_clock_budget_s / 60)}m` : null;
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<QmExperimentDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && detail == null && !loading) {
+      setLoading(true);
+      api.qmExperimentDetail(e.id)
+        .then(setDetail)
+        .catch(() => setDetail(null))
+        .finally(() => setLoading(false));
+    }
+  };
+
   return (
     <li className="rounded-md border border-slate-100 bg-slate-50/60 px-2 py-1.5">
       <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="flex items-center gap-1.5 font-mono">
+        <button onClick={toggle} className="flex items-center gap-1.5 font-mono hover:opacity-70" title="Show what ran">
+          <ChevronRight className={cx("h-3 w-3 text-slate-400 transition-transform", open && "rotate-90")} />
           <span className={cx("font-semibold uppercase", EXP_TONE[e.status] ?? "text-slate-500")}>{e.status}</span>
           <span className="text-slate-400">#{e.id}</span>
           {e.requires_gpu && <span className="rounded bg-violet-100 px-1 text-[10px] font-semibold text-violet-700">GPU</span>}
-        </span>
+        </button>
         <span className="flex items-center gap-2 text-slate-400">
           {budget && <span>{budget}</span>}
           {e.iterations != null && <span>{e.iterations} it</span>}
@@ -1268,10 +1347,10 @@ function ExperimentRow({ e, onKill }: { e: QmExperiment; onKill: (id: number) =>
           )}
         </span>
       </div>
-      {e.hypothesis && <p className="mt-0.5 line-clamp-2 text-[11px] text-slate-600">{e.hypothesis}</p>}
+      {e.hypothesis && <p className="mt-0.5 line-clamp-2 cursor-pointer text-[11px] text-slate-600" onClick={toggle}>{e.hypothesis}</p>}
       {e.kill_reason && <p className="mt-0.5 text-[10px] text-rose-500">killed: {e.kill_reason}</p>}
-      {!e.kill_reason && e.error && <p className="mt-0.5 line-clamp-1 text-[10px] text-rose-500">{e.error}</p>}
-      {e.ingested_doc_id != null && <p className="mt-0.5 text-[10px] text-emerald-600">→ Library doc #{e.ingested_doc_id}</p>}
+      {!e.kill_reason && e.error && !open && <p className="mt-0.5 line-clamp-1 text-[10px] text-rose-500">{e.error}</p>}
+      {open && (loading ? <p className="mt-1 text-[10px] text-slate-400">Loading…</p> : detail ? <ExperimentDetailView d={detail} /> : <p className="mt-1 text-[10px] text-slate-400">Unavailable.</p>)}
     </li>
   );
 }
