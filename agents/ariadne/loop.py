@@ -322,16 +322,20 @@ async def run_shadow(
     except Exception:  # noqa: BLE001 — experiment context is best-effort
         pass
 
-    # Paper-shaped FINDINGS the lab has already established on the active directions — the terminal
-    # conclusions (supported/refuted + so-what), not raw runs. These also persist in the Library
-    # (lab_finding docs), so they survive a re-frame; surfacing them here gives immediate context.
+    # Paper-shaped FINDINGS the lab has ESTABLISHED — its terminal conclusions (supported/refuted +
+    # so-what). Read GLOBALLY, not per-active-claim: a finding survives a re-frame but its direction
+    # bond goes inactive, so a per-claim read would show nothing right after she re-frames. This is the
+    # durable memory channel — round N+1 builds BEYOND what the lab concluded instead of re-rolling.
     try:
-        findings = await state.get_recent_findings_for_claims([c.id for c in claims], limit=8)
+        findings = await state.get_recent_findings(limit=8)
         if findings:
-            agenda += "\n\n## Findings established so far (first-party — what the lab CONCLUDED)\n" + "\n".join(
-                f"- [{f['supported']} @{float(f['confidence'] or 0):.2f}] {f['headline']} "
-                f"— so what: {(f.get('so_what') or '')[:160]}"
-                for f in findings
+            agenda += (
+                "\n\n## Findings the lab has ESTABLISHED (first-party — build BEYOND these, do not repeat)\n"
+                + "\n".join(
+                    f"- [{f['supported']} @{float(f['confidence'] or 0):.2f}] {f['headline']} "
+                    f"— so what: {(f.get('so_what') or '')[:160]}"
+                    for f in findings
+                )
             )
     except Exception:  # noqa: BLE001 — findings context is best-effort
         pass

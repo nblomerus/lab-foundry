@@ -1256,6 +1256,24 @@ class PostgresClient:
             )
             return [dict(r) for r in rows]
 
+    async def get_recent_findings(self, limit: int = 8) -> list[dict]:
+        """The lab's most recent paper-shaped findings across ALL directions — NOT scoped to the
+        currently-active claim ids. A finding survives a re-frame (the supersede invalidates
+        'mission'/'direction' claims, never 'finding'), but its direction bond goes inactive, so the
+        per-claim read returns nothing after a re-frame. This global read is the durable channel:
+        every deliberation sees what the lab has CONCLUDED so it builds beyond it instead of re-rolling."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT direction_claim_id, headline, claim_text, supported, confidence, so_what, n_experiments
+                FROM research_findings
+                ORDER BY created_at DESC, id DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
     # ── independent novelty/impact adjudication (agents/novelty) ─────────────────────
     async def get_unadjudicated_directions(self, limit: int = 20) -> list[dict]:
         """Scored, active directions that have NO independent adjudication yet — the work the

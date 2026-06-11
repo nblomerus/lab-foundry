@@ -405,6 +405,9 @@ def _wire_run_shadow(monkeypatch, *, claims=None, claims_raises=False):
         state.get_active_claims.side_effect = RuntimeError("claims read failed")
     else:
         state.get_active_claims.return_value = claims if claims is not None else []
+    # First-party experiment/finding context (best-effort blocks) — empty by default.
+    state.get_recent_experiment_notes_for_claims.return_value = []
+    state.get_recent_findings.return_value = []
     return state
 
 
@@ -429,6 +432,30 @@ async def test_run_shadow_injects_focus(monkeypatch):
     await loop.run_shadow(state, focus="latency tail of ts_rank")
     user = calls[0][0][1]["content"]
     assert "FOCUS THIS DELIBERATION ON: latency tail of ts_rank" in user
+
+
+@pytest.mark.asyncio
+async def test_run_shadow_surfaces_established_findings_globally(monkeypatch):
+    # A finding survives a re-frame (read globally, not per-active-claim) → it reaches the next
+    # deliberation so she builds beyond it instead of re-rolling.
+    calls = patch_chain(monkeypatch, loop, content=_valid_json())
+    state = _wire_run_shadow(monkeypatch, claims=[])
+    state.get_recent_findings.return_value = [
+        {
+            "direction_claim_id": 52,
+            "headline": "Quantized GPs match XGBoost RMSE at 8-bit on tabular regression.",
+            "claim_text": "...",
+            "supported": "supported",
+            "confidence": 0.7,
+            "so_what": "A data scientist can ship a calibrated GP instead of XGBoost.",
+            "n_experiments": 4,
+        }
+    ]
+    await loop.run_shadow(state)
+    user = calls[0][0][1]["content"]
+    assert "Findings the lab has ESTABLISHED" in user
+    assert "Quantized GPs match XGBoost RMSE at 8-bit" in user
+    assert "[supported @0.70]" in user
 
 
 @pytest.mark.asyncio
