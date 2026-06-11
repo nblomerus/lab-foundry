@@ -174,9 +174,42 @@ async def test_refine_disposition_no_escalation_when_too_few_rows():
 @pytest.mark.asyncio
 async def test_refine_disposition_no_escalation_when_no_history():
     # no claim-attributed replies yet → empty ledger → stays thin_corpus
-    pool = ScriptedPool(rules=[("acquire.fulfilled", [])])
+    pool = ScriptedPool(rules=[("library.sweep_requested", 1), ("acquire.fulfilled", [])])
     state = make_state(pool=pool)
     assert await refine_disposition(state, 7, "thin_corpus") == "thin_corpus"
+
+
+# Rule order matters: the saturation 'stuck' query embeds library.sweep_requested in a subquery, so
+# its disposition substring must be matched BEFORE the bare sweep rule (ScriptedConn = first match wins).
+@pytest.mark.asyncio
+async def test_refine_disposition_escalates_on_saturation_when_no_experiments():
+    # Scouted + acquires keep SUCCEEDING (not already_have) but >= N re-looks still thin AND no
+    # experiments settling it → declare the gap. This is the spin-breaker for claim 61's pattern.
+    pool = ScriptedPool(
+        rules=[
+            ("disposition' = 'thin_corpus'", 4),  # stuck re-looks after the sweep (>= RELOOKS)
+            ("library.sweep_requested", 1),  # a sweep ran
+            ("acquire.fulfilled", [{"status": "fulfilled"}, {"status": "fulfilled"}]),  # path-1 (already_have) fails
+            ("FROM experiment_runs", 0),  # no experiments
+        ]
+    )
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 61, "thin_corpus") == "corpus_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_saturation_deferred_when_experiments_running():
+    # Same saturation, but experiments ARE completing → leave it to the experiment lane (stay thin).
+    pool = ScriptedPool(
+        rules=[
+            ("disposition' = 'thin_corpus'", 4),
+            ("library.sweep_requested", 1),
+            ("acquire.fulfilled", [{"status": "fulfilled"}, {"status": "fulfilled"}]),
+            ("FROM experiment_runs", 3),  # experiments running → don't retire
+        ]
+    )
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 61, "thin_corpus") == "thin_corpus"
 
 
 # ════════════════════════════════════════════════════════════════════════════════

@@ -47,6 +47,9 @@ _MAX_ROUND_DELTA = 0.20  # cap how far ONE research round can move a direction
 # especially while most rounds are thin_corpus (an over-confidence we observed: a 'proposed'
 # direction at 1.0 with no experiment backing).
 _RESEARCH_CONFIDENCE_CEILING = float(os.environ.get("RESEARCH_CONFIDENCE_CEILING", "0.85"))
+# After a targeted sweep, how many MORE thin_corpus re-looks (with the corpus still growing) before we
+# call it a genuine gap — so a direction can't spin thin_corpus forever while papers keep pouring in.
+THIN_CORPUS_SATURATION_RELOOKS = int(os.environ.get("THIN_CORPUS_SATURATION_RELOOKS", "4"))
 
 DISPOSITIONS = ("supported", "contradicted", "corpus_exhausted", "thin_corpus", "needs_experiment", "inconclusive")
 # Priority for the headline steering signal: decisive verdicts first, then the actionable blockers.
@@ -66,29 +69,50 @@ def disposition(f: GroundedFinding) -> str:
 
 
 async def refine_disposition(state, claim_id: int | None, base: str) -> str:
-    """Escalate thin_corpus → corpus_exhausted ONLY once acquiring AND a targeted scout sweep have
-    both come up empty for this direction — that's a genuine research gap. A pile of 'already_have'
-    acquire replies is NOT a gap on its own: acquire only checks the known candidate set, it does
-    not SCOUT the web/arXiv/GitHub for new material. So we hold at thin_corpus (the closure ladder
-    fires one targeted scout sweep) and only escalate once that scout has run and the corpus is
-    still thin. Returns the base disposition unchanged if there's no such history yet."""
+    """Escalate thin_corpus → corpus_exhausted once a targeted scout sweep has run AND fetching more
+    has stopped moving the verdict — a genuine research gap. Two ways fetching "stops helping":
+      (1) acquire candidates all come back 'already_have' (the known set is exhausted), or
+      (2) SATURATION — the sweep ran, the corpus kept GROWING (acquires keep succeeding), yet the last
+          N re-looks still emit thin_corpus. Without (2) the loop spins forever, because Mimir always
+          admits a (often tangential) new paper, so 'already_have' never happens (observed live: a
+          direction stuck thin_corpus 100+ times while papers poured in).
+    Saturation only declares the gap when EXPERIMENTS aren't settling it either (no completed runs for
+    the claim) — an experimentable direction is left for the experiment lane, not retired. Returns the
+    base disposition unchanged if there's no such history yet."""
     if base != "thin_corpus" or claim_id is None:
         return base
+    scouted = await state.pool.fetchval(
+        "SELECT 1 FROM events WHERE event_type = 'library.sweep_requested' AND (payload->>'claim_id')::int = $1 LIMIT 1",
+        claim_id,
+    )
+    if not scouted:  # never escalate before a targeted sweep has had its chance
+        return base
+    # (1) Known candidates exhausted (acquire keeps replying already_have).
     rows = await state.pool.fetch(
         "SELECT payload->>'status' AS status FROM events "
         "WHERE event_type = 'acquire.fulfilled' AND payload->>'requester' = 'researcher' "
         "AND (payload->>'claim_id')::int = $1 AND emitted_at > now() - interval '2 days'",
         claim_id,
     )
-    if not (len(rows) >= 2 and all(r["status"] == "already_have" for r in rows)):
-        return base
-    # acquire is exhausted — but that only means the KNOWN candidates are all already in the corpus.
-    # NOT a gap until a targeted scout sweep has also run for this direction and turned up nothing.
-    scouted = await state.pool.fetchval(
-        "SELECT 1 FROM events WHERE event_type = 'library.sweep_requested' AND (payload->>'claim_id')::int = $1 LIMIT 1",
+    if len(rows) >= 2 and all(r["status"] == "already_have" for r in rows):
+        return "corpus_exhausted"
+    # (2) Saturation: enough post-sweep re-looks still thin, and experiments aren't settling it.
+    stuck = await state.pool.fetchval(
+        "SELECT count(*) FROM tasks t WHERE t.claim_id = $1 AND t.department = 'research' "
+        "AND t.status = 'completed' AND t.result->>'disposition' = 'thin_corpus' "
+        "AND t.completed_at > (SELECT max(emitted_at) FROM events "
+        "WHERE event_type = 'library.sweep_requested' AND (payload->>'claim_id')::int = $1)",
         claim_id,
     )
-    return "corpus_exhausted" if scouted else base
+    if (stuck or 0) >= THIN_CORPUS_SATURATION_RELOOKS:
+        experimented = await state.pool.fetchval(
+            "SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id "
+            "WHERE t.claim_id = $1 AND e.status = 'completed'",
+            claim_id,
+        )
+        if not experimented:
+            return "corpus_exhausted"
+    return base
 
 
 class FindingFeedback(BaseModel):

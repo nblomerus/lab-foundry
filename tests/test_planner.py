@@ -302,12 +302,26 @@ async def test_persist_plan_only_fills_remaining_pending_room():
 async def test_persist_plan_skips_thin_corpus_stuck_direction():
     # Last 3 completed tasks all thin_corpus -> the planner hands the direction to the
     # closure ladder (no new tasks) instead of refilling it and resetting the ladder.
-    pool = ScriptedPool(rules=[("status = 'completed'", [{"stuck": True}])])
-    state = make_state(pool)
+    pool = ScriptedPool()
+    state = make_state(pool, direction_is_thin_stuck=True)
     out = PlanOutput(plans=[_plan(10, tasks=[_task(10), _task(10)])], notes="")
     counts = await persist_plan(state, out, [10])
     assert counts["tasks"] == 0
     assert _inserts(pool) == []
+
+
+async def test_queue_empty_v2_skips_thin_corpus_stuck_direction(monkeypatch):
+    # The v2 path bypasses persist_plan — confirm its own INSERT loop also gates on the stuck-check.
+    monkeypatch.setenv("PLANNER_LOOP", "v2")
+    tasks = [_planned_task(1), _planned_task(2)]
+    monkeypatch.setattr(loop_mod, "run_planner_loop", AsyncMock(return_value=(tasks, 42, "s", 0.8)))
+    pool = ScriptedPool()
+    dispatcher = AsyncMock()
+    dispatcher.pool = pool
+    dispatcher.state.direction_is_thin_stuck = AsyncMock(return_value=True)  # both directions stuck
+    res = await handle_queue_empty({"id": 1, "payload": {"department": "research"}}, dispatcher)
+    assert res["tasks_created"] == 0
+    assert [c for c in pool.calls if c[0] == "execute" and "INSERT INTO tasks" in c[1]] == []
 
 
 async def test_persist_plan_priority_default_for_unknown_label():
@@ -434,6 +448,7 @@ async def test_queue_empty_v2_with_tasks(monkeypatch):
     pool = ScriptedPool()
     dispatcher = AsyncMock()
     dispatcher.pool = pool
+    dispatcher.state.direction_is_thin_stuck = AsyncMock(return_value=False)  # not stuck → tasks land
     event = {"id": 99, "payload": {"department": "research"}}
     res = await handle_queue_empty(event, dispatcher)
 

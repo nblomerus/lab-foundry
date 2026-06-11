@@ -1140,6 +1140,25 @@ class PostgresClient:
                 or 0
             )
 
+    async def direction_is_thin_stuck(self, claim_id: int | None, *, n: int = 3) -> bool:
+        """True if a direction's last `n` completed research tasks were ALL thin_corpus — it's stuck.
+        The planner reads this to STOP refilling it (more tasks just churn + flood acquires, and each
+        fresh planner task resets the closure ladder's scout→retry→retire state, so it never hands
+        off). Drained, the watchdog ladder fires its sweep and declares the gap, or the experiment
+        lane settles it. False on a None claim_id / too little history."""
+        if claim_id is None:
+            return False
+        async with self.pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    "SELECT count(*) = $2 AND bool_and(result->>'disposition' = 'thin_corpus') "
+                    "FROM (SELECT result FROM tasks WHERE claim_id = $1 AND status = 'completed' "
+                    "      AND result->>'disposition' IS NOT NULL ORDER BY id DESC LIMIT $2) t",
+                    claim_id,
+                    n,
+                )
+            )
+
     async def latest_finding_n_for_claim(self, claim_id: int) -> int | None:
         """The evidence size (n_experiments) of the most recent finding for a direction, or None —
         so the synthesizer only re-runs when materially more experiments have accumulated."""

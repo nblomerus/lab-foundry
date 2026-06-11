@@ -177,8 +177,17 @@ async def handle_queue_empty(event: dict, dispatcher) -> dict | None:
                 "critique_confidence": confidence,
             }
 
+        created = stuck_skipped = 0
+        stuck_cache: dict[int, bool] = {}
         async with dispatcher.pool.acquire() as conn, conn.transaction():
             for t in tasks:
+                # Don't refill a thin_corpus-STUCK direction — let the closure ladder / experiment
+                # lane handle it (the v2 path bypasses persist_plan, so apply the same gate here).
+                if t.claim_id not in stuck_cache:
+                    stuck_cache[t.claim_id] = await dispatcher.state.direction_is_thin_stuck(t.claim_id)
+                if stuck_cache[t.claim_id]:
+                    stuck_skipped += 1
+                    continue
                 await conn.execute(
                     """
                         INSERT INTO tasks (
@@ -193,9 +202,12 @@ async def handle_queue_empty(event: dict, dispatcher) -> dict | None:
                     json.dumps({"query": t.query, "sources": t.sources}),
                     t.priority,
                 )
+                created += 1
 
+        if stuck_skipped:
+            log.info("Planner v2: skipped %d task(s) for thin_corpus-stuck direction(s)", stuck_skipped)
         return {
-            "tasks_created": len(tasks),
+            "tasks_created": created,
             "run_id": run_id,
             "reasoning": summary,
             "critique_confidence": confidence,
