@@ -39,6 +39,13 @@ REFLECT_MAX_AGE_S = float(os.environ.get("ARIADNE_REFLECT_MAX_AGE_S", str(6 * 36
 # Hands-off autonomy: she approves her own top directions (decided_by='auto') up to the budget.
 AUTO_APPROVE = os.environ.get("ARIADNE_AUTO_APPROVE", "").lower() in {"on", "1", "true"}
 AUTO_APPROVE_MIN = float(os.environ.get("ARIADNE_AUTO_APPROVE_MIN_COMPOSITE", "3.5"))
+# Per-dimension floors a direction must ALSO clear — composite alone let a high novelty
+# score carry an inconsequential direction through. impact = it changes a real decision;
+# novelty = it's not a confirmation; paper_potential = it's a publishable contribution.
+# NULL impact (legacy/pre-impact rows) fails `>=` → won't auto-approve until re-deliberated.
+GATE_IMPACT_MIN = int(os.environ.get("ARIADNE_GATE_IMPACT_MIN", "3"))
+GATE_NOVELTY_MIN = int(os.environ.get("ARIADNE_GATE_NOVELTY_MIN", "3"))
+GATE_PAPER_MIN = int(os.environ.get("ARIADNE_GATE_PAPER_MIN", "3"))
 GATE_BUDGET = int(os.environ.get("ARIADNE_GATE_BUDGET", "3"))
 
 _ACTIVE = "('proposed','tested','weakly_supported','replicated')"
@@ -60,10 +67,14 @@ async def _auto_approve(pool) -> int:
             f"SELECT c.id FROM claims c JOIN direction_scores ds ON ds.claim_id = c.id "
             f"LEFT JOIN direction_gate dg ON dg.claim_id = c.id "
             f"WHERE c.claim_kind = 'direction' AND c.status IN {_ACTIVE} "
-            f"AND (dg.status IS NULL OR dg.status = 'pending') AND ds.composite >= $1 "
-            f"ORDER BY ds.composite DESC LIMIT $2",
+            f"AND (dg.status IS NULL OR dg.status = 'pending') "
+            f"AND ds.composite >= $1 AND ds.impact >= $3 AND ds.novelty >= $4 AND ds.paper_potential >= $5 "
+            f"ORDER BY ds.impact DESC, ds.composite DESC LIMIT $2",
             AUTO_APPROVE_MIN,
             slots,
+            GATE_IMPACT_MIN,
+            GATE_NOVELTY_MIN,
+            GATE_PAPER_MIN,
         )
         for r in rows:
             await conn.execute(

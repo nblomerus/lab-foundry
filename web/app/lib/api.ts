@@ -314,7 +314,7 @@ export interface TraceJourneysResponse {
   total: number;
 }
 export interface AriadneScores {
-  novelty: number; feasibility: number; evidence_availability: number; paper_potential: number;
+  novelty: number; impact: number; feasibility: number; evidence_availability: number; paper_potential: number;
   reviewer_interest: number; technical_depth: number; differentiation: number;
   cost_efficiency: number; lab_alignment: number;
 }

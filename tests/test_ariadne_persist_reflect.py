@@ -23,6 +23,7 @@ from tests._helpers import ScriptedPool, make_state, patch_chain
 # ════════════════════════════════════════════════════════════════════════════════
 _SCORES = {
     "novelty": 4,
+    "impact": 4,
     "feasibility": 3,
     "evidence_availability": 4,
     "paper_potential": 3,
@@ -124,7 +125,7 @@ async def test_persist_directions_happy_path_full_tree():
     sqls = " || ".join(c[1] for c in pool.calls)
     assert "INSERT INTO direction_scores" in sqls
     assert "INSERT INTO claim_goals" in sqls
-    # composite 3.65 → priority "medium" persisted into direction_scores
+    # composite 3.75 → priority "medium" persisted into direction_scores
     score_args = next(c[2] for c in pool.calls if "INSERT INTO direction_scores" in c[1])
     assert "medium" in score_args
 

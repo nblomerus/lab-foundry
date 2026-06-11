@@ -19,6 +19,7 @@ from tests._helpers import FakeNeoDriver, ScriptedPool, make_state, patch_chain
 # ── canned AriadneOutput the parser expects ────────────────────────────────────
 _VALID_SCORES = {
     "novelty": 4,
+    "impact": 4,
     "feasibility": 3,
     "evidence_availability": 4,
     "paper_potential": 3,
@@ -36,6 +37,7 @@ _VALID_OUTPUT = {
         {
             "title": "Trust-weighted RRF",
             "statement": "Attack stale retrieval via trust-decayed RRF.",
+            "stakes": "RAG engineers decide whether to decay retrieval trust over time.",
             "novelty_rationale": "No prior work decays trust over time.",
             "grounded_in": ["A Survey of Hybrid Retrieval"],
             "scores": _VALID_SCORES,
@@ -394,7 +396,11 @@ def _wire_run_shadow(monkeypatch, *, claims=None, claims_raises=False):
         ]
     )
     state = make_state(pool=pool)
-    state.get_company_state.return_value = SimpleNamespace(problem_statement="Make retrieval trustworthy.")
+    state.get_company_state.return_value = SimpleNamespace(
+        problem_statement="Make retrieval trustworthy.",
+        stance="Demand a real decision changes.",
+        success_criterion="A reproducible, decision-changing finding.",
+    )
     if claims_raises:
         state.get_active_claims.side_effect = RuntimeError("claims read failed")
     else:

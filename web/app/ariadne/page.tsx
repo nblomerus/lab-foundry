@@ -19,6 +19,7 @@ const GATE_TONE: Record<string, Tone> = { approved: "green", held: "amber", reje
 const MODE_TONE: Record<string, Tone> = { active: "green", advisory: "blue", shadow: "amber", off: "default" };
 
 const DIMS: { key: keyof AriadneScores; label: string }[] = [
+  { key: "impact", label: "impact" },
   { key: "novelty", label: "novelty" },
   { key: "differentiation", label: "diff" },
   { key: "paper_potential", label: "paper" },

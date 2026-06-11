@@ -105,11 +105,14 @@ async def persist_directions(state, out, *, run_id: int | None = None) -> dict:
                 if cov is not None:
                     scores["evidence_availability"] = min(scores["evidence_availability"], cov)
                 comp = composite(scores)
+                # Build the column list + placeholders FROM DIMENSIONS so adding a
+                # dimension (e.g. impact) can never desync the columns from the values.
+                _cols = ", ".join(DIMENSIONS)
+                _vals = ", ".join(f"${i + 2}" for i in range(len(DIMENSIONS)))
+                _n = len(DIMENSIONS)
                 await conn.execute(
-                    "INSERT INTO direction_scores "
-                    "(claim_id, novelty, feasibility, evidence_availability, paper_potential, reviewer_interest, "
-                    " technical_depth, differentiation, cost_efficiency, lab_alignment, composite, priority, rationale) "
-                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                    f"INSERT INTO direction_scores (claim_id, {_cols}, composite, priority, rationale) "
+                    f"VALUES ($1, {_vals}, ${_n + 2}, ${_n + 3}, ${_n + 4})",
                     dir_id,
                     *[scores[dim] for dim in DIMENSIONS],
                     comp,

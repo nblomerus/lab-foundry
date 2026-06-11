@@ -87,7 +87,9 @@ class GradeReport(BaseModel):
 
 async def grade(out: AriadneOutput) -> GradeReport:
     dirs = out.directions
-    schema_valid = len(dirs) >= 3 and all(d.novelty_rationale.strip() and d.claim_goals for d in dirs)
+    schema_valid = len(dirs) >= 3 and all(
+        d.novelty_rationale.strip() and d.stakes.strip() and d.claim_goals for d in dirs
+    )
 
     goals = [g for d in dirs for g in d.claim_goals]
     cg_wf = (sum(1 for g in goals if g.expectation.strip() and g.kill_condition.strip()) / len(goals)) if goals else 0.0

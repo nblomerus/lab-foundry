@@ -30,6 +30,14 @@ class DecisionScores(BaseModel):
     novelty: int = Field(
         ..., description="how new vs the FIELD MODEL + prior art (EMERGING/under-served → high, SATURATED → low)"
     )
+    impact: int = Field(
+        ...,
+        description="would a CLEAR, falsifiable answer CHANGE how practitioners build ML/AI systems? "
+        "5 = flips a real build/deploy decision many practitioners face (e.g. 'use 4-bit not 8-bit', "
+        "'GP not XGBoost when calibration matters') or quantifies a real cost/accuracy/latency tradeoff "
+        "people pay; 3 = informs a niche / one-team decision; 1 = true-but-inconsequential, changes no "
+        "decision. Score the DECISION VALUE of the answer, NOT its novelty or publishability.",
+    )
     feasibility: int = Field(..., description="can the lab realistically execute it")
     evidence_availability: int = Field(..., description="is there corpus evidence to ground & test it")
     paper_potential: int = Field(..., description="likelihood of a paper-worthy contribution")
@@ -50,6 +58,12 @@ class Direction(BaseModel):
 
     title: str
     statement: str = Field(..., description="the direction as a falsifiable research bet")
+    stakes: str = Field(
+        ...,
+        description="why this MATTERS: the real DECISION a clear answer changes, WHO acts on it (a named "
+        "practitioner / system-builder / the field resolving a tension), and what it saves or settles. "
+        "NOT 'X is important' — name a concrete actor AND a concrete decision. This is the paper's 'so what'.",
+    )
     novelty_rationale: str = Field(..., description="why it's novel, grounded in the prior art shown (name the gap)")
     grounded_in: list[str] = Field(
         default_factory=list,

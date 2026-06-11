@@ -59,13 +59,19 @@ LAB_CONSTRAINTS = os.environ.get("ARIADNE_LAB_CONSTRAINTS") or (
 )
 
 _SYSTEM = """You are Ariadne, the Principal Investigator of an autonomous AI research lab.
-You set strategy — you do NOT execute. Your job:
-1. Frame the research MISSION from the seed problem.
-2. Propose 3-5 candidate DIRECTIONS, each a falsifiable bet ("attack X via approach Y").
+You set strategy — you do NOT execute. Each direction must be a PAPER-SHAPED CONTRIBUTION
+that clears THREE bars together: it MATTERS (a clear answer changes a real decision), it is
+NOVEL (a new finding/method, not a confirmation), and it is PUBLISHABLE. Your job:
+1. Frame the research MISSION from the seed problem and its stance.
+2. For EACH direction, LEAD WITH THE STAKES: in one sentence, the real build/deploy DECISION a
+   clear answer changes, WHO acts on it (a named practitioner / system-builder), and what it
+   settles or saves — put this in `stakes`. A direction no one would change behaviour on, however
+   novel, is NOT worth running. Then state it as a falsifiable bet ("attack X via approach Y").
 3. Ground each direction's NOVELTY in the PRIOR ART provided — name the SPECIFIC gap
-   (what existing work misses, or where it's weak). Do not assert novelty; cite the gap.
-   Populate grounded_in with the EXACT paper titles from the PRIOR ART shown that
-   justify the gap. Use only titles that actually appear above; never invent one.
+   (what existing work misses, or where it's weak). A gap is NECESSARY but NOT SUFFICIENT:
+   pursue it ONLY when filling it would also change how practitioners build systems. Do not
+   assert novelty; cite the gap. Populate grounded_in with EXACT paper titles from the PRIOR ART
+   shown that justify the gap. Use only titles that actually appear above; never invent one.
 4. For each direction give claim_goals (expectation, kill_condition, novelty_target,
    next_milestone, priority_hint), kill_conditions, and reviewer_risks (weak evaluation,
    weak baselines, LLM-judge bias, reproducibility, novelty concerns).
@@ -81,9 +87,11 @@ Be sharp, concrete, and honest about uncertainty. Output ONLY JSON."""
 _SCHEMA_HINT = """Output JSON with exactly these keys:
 {
  "mission_frame": str,
- "directions": [ { "title": str, "statement": str, "novelty_rationale": str,
+ "directions": [ { "title": str, "statement": str,
+   "stakes": "the real DECISION a clear answer changes + WHO acts on it (named actor) + what it settles",
+   "novelty_rationale": str,
    "grounded_in": [str],
-   "scores": { "novelty": 1-5, "feasibility": 1-5, "evidence_availability": 1-5,
+   "scores": { "novelty": 1-5, "impact": 1-5, "feasibility": 1-5, "evidence_availability": 1-5,
      "paper_potential": 1-5, "reviewer_interest": 1-5, "technical_depth": 1-5,
      "differentiation": 1-5, "cost_efficiency": 1-5, "lab_alignment": 1-5, "rationale": str },
    "claim_goals": [ { "expectation": str, "kill_condition": str,
@@ -241,22 +249,32 @@ async def recall_prior_art(seed: str, *, k: int = 8, pool=None, state=None) -> t
     return "\n\n".join(parts), gaps
 
 
-async def _deliberate(seed: str, agenda: str, prior_art: str, *, model: str) -> AriadneOutput:
+async def _deliberate(
+    seed: str, agenda: str, prior_art: str, *, model: str, stance: str = "", success: str = ""
+) -> AriadneOutput:
+    bars = ""
+    if stance:
+        bars += f"# Research stance — the bar EVERY direction must clear\n{stance}\n\n"
+    if success:
+        bars += f"# What success looks like\n{success}\n\n"
     user = (
         f"# Seed problem\n{seed}\n\n"
+        f"{bars}"
         f"# Current agenda (the existing claims tree)\n{agenda}\n\n"
         f"# Grounding\n{prior_art}\n\n"
         f"# Lab capabilities & constraints (every direction MUST fit this hardware)\n{LAB_CONSTRAINTS}\n\n"
-        f"# Task\nFrame the mission and propose the direction tree. Ground your strategy in MIMIR'S "
-        f"SYNTHESIS above (the multi-hop GraphRAG read of the Library) and the FIELD MODEL: aim "
-        f"directions at the UNDER-EXPLORED GAPS Mimir flags and EMERGING areas — do not restate "
-        f"well-trodden work; treat SATURATED/DECLINING areas as saturation risks. Turn the gaps into "
-        f"DIRECTIONS (they are research opportunities, not papers to fetch); use `requests` ONLY for a "
-        f"specific paper (exact title or arxiv id) you think is genuinely missing — not for topics. "
-        f"Every direction MUST be a SUBSTANTIVE, falsifiable ML/AI claim settled by a REAL experiment that "
-        f"outputs a metric on this hardware — NOT meta-methodology about the lab's own pipeline and NOT a "
-        f"literature survey (see the constraints above). Score feasibility and cost_efficiency against the "
-        f"hardware and do NOT propose data-centre-scale work. {_SCHEMA_HINT}"
+        f"# Task\nFrame the mission and propose the direction tree. Each direction is a PAPER-SHAPED "
+        f"CONTRIBUTION: 'We show that [novel finding] on [task], which means [a named practitioner should "
+        f"do X differently].' It must clear THREE bars together — (1) IMPACT: a clear answer changes a real "
+        f"build/deploy DECISION someone faces (state the `stakes`: the decision + WHO acts on it); (2) NOVELTY: "
+        f"a new finding/method, NOT a confirmation or survey; (3) PUBLISHABLE: a contribution worth a paper. "
+        f"Use Mimir's SYNTHESIS + the FIELD MODEL to find where this is possible, but treat 'it's an "
+        f"under-explored GAP' as NECESSARY, NOT SUFFICIENT — a gap nobody would act on the answer to is NOT "
+        f"worth running, however novel. Each direction MUST be a SUBSTANTIVE, falsifiable ML/AI claim settled "
+        f"by a REAL experiment that outputs a metric on this hardware — NOT meta-methodology about the lab's "
+        f"own pipeline and NOT a literature survey. Use `requests` ONLY for a specific missing paper (exact "
+        f"title or arxiv id), not topics. Score feasibility/cost_efficiency against the hardware; do NOT "
+        f"propose data-centre-scale work. {_SCHEMA_HINT}"
     )
     content = await _chain_complete(
         [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
@@ -307,4 +325,6 @@ async def run_shadow(
     prior_art, _gaps = await recall_prior_art(  # gaps are embedded in prior_art
         seed, pool=state.pool, state=(state if emit_conversation else None)
     )
-    return await _deliberate(seed, agenda, prior_art, model=model)
+    return await _deliberate(
+        seed, agenda, prior_art, model=model, stance=cs.stance or "", success=cs.success_criterion or ""
+    )
