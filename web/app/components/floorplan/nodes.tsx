@@ -391,13 +391,16 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
     return { value: `${pending} queued`, sub: `${n24} asks · 24h`, enabled: true, mode: null };
   }
   if (def.id === "planner") {
+    // CURRENT queue depth (pending), not the all-time total — what's actually waiting now.
     const m = ag.planner_mode ?? "off";
-    return { value: `${ag.research_tasks ?? 0} tasks`, sub: on(m) ? `${ag.research_tasks_pending ?? 0} pending` : "paused", enabled: on(m), mode: m };
+    const pending = ag.research_tasks_pending ?? 0;
+    return { value: `${pending} tasks`, sub: on(m) ? (pending > 0 ? "queued now" : "queue clear") : "paused", enabled: on(m), mode: m };
   }
   if (def.id === "researchers") {
+    // CURRENT open tasks (pending), not the cumulative total worked.
     const m = ag.researcher_mode ?? "off";
     const pending = ag.research_tasks_pending ?? 0;
-    return { value: `${ag.research_tasks ?? 0} tasks`, sub: on(m) ? (pending > 0 ? `${pending} investigating` : "findings ready") : "paused", enabled: on(m), mode: m };
+    return { value: `${pending} tasks`, sub: on(m) ? (pending > 0 ? `${pending} investigating` : "idle — queue clear") : "paused", enabled: on(m), mode: m };
   }
   if (def.id === "experiments") {
     const m = ag.experiments_mode ?? "off";
