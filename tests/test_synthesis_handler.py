@@ -79,7 +79,7 @@ def _happy_state(**over):
         get_completed_experiments_for_claim=[_exp(10), _exp(11), _exp(12)],
         latest_finding_n_for_claim=None,
         get_claim_goals_text="- expect: RMSE within 2% · kill if: > 5% worse",
-        persist_research_finding={"finding_id": 5, "finding_claim_id": 100, "graduated_to": "weakly_supported"},
+        persist_research_finding={"finding_id": 5, "finding_claim_id": 100, "graduated_to": "concluded"},
     )
     base.update(over)
     return base
@@ -96,14 +96,14 @@ async def test_synthesize_happy_path_persists_and_ingests():
     assert out["finding_id"] == 5
     assert out["supported"] == "supported"
     assert out["n_experiments"] == 3
-    assert out["graduated_to"] == "weakly_supported"
+    assert out["graduated_to"] == "concluded"
 
     # persist_research_finding got the finding + graduation
     _, pkw = disp.state.persist_research_finding.await_args
     assert pkw["direction_claim_id"] == 61
     assert pkw["supported"] == "supported"
     assert pkw["n_experiments"] == 3
-    assert pkw["graduate_to"] == "weakly_supported"  # supported @0.7 → weakly_supported
+    assert pkw["graduate_to"] == "concluded"  # supported @0.7 (decisive + confident) → concluded
     assert pkw["grounded_in"] == ["exp:10", "exp:11", "exp:12"]
 
     # ingested as a first-party lab_finding doc
@@ -223,9 +223,14 @@ async def test_experiment_completed_no_trigger_below_threshold(monkeypatch):
 # _graduate_to mapping
 # ══════════════════════════════════════════════════════════════════════════════
 async def test_graduate_to_mapping():
-    assert _graduate_to("supported", 0.8) == "weakly_supported"
-    assert _graduate_to("supported", 0.6) == "weakly_supported"
-    assert _graduate_to("supported", 0.59) == "tested"
-    assert _graduate_to("refuted", 0.95) == "tested"
-    assert _graduate_to("mixed", 0.9) == "tested"
+    # Confident + decisive (not inconclusive) → CONCLUDED (terminal result).
+    assert _graduate_to("supported", 0.8) == "concluded"
+    assert _graduate_to("supported", 0.6) == "concluded"
+    assert _graduate_to("refuted", 0.95) == "concluded"  # a definitive negative result still concludes
+    assert _graduate_to("mixed", 0.9) == "concluded"
+    # Below the conclude bar → stays OPEN (more experiments might settle it).
+    assert _graduate_to("supported", 0.59) == "weakly_supported"
+    assert _graduate_to("supported", 0.4) == "weakly_supported"
+    assert _graduate_to("refuted", 0.5) == "tested"
+    # Inconclusive NEVER concludes, regardless of confidence.
     assert _graduate_to("inconclusive", 0.9) == "tested"

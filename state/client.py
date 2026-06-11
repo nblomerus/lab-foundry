@@ -1176,7 +1176,7 @@ class PostgresClient:
     ) -> dict:
         """Write the finding: a `finding` claim (graph lineage + status), a research_findings row,
         and graduate the direction's lifecycle status (upward only). All in one transaction."""
-        _RANK = {"proposed": 0, "tested": 1, "weakly_supported": 2, "replicated": 3}
+        _RANK = {"proposed": 0, "tested": 1, "weakly_supported": 2, "replicated": 3, "concluded": 4}
         async with self.pool.acquire() as conn, conn.transaction():
             finding_claim_id = await conn.fetchval(
                 """

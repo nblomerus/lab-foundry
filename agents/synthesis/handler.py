@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 # have accumulated — so a finding rests on materially more evidence each time, not on every run.
 SYNTHESIS_MIN_EXPERIMENTS = int(os.environ.get("SYNTHESIS_MIN_EXPERIMENTS", "3"))
 SYNTHESIS_RESYNTH_STEP = int(os.environ.get("SYNTHESIS_RESYNTH_STEP", str(SYNTHESIS_MIN_EXPERIMENTS)))
+# A finding this confident AND decisive (supported / refuted / mixed — NOT inconclusive) CONCLUDES
+# its direction: a permanent result that frees the gate. Below this, the direction stays open.
+SYNTHESIS_CONCLUDE_CONFIDENCE = float(os.environ.get("SYNTHESIS_CONCLUDE_CONFIDENCE", "0.6"))
 
 
 # -------------------------------------------------------------------------
@@ -121,9 +124,14 @@ ROUTE.setdefault("synthesis.compose", Tier.WORKHORSE)
 
 
 def _graduate_to(supported: str, confidence: float) -> str:
-    """Map a finding to the direction's new lifecycle status. Internal experiments never
-    earn 'replicated' (that implies independent replication) — the ceiling is honest."""
-    if supported == "supported" and confidence >= 0.6:
+    """Map a finding to the direction's new lifecycle status. A confident, DECISIVE finding
+    (supported / refuted / mixed — a real result either way) CONCLUDES the direction: terminal,
+    a permanent result that leaves the active set and frees the gate. A weaker or inconclusive
+    finding keeps it open (more experiments might settle it). Internal experiments never earn
+    'replicated' (that implies independent replication) — the ceiling is honest."""
+    if supported != "inconclusive" and confidence >= SYNTHESIS_CONCLUDE_CONFIDENCE:
+        return "concluded"
+    if supported == "supported":
         return "weakly_supported"
     return "tested"
 

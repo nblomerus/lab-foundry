@@ -128,6 +128,12 @@ async def overview(request: Request) -> dict:
         )
         exp_running = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE status IN ('running','queued')")
         exp_total = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE code IS NOT NULL")
+        # Convergence: directions the lab has CONCLUDED (a decisive finding → terminal result) + the
+        # total paper-shaped findings established. These accumulate permanently across re-frames.
+        concluded_directions = await conn.fetchval(
+            "SELECT count(*) FROM claims WHERE claim_kind = 'direction' AND status = 'concluded'"
+        )
+        findings_total = await conn.fetchval("SELECT count(*) FROM research_findings")
         focus = [
             r["concept_name"]
             for r in await conn.fetch(
@@ -169,6 +175,8 @@ async def overview(request: Request) -> dict:
             "quartermaster_mode": modes.get("quartermaster", "off"),
             "experiments_running": exp_running,
             "experiments_total": exp_total,
+            "concluded_directions": concluded_directions,
+            "findings": findings_total,
         },
         "mission": {
             "id": mission["id"],
