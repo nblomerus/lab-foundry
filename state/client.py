@@ -1106,6 +1106,156 @@ class PostgresClient:
             )
             return [dict(r) for r in rows]
 
+    # ── synthesis: a direction's experiments → a paper-shaped finding ────────────────
+    async def get_completed_experiments_for_claim(self, claim_id: int, limit: int = 30) -> list[dict]:
+        """Every COMPLETED experiment on a direction (newest first) with its result, params, and
+        the researcher's read — the evidence the synthesis agent composes into one finding."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT e.id AS experiment_id, e.kind, e.params, e.result,
+                       e.interpretation, e.researcher_notes, e.completed_at
+                FROM experiment_runs e
+                JOIN tasks t ON t.id = e.task_id
+                WHERE t.claim_id = $1 AND e.status = 'completed' AND e.result IS NOT NULL
+                ORDER BY e.completed_at DESC NULLS LAST, e.id DESC
+                LIMIT $2
+                """,
+                claim_id,
+                limit,
+            )
+            return [self._parse_experiment_row(r) for r in rows]
+
+    async def count_completed_experiments_for_claim(self, claim_id: int) -> int:
+        """How many completed experiments a direction has — the condition the synthesis trigger reads."""
+        async with self.pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    """
+                    SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id
+                    WHERE t.claim_id = $1 AND e.status = 'completed' AND e.result IS NOT NULL
+                    """,
+                    claim_id,
+                )
+                or 0
+            )
+
+    async def latest_finding_n_for_claim(self, claim_id: int) -> int | None:
+        """The evidence size (n_experiments) of the most recent finding for a direction, or None —
+        so the synthesizer only re-runs when materially more experiments have accumulated."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT max(n_experiments) FROM research_findings WHERE direction_claim_id = $1", claim_id
+            )
+
+    async def get_claim_goals_text(self, claim_id: int) -> str:
+        """The direction's goals as a compact block (expectation / kill-condition) for the compose prompt."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT expectation, kill_condition FROM claim_goals WHERE claim_id = $1 ORDER BY id", claim_id
+            )
+        return "\n".join(f"- expect: {r['expectation']} · kill if: {r['kill_condition']}" for r in rows)
+
+    async def persist_research_finding(
+        self,
+        *,
+        direction_claim_id: int,
+        headline: str,
+        claim_text: str,
+        supported: str,
+        method: str,
+        key_numbers: str,
+        limitations: str,
+        so_what: str,
+        next_step: str,
+        confidence: float,
+        n_experiments: int,
+        grounded_in: list[str],
+        graduate_to: str,
+        run_id: int | None = None,
+    ) -> dict:
+        """Write the finding: a `finding` claim (graph lineage + status), a research_findings row,
+        and graduate the direction's lifecycle status (upward only). All in one transaction."""
+        _RANK = {"proposed": 0, "tested": 1, "weakly_supported": 2, "replicated": 3}
+        async with self.pool.acquire() as conn, conn.transaction():
+            finding_claim_id = await conn.fetchval(
+                """
+                INSERT INTO claims (statement, claim_kind, parent_id, status, confidence, created_by_run_id)
+                VALUES ($1, 'finding', $2, 'proposed', $3, $4) RETURNING id
+                """,
+                headline[:4000],
+                direction_claim_id,
+                max(0.0, min(1.0, float(confidence))),
+                run_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO events (event_type, target_type, target_id, payload, dedup_key)
+                VALUES ('claim.created', 'claim', $1, $2::jsonb, $3)
+                ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                """,
+                finding_claim_id,
+                json.dumps({"statement": headline, "parent_id": direction_claim_id, "claim_kind": "finding"}),
+                f"create-{finding_claim_id}",
+            )
+            finding_id = await conn.fetchval(
+                """
+                INSERT INTO research_findings
+                    (direction_claim_id, finding_claim_id, headline, claim_text, supported, method,
+                     key_numbers, limitations, so_what, next_step, confidence, n_experiments,
+                     grounded_in, created_by_run_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
+                RETURNING id
+                """,
+                direction_claim_id,
+                finding_claim_id,
+                headline,
+                claim_text,
+                supported,
+                method,
+                key_numbers,
+                limitations,
+                so_what,
+                next_step,
+                float(confidence),
+                n_experiments,
+                json.dumps(grounded_in),
+                run_id,
+            )
+            # Graduate the direction UPWARD only (a finding never demotes a stronger prior status),
+            # and ONLY while it's still active — never resurrect an invalidated/superseded direction.
+            cur = await conn.fetchval(
+                "SELECT status::text FROM claims WHERE id = $1 AND claim_kind = 'direction'", direction_claim_id
+            )
+            graduated_to = None
+            if cur in _RANK and _RANK[graduate_to] > _RANK[cur]:
+                await conn.execute(
+                    "UPDATE claims SET status = $2::claim_status, updated_at = now() WHERE id = $1",
+                    direction_claim_id,
+                    graduate_to,
+                )
+                graduated_to = graduate_to
+        return {"finding_id": finding_id, "finding_claim_id": finding_claim_id, "graduated_to": graduated_to}
+
+    async def get_recent_findings_for_claims(self, claim_ids: list[int], limit: int = 8) -> list[dict]:
+        """Recent paper-shaped findings for a set of directions — Ariadne reads these so she
+        re-frames over the lab's CONCLUSIONS, not just raw experiment notes."""
+        if not claim_ids:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT direction_claim_id, headline, claim_text, supported, confidence, so_what, n_experiments
+                FROM research_findings
+                WHERE direction_claim_id = ANY($1)
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                """,
+                claim_ids,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
     async def get_research_tree(self, task_id: int) -> dict:
         """
         Return everything the Debug research-tree view needs: the task itself,

@@ -350,7 +350,7 @@ async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
     # in-hand on the event payload — they're never fetched or origin-vetted. Route
     # them to the content-in-hand path (reproducibility-gated certification) BEFORE
     # the external trust gate, which doesn't apply to the lab's own work.
-    if source.get("source_kind") in ("lab_experiment", "lab_dataset"):
+    if source.get("source_kind") in ("lab_experiment", "lab_dataset", "lab_finding"):
         canonical_key = source["canonical_key"]
         doc_id = await ingest_first_party(
             state,

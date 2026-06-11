@@ -55,6 +55,10 @@ def _is_reproducible(source_kind: str, provenance: dict | None) -> bool:
         return bool(provenance.get("image")) and bool(provenance.get("code_hash")) and provenance.get("seed") is not None
     if source_kind == "lab_dataset":
         return bool(provenance.get("sha256"))  # a non-empty content hash pins the bytes
+    if source_kind == "lab_finding":
+        # a synthesis is reproducible iff it rests on the lab's OWN certified experiments —
+        # the result it claims can be re-derived by re-running those runs (each itself pinned).
+        return bool(provenance.get("grounded_in_experiments"))
     return False
 
 

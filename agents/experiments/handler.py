@@ -24,6 +24,7 @@ import logging
 
 from agents.experiments import sandbox
 from agents.experiments.schemas import ExperimentDesign, ExperimentReport
+from agents.synthesis.handler import SYNTHESIS_MIN_EXPERIMENTS, SYNTHESIS_RESYNTH_STEP
 from harness.curator import RECIPES, SYSTEM_PROMPTS, PromptLayer, Recipe
 from harness.router import ROUTE, Tier
 
@@ -443,12 +444,30 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
         ],
     )
 
+    # Condition-driven: once a direction has accumulated enough completed experiments, trigger the
+    # terminal cross-experiment SYNTHESIS (the paper-shaped finding). Bucketed dedup so it fires once
+    # per RESYNTH_STEP runs — not on every completion — and re-fires when materially more evidence lands.
+    synth_triggered = False
+    if claim_id is not None:
+        n_done = await state.count_completed_experiments_for_claim(claim_id)
+        if n_done >= SYNTHESIS_MIN_EXPERIMENTS:
+            bucket = n_done // max(1, SYNTHESIS_RESYNTH_STEP)
+            await state.emit_corpus_event(
+                "finding.synthesize",
+                target_type="claim",
+                target_id=claim_id,
+                payload={"claim_id": claim_id, "experiment_count": n_done},
+                dedup_key=f"synthesize-{claim_id}-{bucket}",
+            )
+            synth_triggered = True
+
     log.info(
-        "experiments: interpreted exp %s (claim %s, supports=%s Δconf=%s)",
+        "experiments: interpreted exp %s (claim %s, supports=%s Δconf=%s, synth=%s)",
         experiment_id,
         claim_id,
         report.supports_direction,
         report.confidence_delta,
+        synth_triggered,
     )
     return {
         "experiment_id": experiment_id,
@@ -458,6 +477,7 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
         "confidence": conf_applied,
         "ingested_note": True,
         "ingested_dataset": True,
+        "synthesis_triggered": synth_triggered,
     }
 
 

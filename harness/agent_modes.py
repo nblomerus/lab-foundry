@@ -36,6 +36,7 @@ _RESEARCH = frozenset(
         "auditor",
         "experiments",
         "quartermaster",
+        "synthesis",
     }
 )
 

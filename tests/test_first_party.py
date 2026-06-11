@@ -37,5 +37,14 @@ def test_lab_dataset_needs_content_hash():
     assert _is_reproducible("lab_dataset", {}) is False
 
 
+def test_lab_finding_needs_grounding_experiments():
+    # A synthesized finding certifies iff it rests on the lab's own experiments (re-derivable).
+    assert _is_reproducible("lab_finding", {"grounded_in_experiments": ["exp:9", "exp:10"]}) is True
+    assert _is_reproducible("lab_finding", {"grounded_in_experiments": []}) is False  # rests on nothing
+    assert _is_reproducible("lab_finding", {"confidence": 0.9}) is False  # no grounding
+    assert _is_reproducible("lab_finding", {}) is False
+    assert _is_reproducible("lab_finding", None) is False
+
+
 def test_unknown_source_kind_not_reproducible():
     assert _is_reproducible("arxiv", {"image": "x", "seed": 1, "code_hash": "h"}) is False

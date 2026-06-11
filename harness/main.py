@@ -41,6 +41,7 @@ from agents.planner.decompose import handle_planner_decompose
 from agents.planner.handler import handle_queue_empty
 from agents.reflection.handler import handle_reflection_requested
 from agents.researcher.grounded_handler import handle_grounded_research
+from agents.synthesis.handler import handle_finding_synthesize
 from harness.curator import Curator
 from harness.dispatch import Dispatcher
 from harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
@@ -282,6 +283,10 @@ async def main() -> int:
     dispatcher.register("experiment.requested", handle_experiment_requested)
     dispatcher.register("experiment.completed", handle_experiment_completed)
     dispatcher.register("experiment.failed", handle_experiment_failed)
+    # Synthesis agent (Stage 5, the terminal) — registered ALWAYS; the 'synthesis' mode dial gates it.
+    # Once a direction has accumulated enough completed experiments, `finding.synthesize` composes them
+    # into a paper-shaped FINDING, graduates the direction, and ingests the finding into the Library.
+    dispatcher.register("finding.synthesize", handle_finding_synthesize)
 
     # Mimir — Warden of the Library. ONE agent owns ingest + trust: on a
     # discovered source it stages, classify_trust-gates, then finalizes or

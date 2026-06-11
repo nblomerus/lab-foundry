@@ -74,6 +74,9 @@ def _report(**over):
 
 def _disp(*, design=None, report=None, run_id=7, **state_returns):
     """A dispatcher with AsyncMock curator/router + a make_state() state preset with returns."""
+    # Default the synthesis trigger's experiment count to 0 so completed-handler tests that
+    # don't care about synthesis don't fire it (the handler compares this int to a threshold).
+    state_returns.setdefault("count_completed_experiments_for_claim", 0)
     state = make_state(**state_returns)
     disp = make_dispatcher(state)
     disp.curator = AsyncMock()
