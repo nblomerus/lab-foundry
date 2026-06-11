@@ -127,6 +127,35 @@ def test_agent_of_none_for_empty_or_short_module():
 
 
 # ===========================================================================
+# _lane_for  (concurrency lane split: first-party ingest vs bulk population)
+# ===========================================================================
+def test_lane_for_bulk_pull_and_sweep_go_to_bulk_lane():
+    assert dispatch_mod._lane_for({"event_type": "acquire.requested"}, "mimir") == "bulk"
+    assert dispatch_mod._lane_for({"event_type": "library.sweep_requested"}, "mimir") == "bulk"
+
+
+def test_lane_for_first_party_source_keeps_mimir_lane():
+    for sk in ("lab_finding", "lab_experiment", "lab_dataset"):
+        ev = {"event_type": "source.discovered", "payload": {"source": {"source_kind": sk}}}
+        assert dispatch_mod._lane_for(ev, "mimir") == "mimir"
+
+
+def test_lane_for_scout_source_goes_to_bulk_lane():
+    for sk in ("github", "arxiv", "web", "openml"):
+        ev = {"event_type": "source.discovered", "payload": {"source": {"source_kind": sk}}}
+        assert dispatch_mod._lane_for(ev, "mimir") == "bulk"
+    # missing / malformed source → treated as bulk (the safe default for population)
+    assert dispatch_mod._lane_for({"event_type": "source.discovered", "payload": {}}, "mimir") == "bulk"
+    assert dispatch_mod._lane_for({"event_type": "source.discovered"}, "mimir") == "bulk"
+
+
+def test_lane_for_other_events_use_the_agent():
+    assert dispatch_mod._lane_for({"event_type": "task.created"}, "researcher") == "researcher"
+    assert dispatch_mod._lane_for({"event_type": "experiment.requested"}, "experiments") == "experiments"
+    assert dispatch_mod._lane_for({"event_type": "claim.created"}, None) is None  # system handler
+
+
+# ===========================================================================
 # register  (duplicate warns + overwrites)
 # ===========================================================================
 
@@ -589,7 +618,10 @@ async def test_reap_startup_orphans_quiet_when_nothing_running():
 
 @pytest.mark.asyncio
 async def test_drain_pending_spawns_per_pending_event(monkeypatch):
-    pool = ScriptedPool([("FROM events WHERE status = 'pending'", [{"id": 5}, {"id": 6}])])
+    # Batched drain: a page of pending ids, then empty (in real asyncpg the `id <> ALL(seen)`
+    # filter excludes already-kicked ids, so the next fetch returns []; a stateful rule mimics that).
+    pages = iter([[{"id": 5}, {"id": 6}], []])
+    pool = ScriptedPool([("FROM events WHERE status = 'pending'", lambda: next(pages, []))])
     disp = Dispatcher(pool=pool)
     spawned: list[int] = []
     monkeypatch.setattr(
@@ -600,6 +632,19 @@ async def test_drain_pending_spawns_per_pending_event(monkeypatch):
     monkeypatch.setattr(disp, "_process_event", lambda eid: _noop_coro())
     await disp._drain_pending()
     assert len(spawned) == 2
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_batches_past_one_page(monkeypatch):
+    # The old single LIMIT-100 stranded events past position 100; the batched drain keeps going.
+    pages = iter([[{"id": i} for i in range(1, 201)], [{"id": 201}, {"id": 202}], []])
+    pool = ScriptedPool([("FROM events WHERE status = 'pending'", lambda: next(pages, []))])
+    disp = Dispatcher(pool=pool)
+    spawned: list[int] = []
+    monkeypatch.setattr(dispatch_mod.asyncio, "create_task", lambda coro: (coro.close(), spawned.append(1))[-1])
+    monkeypatch.setattr(disp, "_process_event", lambda eid: _noop_coro())
+    await disp._drain_pending()
+    assert len(spawned) == 202  # all three pages drained, not just the first 100/200
 
 
 @pytest.mark.asyncio

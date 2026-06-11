@@ -111,6 +111,8 @@ HANDLER_SLOW_WARN_S = float(os.environ.get("HANDLER_SLOW_WARN_S", "600"))
 # Saturation: when every slot is occupied AND at least this many events are
 # backed up, the lab is held up behind the in-flight agents (dispatch.saturated).
 SATURATION_BACKLOG = int(os.environ.get("DISPATCH_SATURATION_BACKLOG", "5"))
+# Backstop cap on the startup drain so a pathological backlog can't create unbounded tasks at once.
+_DRAIN_MAX = int(os.environ.get("DISPATCH_DRAIN_MAX", "5000"))
 # Broken: an agent with >= this many recent runs, ALL failed (0 completed in the
 # last hour), is flagged broken — it's silently flatlining its slice of the loop.
 BROKEN_AGENT_MIN_RUNS = int(os.environ.get("BROKEN_AGENT_MIN_RUNS", "3"))
@@ -206,6 +208,25 @@ def _parse_agent_caps(spec: str) -> dict[str, int]:
         except ValueError:
             continue
     return caps
+
+
+def _lane_for(event: dict, agent: str | None) -> str | None:
+    """The CONCURRENCY lane for a handler — deliberately decoupled from the mode-dial agent.
+
+    Mimir owns three event types on ONE agent ('mimir'), but they have very different urgency:
+    the high-volume BULK population path (acquire.requested pulls + scout source.discovered pushes
+    + sweeps) would saturate Mimir's slots and starve the latency-sensitive FIRST-PARTY ingest —
+    the lab's own findings/experiments/datasets (source.discovered with a `lab_*` source_kind),
+    which must reach the corpus promptly to feed the next deliberation. Splitting the lane keeps a
+    dedicated 'mimir' pool for first-party ingest while all bulk intake shares a separate 'bulk'
+    pool. Mode-gating still uses the real agent ('mimir'), so this only affects parallelism."""
+    et = event.get("event_type")
+    if et in ("acquire.requested", "library.sweep_requested"):
+        return "bulk"
+    if et == "source.discovered":
+        sk = ((event.get("payload") or {}).get("source") or {}).get("source_kind") or ""
+        return "mimir" if sk.startswith("lab_") else "bulk"
+    return agent
 
 
 class Dispatcher:
@@ -373,8 +394,10 @@ class Dispatcher:
         # Gate the execution behind the concurrency semaphore so a burst of
         # events doesn't launch unbounded handlers at once. Gate checks above
         # run first (and cheaply), so suppressed events never occupy a slot.
-        # _slot() also enforces the per-ingest-agent reservation (see __init__).
-        async with self._slot(agent):
+        # The LANE (not the mode-agent) keys the slot, so bulk library intake
+        # can't starve first-party lab ingest (see _lane_for).
+        lane = _lane_for(event, agent)
+        async with self._slot(lane):
             session = Session(
                 handler_name=handler.__name__,
                 triggered_by_event_id=event_id,
@@ -390,6 +413,7 @@ class Dispatcher:
             inflight_id = next(self._inflight_seq)
             self._inflight[inflight_id] = {
                 "agent": agent or handler.__name__,
+                "lane": lane or agent or handler.__name__,
                 "handler": handler.__name__,
                 "event_id": event_id,
                 "started_at": time.monotonic(),
@@ -581,11 +605,29 @@ class Dispatcher:
             log.info("startup orphan reap: agent_runs=%s, tasks=%s", runs, tasks)
 
     async def _drain_pending(self) -> None:
-        """At startup, kick off processing for any events still pending."""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT id FROM events WHERE status = 'pending' ORDER BY emitted_at LIMIT 100")
-        for r in rows:
-            asyncio.create_task(self._process_event(r["id"]))
+        """At startup, kick off processing for ALL events still pending.
+
+        A NOTIFY only fires on INSERT, so events that were pending across a restart rely entirely on
+        this drain. The old single `LIMIT 100` STRANDED anything past position 100 by emitted_at
+        (observed: with a ~230-deep bulk backlog, first-party lab ingest at position 126 never ran —
+        the liveness pump only revives task.created, not arbitrary events). Drain in batches instead,
+        skipping ids already kicked off this pass, so nothing is left behind. Concurrency is still
+        bounded by the per-lane + global semaphores, so creating many tasks is safe (they queue)."""
+        seen: set[int] = set()
+        while len(seen) < _DRAIN_MAX:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id FROM events WHERE status = 'pending' AND id <> ALL($1::bigint[]) "
+                    "ORDER BY emitted_at LIMIT 200",
+                    list(seen) or [0],
+                )
+            if not rows:
+                break
+            for r in rows:
+                seen.add(r["id"])
+                asyncio.create_task(self._process_event(r["id"]))
+        if len(seen) >= _DRAIN_MAX:
+            log.warning("startup drain hit the %d-event cap; remaining pending will catch up via NOTIFY", _DRAIN_MAX)
 
     # -- Liveness pump --------------------------------------------------
 
@@ -693,7 +735,7 @@ class Dispatcher:
             log.exception("saturation backlog probe failed")
             return
         if backlog >= SATURATION_BACKLOG:
-            held_by = sorted({r["agent"] for r in self._inflight.values()})
+            held_by = sorted({r.get("lane") or r["agent"] for r in self._inflight.values()})
             await self._emit_indicator(
                 "dispatch.saturated",
                 {
