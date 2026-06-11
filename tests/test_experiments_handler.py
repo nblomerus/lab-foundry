@@ -30,6 +30,12 @@ from tests._helpers import make_dispatcher, make_state
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _mock_image_digest(monkeypatch):
+    # provenance capture shells `docker image inspect`; keep the unit tests Docker-free.
+    monkeypatch.setattr(EH.sandbox, "image_digest", AsyncMock(return_value="sha256:deadbeef"))
+
+
 # ── builders ───────────────────────────────────────────────────────────────────
 def _event(event_id=1, **payload):
     return {"id": event_id, "payload": payload}
@@ -207,14 +213,17 @@ async def test_completed_happy_path_interprets_moves_conf_ingests():
     assert out["supports_direction"] is True
     assert out["ingested_note"] is True
 
-    # first-party lab note ingested into the corpus
-    disp.state.emit_corpus_event.assert_awaited_once()
-    eargs, ekw = disp.state.emit_corpus_event.await_args
-    assert eargs[0] == "source.discovered"
-    payload = ekw["payload"]
-    assert payload["source"]["source_kind"] == "lab_experiment"
-    assert isinstance(payload["content"], str) and payload["content"]
-    assert "provenance" in payload
+    # first-party lab note AND dataset card ingested into the corpus (two emits)
+    assert disp.state.emit_corpus_event.await_count == 2
+    kinds = {c.kwargs["payload"]["source"]["source_kind"] for c in disp.state.emit_corpus_event.await_args_list}
+    assert kinds == {"lab_experiment", "lab_dataset"}
+    for c in disp.state.emit_corpus_event.await_args_list:
+        assert c.args[0] == "source.discovered"
+        payload = c.kwargs["payload"]
+        assert isinstance(payload["content"], str) and payload["content"]
+        assert "provenance" in payload
+    assert out["ingested_dataset"] is True
+    disp.state.set_experiment_dataset_refs.assert_awaited_once()
 
 
 async def test_completed_curator_and_router_invoked_correctly():
@@ -256,7 +265,7 @@ async def test_completed_zero_delta_does_not_move_confidence():
     out = await EH.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
     disp.state.update_claim_confidence.assert_not_awaited()  # zero delta → no move
     assert out["confidence"] is None
-    disp.state.emit_corpus_event.assert_awaited_once()  # note still ingested
+    assert disp.state.emit_corpus_event.await_count == 2  # note + dataset ingested
 
 
 async def test_completed_no_claim_id_skips_confidence():
@@ -264,7 +273,7 @@ async def test_completed_no_claim_id_skips_confidence():
     out = await EH.handle_experiment_completed(_event(1, experiment_id=42), disp)  # claim_id absent
     disp.state.update_claim_confidence.assert_not_awaited()
     assert out["claim_id"] is None
-    disp.state.emit_corpus_event.assert_awaited_once()
+    assert disp.state.emit_corpus_event.await_count == 2  # note + dataset
 
 
 async def test_completed_claim_not_found_skips_confidence_but_ingests():
@@ -274,7 +283,7 @@ async def test_completed_claim_not_found_skips_confidence_but_ingests():
     out = await EH.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
     disp.state.update_claim_confidence.assert_not_awaited()
     assert out["confidence"] is None
-    disp.state.emit_corpus_event.assert_awaited_once()  # experiment still stands → note ingested
+    assert disp.state.emit_corpus_event.await_count == 2  # experiment stands -> note + dataset
 
 
 async def test_completed_confidence_clamped_to_one():

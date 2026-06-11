@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 
+from agents.experiments import sandbox
 from agents.experiments.schemas import ExperimentDesign, ExperimentReport
 from harness.curator import RECIPES, SYSTEM_PROMPTS, PromptLayer, Recipe
 from harness.router import ROUTE, Tier
@@ -75,12 +76,16 @@ Write `code` as a COMPLETE, self-contained Python script:
 - Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch.
 - NO network and NO file access outside the cwd. Synthesize your data, or use a sklearn/torch toy
   dataset (e.g. make_classification, load_digits, a small random tensor). State your data source in
-  `dataset_plan`.
+  `dataset_plan` (be specific: the generator/loader, its parameters, and shape — this is the dataset's
+  reproducibility record).
 - Seed every RNG you touch (numpy, torch, python `random`) from `seed` so the run reproduces.
 - Keep it within the wall-clock and memory budgets you estimate. Modest is better than ambitious —
   a clean signal on a toy problem beats a run that times out.
+- In your result JSON, include a `dataset` object capturing what you built/used so it's reproducible
+  and inspectable: {{"n_samples", "n_features" (or shape), "source" (the generator/loader call),
+  "sha256" (hashlib.sha256 of the data bytes, e.g. of X.tobytes())}}.
 - The script's LAST stdout line MUST be a single JSON object = the result (the numbers you want
-  interpreted: metrics, deltas, counts, p-values, timings). Print nothing after it.
+  interpreted: metrics, deltas, counts, p-values, timings — plus the `dataset` object). Print nothing after it.
 
 Set `requires_gpu` true ONLY if the run genuinely needs the GPU. Cap `est_wall_clock_s` at 1800.
 Return JSON conforming to ExperimentDesign.
@@ -279,18 +284,28 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
     )
 
     code_hash = hashlib.sha256(design.code.encode()).hexdigest()[:16]
+    # Provenance = the reproducibility basis. Capture the image DIGEST (immutable),
+    # not just the tag (a rebuild repoints it), alongside seed + code hash. With
+    # these + the code, the run — including its synthesized dataset — is recreatable.
+    provenance = {
+        "image": sandbox.IMAGE,
+        "image_digest": await sandbox.image_digest(),
+        "seed": design.seed,
+        "code_hash": code_hash,
+        "dataset_plan": design.dataset_plan,
+    }
     exp_id = await state.queue_experiment(
         task_id=task_id,
         inquiry_id=payload.get("inquiry_id"),
         kind="code",
-        params={"hypothesis": design.hypothesis, "claim_id": claim_id},
+        params={"hypothesis": design.hypothesis, "claim_id": claim_id, "dataset_plan": design.dataset_plan},
         code=design.code,
         wall_clock_budget_s=min(1800, design.est_wall_clock_s),
         mem_budget_mb=design.est_mem_mb,
         requires_gpu=design.requires_gpu,
         gpu_mem_mb=design.gpu_mem_mb or (4096 if design.requires_gpu else None),
         priority=6,
-        provenance={"image": "labfoundry-experiment:py311", "seed": design.seed, "code_hash": code_hash},
+        provenance=provenance,
         dataset_refs=None,
     )
     log.info("experiments: queued exp %s for claim %s (task %s, gpu=%s)", exp_id, claim_id, task_id, design.requires_gpu)
@@ -374,6 +389,41 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
         },
         dedup_key=f"exp-doc-{experiment_id}",
     )
+
+    # Capture the DATASET as its own first-party Library doc so the corpus carries how
+    # the data was assembled (and how to regenerate it) — the loop's reproducibility
+    # record for the inputs, not just the result.
+    dataset_key = f"dataset:exp:{experiment_id}"
+    await state.emit_corpus_event(
+        "source.discovered",
+        target_type="source",
+        target_id=experiment_id,
+        payload={
+            "source": {
+                "kind": "dataset",
+                "source_kind": "lab_dataset",
+                "canonical_key": dataset_key,
+                "title": f"Dataset · experiment {experiment_id}",
+                "why": "first-party lab experiment dataset",
+            },
+            "content": _lab_dataset_markdown(experiment_id, claim_id, exp),
+            "provenance": exp.get("provenance") or {},
+        },
+        dedup_key=f"exp-dataset-{experiment_id}",
+    )
+    result = exp.get("result") or {}
+    await state.set_experiment_dataset_refs(
+        experiment_id,
+        [
+            {
+                "canonical_key": dataset_key,
+                "kind": "lab_dataset",
+                "plan": (exp.get("provenance") or {}).get("dataset_plan"),
+                "fingerprint": result.get("dataset") or result.get("datasets"),
+            }
+        ],
+    )
+
     log.info(
         "experiments: interpreted exp %s (claim %s, supports=%s Δconf=%s)",
         experiment_id,
@@ -388,6 +438,7 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
         "supports_direction": report.supports_direction,
         "confidence": conf_applied,
         "ingested_note": True,
+        "ingested_dataset": True,
     }
 
 
@@ -416,6 +467,15 @@ async def handle_experiment_failed(event: dict, dispatcher) -> dict | None:
 # -------------------------------------------------------------------------
 
 
+def _provenance_line(provenance: dict) -> str:
+    """One-line reproducibility stamp: seed + image digest + code hash."""
+    return (
+        f"seed={provenance.get('seed')} "
+        f"image={provenance.get('image')}@{(provenance.get('image_digest') or '?')} "
+        f"code_hash={provenance.get('code_hash')}"
+    )
+
+
 def _lab_note_markdown(experiment_id: int, claim_id, hypothesis: str, exp: dict, report: ExperimentReport) -> str:
     """A markdown lab note for the corpus — the human-readable record of one experiment."""
     params = exp.get("params") or {}
@@ -425,11 +485,32 @@ def _lab_note_markdown(experiment_id: int, claim_id, hypothesis: str, exp: dict,
     return (
         f"## Experiment {experiment_id} on direction {direction}\n\n"
         f"**Hypothesis:** {hypothesis or '(none recorded)'}\n\n"
+        f"**Dataset:** {provenance.get('dataset_plan') or '(synthesized in-code)'}\n\n"
         f"**Method / params:** `{json.dumps(params)[:600]}`\n"
-        f"seed={provenance.get('seed')} image={provenance.get('image')} code_hash={provenance.get('code_hash')}\n\n"
+        f"{_provenance_line(provenance)}\n\n"
         f"**Result:**\n```json\n{json.dumps(result, indent=2)[:2000]}\n```\n\n"
         f"**Interpretation:** {report.summary}\n\n"
         f"**Supports direction:** {report.supports_direction}  |  "
         f"Δconfidence: {report.confidence_delta}\n\n"
         f"**Researcher note:** {report.narrative_note}\n"
+    )
+
+
+def _lab_dataset_markdown(experiment_id: int, claim_id, exp: dict) -> str:
+    """A markdown dataset card for the corpus — how the experiment's data was assembled,
+    captured so the dataset is reproducible (regenerate from the code+seed+image digest)
+    and discoverable. `dataset` in the result (shape/fingerprint, if the script reported
+    it) is included verbatim."""
+    provenance = exp.get("provenance") or {}
+    result = exp.get("result") or {}
+    plan = provenance.get("dataset_plan") or "Synthesized in the experiment script (seeded)."
+    direction = f"T{claim_id}" if claim_id is not None else "(no direction)"
+    ds = result.get("dataset") or result.get("datasets")
+    ds_block = f"\n**Reported shape / fingerprint:**\n```json\n{json.dumps(ds, indent=2)[:1200]}\n```\n" if ds else ""
+    return (
+        f"## Dataset for experiment {experiment_id} (direction {direction})\n\n"
+        f"**How it was assembled:** {plan}\n\n"
+        f"**Reproducibility:** regenerate by running the experiment's recorded code at "
+        f"{_provenance_line(provenance)} — the data is produced deterministically from the "
+        f"seed inside the pinned image, so the same bytes recur.{ds_block}\n"
     )

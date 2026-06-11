@@ -229,6 +229,29 @@ async def kill(exp_id: int) -> bool:
     return True
 
 
+async def image_digest(image: str | None = None) -> str | None:
+    """The immutable content id (sha256) of the experiment image — the reproducibility
+    anchor in provenance, since the TAG is mutable (a rebuild repoints it). Uses the
+    local image Id; returns None if docker/inspect is unavailable."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            image or IMAGE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        digest = (out or b"").decode().strip()
+        return digest or None
+    except Exception as e:  # noqa: BLE001 — provenance enrichment must never block a run
+        log.warning("image digest lookup failed for %s: %s", image or IMAGE, e)
+        return None
+
+
 async def list_lab_containers() -> list[str]:
     """Names of all `lf-exp-*` containers docker currently knows about (for orphan reaping)."""
     try:

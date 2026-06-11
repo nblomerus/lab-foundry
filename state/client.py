@@ -1069,6 +1069,16 @@ class PostgresClient:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE experiment_runs SET ingested_doc_id = $2 WHERE id = $1", experiment_id, doc_id)
 
+    async def set_experiment_dataset_refs(self, experiment_id: int, refs: list | dict) -> None:
+        """Record the dataset(s) an experiment used/produced (content-hash + how-produced)
+        so its data lineage is captured — the reproducibility record for the inputs."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs SET dataset_refs = $2::jsonb WHERE id = $1",
+                experiment_id,
+                json.dumps(refs),
+            )
+
     async def get_experiment(self, experiment_id: int) -> dict | None:
         async with self.pool.acquire() as conn:
             r = await conn.fetchrow("SELECT * FROM experiment_runs WHERE id = $1", experiment_id)
