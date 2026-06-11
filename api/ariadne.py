@@ -114,7 +114,12 @@ async def overview(request: Request) -> dict:
                 "WHERE agent_name IN ('planner','researcher','experiments','quartermaster')"
             )
         }
-        research_tasks = await conn.fetchval("SELECT count(*) FROM tasks WHERE department = 'research'")
+        # Total reflects the LIVE agenda — exclude tasks belonging to retired (invalidated)
+        # directions; those are dead history (a few are kept only for experiment/finding lineage).
+        research_tasks = await conn.fetchval(
+            "SELECT count(*) FROM tasks t LEFT JOIN claims c ON c.id = t.claim_id "
+            "WHERE t.department = 'research' AND (c.status IS NULL OR c.status <> 'invalidated')"
+        )
         research_pending = await conn.fetchval(
             "SELECT count(*) FROM tasks WHERE department = 'research' AND status = 'pending'"
         )

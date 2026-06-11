@@ -60,9 +60,9 @@ def _overview_rules(*, mission, directions, lessons, focus, modes):
         ("'acquire.requested' AND status = 'pending'", [{"count": 3}]),  # live queue depth (must precede the 24h rule)
         ("acquire.requested", [{"count": 7}]),
         ("WHERE agent_name IN ('planner','researcher','experiments','quartermaster')", modes),
-        ("FROM tasks WHERE department = 'research' AND status = 'pending'", [{"count": 1}]),
-        ("FROM tasks WHERE department = 'research' AND status = 'running'", [{"count": 2}]),
-        ("FROM tasks WHERE department = 'research'", [{"count": 3}]),
+        ("department = 'research' AND status = 'pending'", [{"count": 1}]),
+        ("department = 'research' AND status = 'running'", [{"count": 2}]),
+        ("c.status IS NULL OR c.status", [{"count": 3}]),  # the live-agenda total (excludes invalidated dirs)
         ("FROM experiment_runs WHERE status IN ('running','queued')", [{"count": 2}]),
         ("FROM experiment_runs WHERE code IS NOT NULL", [{"count": 9}]),
         ("FROM field_model WHERE trend_state IN ('hot','emerging')", focus),
