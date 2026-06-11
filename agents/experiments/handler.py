@@ -72,6 +72,19 @@ local models ≤ ~32B. Favour inference-time methods, evaluation / benchmarking,
 small statistical studies. Do NOT propose large training runs, multi-GPU work, network calls,
 or external data fetches.
 
+The experiment MUST test a SUBSTANTIVE, FALSIFIABLE ML CLAIM about the METHOD in the direction —
+a concrete prediction with a measurable threshold, e.g. "sparse GP with 50 inducing points keeps
+test R² within 0.02 of the full GP at 10× lower cost" or "random Fourier features match the RBF
+kernel's AUC to within 0.01 at D=500 features". State the claim, the metric, and what number would
+FALSIFY it. The result must measure THAT claim directly.
+HARD RULES — reject these and derive a real claim from the direction instead:
+- NO meta-hypotheses about the lab's own machinery ("can the system generate a hypothesis",
+  "hypothesis generation is absent/trivial", "no results exist yet"). Those are not experiments.
+- NO generic proxy benchmarks (e.g. plain accuracy on a fresh make_classification) UNLESS that
+  metric IS the claim. A number that doesn't discriminate the hypothesis is worthless.
+If the stated hypothesis is meta/degenerate or untestable, DERIVE the most load-bearing testable
+claim about the direction's method and test that — name it explicitly in `hypothesis`.
+
 Write `code` as a COMPLETE, self-contained Python script:
 - Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch.
 - NO network and NO file access outside the cwd. Synthesize your data, or use a sklearn/torch toy

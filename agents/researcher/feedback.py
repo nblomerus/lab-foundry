@@ -23,6 +23,7 @@ verdict — same discipline as Mimir's trust gate. `disposition` / `finding_feed
 from __future__ import annotations
 
 import logging
+import os
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,12 @@ _CONTRADICT_STEP = -0.12
 _EXHAUSTED_STEP = -0.05
 _GROUNDED_MIN = 0.5  # only findings whose cited evidence resolves may move confidence
 _MAX_ROUND_DELTA = 0.20  # cap how far ONE research round can move a direction
+# Literature reading alone can't take a direction past PROVISIONAL confidence — the top band
+# is EARNED by experiment / replication evidence (which moves confidence via the experiments
+# handler, not here). This stops a direction climbing to near-certainty on findings alone,
+# especially while most rounds are thin_corpus (an over-confidence we observed: a 'proposed'
+# direction at 1.0 with no experiment backing).
+_RESEARCH_CONFIDENCE_CEILING = float(os.environ.get("RESEARCH_CONFIDENCE_CEILING", "0.85"))
 
 DISPOSITIONS = ("supported", "contradicted", "corpus_exhausted", "thin_corpus", "needs_experiment", "inconclusive")
 # Priority for the headline steering signal: decisive verdicts first, then the actionable blockers.
@@ -167,6 +174,10 @@ async def apply_feedback(state, fb: DirectionFeedback, *, run_id: int | None = N
             )
         if cur is not None:
             new_conf = max(0.0, min(1.0, float(cur) + fb.confidence_delta))
+            # A positive (literature) move can't push past the research ceiling — but never
+            # drag down a direction already above it on stronger (experiment) evidence.
+            if fb.confidence_delta > 0 and new_conf > _RESEARCH_CONFIDENCE_CEILING:
+                new_conf = max(float(cur), _RESEARCH_CONFIDENCE_CEILING)
             try:
                 await state.update_claim_confidence(
                     fb.claim_id, new_conf, reason=f"researcher findings: {fb.dominant}", run_id=run_id

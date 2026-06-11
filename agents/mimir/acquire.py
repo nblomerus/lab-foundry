@@ -49,6 +49,13 @@ BACKPRESSURE_REQUESTERS = frozenset(
     a.strip() for a in os.environ.get("ACQUIRE_BACKPRESSURE_REQUESTERS", "researcher").split(",") if a.strip()
 )
 ACQUIRE_BACKLOG_LIMIT = int(os.environ.get("ACQUIRE_BACKLOG_LIMIT", "40"))
+# Direction-tied acquisitions (req.claim_id set) ARE the lab's active research demand —
+# the evidence a researcher needs to move a direction off thin_corpus. Starving them at
+# the generic limit is what kept ~90% of research stuck on thin_corpus. Now that task
+# volume is bounded upstream (planner per-direction cap + the gate budget), give the
+# active directions a much higher allowance so the lab can actually gather what it's
+# researching; untargeted asks stay at the low generic limit.
+ACQUIRE_BACKLOG_LIMIT_DIRECTION = int(os.environ.get("ACQUIRE_BACKLOG_LIMIT_DIRECTION", "150"))
 
 
 class AcquireRequest(BaseModel):
@@ -96,14 +103,17 @@ async def request_acquire(state, req: AcquireRequest) -> bool:
     caller's direction stays thin_corpus and re-fires once the queue drains."""
     if req.requester not in ALLOWED_REQUESTERS:
         raise ValueError(f"requester {req.requester!r} not allowed to acquire (allow-list: {sorted(ALLOWED_REQUESTERS)})")
-    if req.requester in BACKPRESSURE_REQUESTERS and ACQUIRE_BACKLOG_LIMIT > 0:
+    # Direction-tied asks get the higher allowance; untargeted ones the generic limit.
+    limit = ACQUIRE_BACKLOG_LIMIT_DIRECTION if req.claim_id is not None else ACQUIRE_BACKLOG_LIMIT
+    if req.requester in BACKPRESSURE_REQUESTERS and limit > 0:
         backlog = await _acquire_backlog(state)
-        if backlog >= ACQUIRE_BACKLOG_LIMIT:
+        if backlog >= limit:
             log.info(
-                "acquire backpressure: backlog=%d >= %d — holding %s request %r",
+                "acquire backpressure: backlog=%d >= %d — holding %s request (claim=%s) %r",
                 backlog,
-                ACQUIRE_BACKLOG_LIMIT,
+                limit,
                 req.requester,
+                req.claim_id,
                 (req.query or req.arxiv_id or req.url or "")[:50],
             )
             return False

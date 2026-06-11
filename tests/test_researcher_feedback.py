@@ -210,12 +210,17 @@ async def test_apply_feedback_moves_confidence_on_active_claim(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_apply_feedback_clamps_new_confidence_to_unit_interval(monkeypatch):
+async def test_apply_feedback_research_ceiling_and_clamp(monkeypatch):
     monkeypatch.setattr(fb_mod, "request_acquire", _noop_acquire)
-    pool = _active_pool(0.95)
-    state = make_state(pool=pool)
-    res = await apply_feedback(state, _df(confidence_delta=0.20, dominant="supported"))
-    assert res["confidence"] == [0.95, 1.0]  # 1.15 clamped to 1.0
+    # From below: a positive literature move can't push past the 0.85 research ceiling.
+    res = await apply_feedback(make_state(pool=_active_pool(0.80)), _df(confidence_delta=0.20, dominant="supported"))
+    assert res["confidence"] == [0.8, 0.85]  # 1.0 capped at the ceiling
+    # Already above the ceiling (experiment-earned): a positive research move is HELD, not raised.
+    res2 = await apply_feedback(make_state(pool=_active_pool(0.95)), _df(confidence_delta=0.20, dominant="supported"))
+    assert res2["confidence"] == [0.95, 0.95]
+    # A negative move is never lifted by the ceiling — still clamps at the 0.0 floor.
+    res3 = await apply_feedback(make_state(pool=_active_pool(0.05)), _df(confidence_delta=-0.12, dominant="contradicted"))
+    assert res3["confidence"] == [0.05, 0.0]
 
 
 @pytest.mark.asyncio
