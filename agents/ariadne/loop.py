@@ -43,8 +43,17 @@ LAB_CONSTRAINTS = os.environ.get("ARIADNE_LAB_CONSTRAINTS") or (
     "- Light CPU / single-GPU analysis and small, reproducible experiments.\n"
     "NOT available: large-scale training or fine-tuning, multi-GPU / data-centre compute, "
     "pretraining foundation models, or huge proprietary datasets.\n"
-    "So FAVOUR: inference-time methods, prompting / agentic techniques, evaluation & benchmarking, "
-    "analysis of existing literature and released models, methodology, and small reproducible studies. "
+    "FAVOUR SUBSTANTIVE ML/AI research questions you can ANSWER by RUNNING A REAL EXPERIMENT on this "
+    "hardware — measure and compare ACTUAL methods/models and produce a number: inference-time "
+    "techniques (quantization, KV-cache, speculative/parallel decoding, sampling strategies), small "
+    "fine-tunes (LoRA/adapters on <=7B), efficiency / latency / throughput, calibration & robustness, "
+    "retrieval-method quality, classical-ML methods (GP/SVM/XGBoost/etc.) on tractable datasets, "
+    "prompting / agentic methods evaluated against real baselines. Each direction is a FALSIFIABLE claim "
+    "with a measurable threshold, settled by code that outputs a metric.\n"
+    "DO NOT frame META directions about the lab's OWN machinery — hypothesis-generation, "
+    "retrieval-augmented-LLM 'methodology', 'evidence packs', or literature surveys. The lab STUDIES "
+    "ml/ai methods; it does NOT study how it does research. 'Analyse the literature on X' is NOT a "
+    "direction; 'method X beats baseline Y on metric Z by >=delta under setting S' IS.\n"
     "AVOID directions that REQUIRE training large models or data-centre-scale resources — score their "
     "feasibility and cost_efficiency LOW, or re-aim at a lighter, differentiated angle that fits this hardware."
 )
@@ -244,8 +253,10 @@ async def _deliberate(seed: str, agenda: str, prior_art: str, *, model: str) -> 
         f"well-trodden work; treat SATURATED/DECLINING areas as saturation risks. Turn the gaps into "
         f"DIRECTIONS (they are research opportunities, not papers to fetch); use `requests` ONLY for a "
         f"specific paper (exact title or arxiv id) you think is genuinely missing — not for topics. "
-        f"Every direction MUST be executable within the lab's constraints above — score "
-        f"feasibility and cost_efficiency against them and do NOT propose data-centre-scale work. {_SCHEMA_HINT}"
+        f"Every direction MUST be a SUBSTANTIVE, falsifiable ML/AI claim settled by a REAL experiment that "
+        f"outputs a metric on this hardware — NOT meta-methodology about the lab's own pipeline and NOT a "
+        f"literature survey (see the constraints above). Score feasibility and cost_efficiency against the "
+        f"hardware and do NOT propose data-centre-scale work. {_SCHEMA_HINT}"
     )
     content = await _chain_complete(
         [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
