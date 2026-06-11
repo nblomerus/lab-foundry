@@ -49,9 +49,12 @@ def _is_reproducible(source_kind: str, provenance: dict | None) -> bool:
     if not provenance:
         return False
     if source_kind == "lab_experiment":
-        return all(provenance.get(k) for k in ("image", "seed", "code_hash"))
+        # image + code_hash are non-empty strings; seed is checked `is not None`, not
+        # by truthiness — seed=0 is a valid seed but falsy, and would otherwise wrongly
+        # quarantine an experiment that is in fact fully reproducible.
+        return bool(provenance.get("image")) and bool(provenance.get("code_hash")) and provenance.get("seed") is not None
     if source_kind == "lab_dataset":
-        return bool(provenance.get("sha256"))
+        return bool(provenance.get("sha256"))  # a non-empty content hash pins the bytes
     return False
 
 

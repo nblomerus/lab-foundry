@@ -392,7 +392,13 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
 
     # Capture the DATASET as its own first-party Library doc so the corpus carries how
     # the data was assembled (and how to regenerate it) — the loop's reproducibility
-    # record for the inputs, not just the result.
+    # record for the inputs, not just the result. The dataset's content sha256 (the
+    # script reports it) goes into the card's provenance so Mimir's lab_dataset trust
+    # gate can certify it (a hash present = the bytes are pinned), not quarantine it.
+    result = exp.get("result") or {}
+    ds_fp = result.get("dataset") or result.get("datasets") or {}
+    ds_sha = ds_fp.get("sha256") if isinstance(ds_fp, dict) else None
+    dataset_provenance = {**(exp.get("provenance") or {}), "sha256": ds_sha}
     dataset_key = f"dataset:exp:{experiment_id}"
     await state.emit_corpus_event(
         "source.discovered",
@@ -407,19 +413,19 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
                 "why": "first-party lab experiment dataset",
             },
             "content": _lab_dataset_markdown(experiment_id, claim_id, exp),
-            "provenance": exp.get("provenance") or {},
+            "provenance": dataset_provenance,
         },
         dedup_key=f"exp-dataset-{experiment_id}",
     )
-    result = exp.get("result") or {}
     await state.set_experiment_dataset_refs(
         experiment_id,
         [
             {
                 "canonical_key": dataset_key,
                 "kind": "lab_dataset",
+                "sha256": ds_sha,
                 "plan": (exp.get("provenance") or {}).get("dataset_plan"),
-                "fingerprint": result.get("dataset") or result.get("datasets"),
+                "fingerprint": ds_fp or None,
             }
         ],
     )
