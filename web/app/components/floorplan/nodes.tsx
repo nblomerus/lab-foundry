@@ -10,7 +10,7 @@ import { compact } from "../../lib/format";
 import { useNodeMeter, type ActivityState } from "./useNodeActivity";
 import type { AriadneOverview, DebugCosts, HostStats, KnowledgeStats, MimirPanel, ScoutPanel } from "../../lib/api";
 import type { NodeDef } from "./topology";
-import type { Bubble } from "./narration";
+import { useNodeBubble, type Bubble } from "./narration";
 
 export type Selected =
   | { kind: "scout"; sourceKind: string; title: string }
@@ -37,7 +37,6 @@ export interface FloorNodeData {
   activeAt?: number | null; // node's last-active epoch ms (live event stream)
   now?: number; // re-eval tick from useNodeActivity
   activitySeries?: number[]; // bucketed event-rate over the window (live meter)
-  bubble?: Bubble | null; // plain-language narration: what's running here / what this node waits on
   onOpen?: (sel: Selected) => void;
   // React Flow v12 requires node data to extend Record<string, unknown>.
   [key: string]: unknown;
@@ -132,6 +131,7 @@ export function ScoutNode({ data }: NodeProps<FN>) {
   return (
     <div className={cx("group flex h-full w-full cursor-pointer flex-col rounded-node border border-emerald-200/70 bg-white/90 p-3 shadow-card backdrop-blur transition hover:border-emerald-300 hover:shadow-panel", busyRing(state))}>
       <NodeHandles />
+        <NodeBubble nodeId={data.def.id} />
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <IconTile icon={def.icon} />
@@ -183,6 +183,7 @@ export function MimirNode({ data }: NodeProps<FN>) {
   return (
     <div className={cx("flex h-full w-full cursor-pointer flex-col rounded-wing border border-emerald-300 bg-white/92 p-3.5 shadow-panel backdrop-blur transition hover:shadow-float", busyRing(state))}>
       <NodeHandles />
+        <NodeBubble nodeId={data.def.id} />
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2.5">
           <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
@@ -382,7 +383,10 @@ const BUBBLE_TONE: Record<string, string> = {
   reading: "border-violet-200 bg-violet-50/95 text-violet-800",
 };
 
-export function NodeBubble({ bubble }: { bubble?: Bubble | null }) {
+export function NodeBubble({ nodeId }: { nodeId: string }) {
+  // Read from NarrationContext (event-driven) — NOT node data: the React-Flow nodes
+  // array must stay structurally stable or every event re-diffs the whole canvas.
+  const bubble: Bubble | null = useNodeBubble(nodeId);
   if (!bubble) return null;
   return (
     <div className="pointer-events-none absolute -top-2 left-2 right-2 z-20 -translate-y-full">
@@ -459,7 +463,7 @@ export function DormantNode({ data }: NodeProps<FN>) {
   if (lv) {
     return (
       <div className={cx("flex h-full w-full cursor-pointer flex-col rounded-node border border-slate-200 bg-white/90 p-3 shadow-card backdrop-blur transition hover:shadow-panel", busyRing(state))}>
-        <NodeBubble bubble={data.bubble} />
+        <NodeBubble nodeId={def.id} />
         <NodeHandles />
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
@@ -479,7 +483,7 @@ export function DormantNode({ data }: NodeProps<FN>) {
   }
   return (
     <div className="flex h-full w-full cursor-pointer flex-col rounded-node border border-dashed border-slate-200 bg-white/45 p-3 transition hover:bg-white/70">
-      <NodeBubble bubble={data.bubble} />
+      <NodeBubble nodeId={def.id} />
       <NodeHandles />
       <div className="flex items-center justify-between">
         <div className="flex min-w-0 items-center gap-2">

@@ -1,15 +1,36 @@
-// Narration — the floorplan's speech bubbles: what is RUNNING WHERE and WHO is
-// WAITING FOR WHAT, in plain sentences anyone can read. Composed client-side from
-// the same polls the cards use (Ariadne overview + Quartermaster ledger), so a
-// bubble can never disagree with the card under it. State-driven, not event-driven:
-// a bubble persists exactly as long as the state it describes.
+"use client";
 
+// Narration — the floorplan's speech bubbles: what is RUNNING WHERE, WHO is WAITING
+// FOR WHAT, and what just HAPPENED — in plain sentences anyone can read.
+//
+// Two layers, merged per node:
+//   * STATE bubbles (composeNarration) — durable running/waiting facts composed from
+//     the same polls the cards use, so a bubble can never disagree with its card.
+//     They persist exactly as long as the state they describe.
+//   * EVENT bubbles (eventBubble) — transient happenings straight off the live event
+//     stream ("arXiv scout found '…'", "synthesizing direction #84 into a finding"),
+//     shown the instant they occur and faded after a short TTL. While alive, an event
+//     bubble overrides the state bubble on its node.
+//
+// Narration is provided through NarrationContext (the useNodeActivity pattern): the
+// React-Flow nodes array stays STRUCTURALLY STABLE — bubbles re-render per node, not
+// per canvas. Events also nudge the state polls (see useFloorData) so "waiting on
+// experiment #92" flips within ~2s of experiment.completed, not at the next 10s poll.
+
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useSharedEvents } from "../../lib/event-stream";
 import type { AriadneOverview, QmExperiment, QmExperiments } from "../../lib/api";
+import type { LabFoundryEvent, StreamMessage } from "../../lib/types";
+import { sourceKindOf } from "./inspectors";
 
 export interface Bubble {
   kind: "running" | "waiting" | "reading";
   text: string;
 }
+
+const SCOUT_NODE: Record<string, string> = {
+  web: "web", arxiv: "arxiv", paper: "arxiv", github: "github", code: "github", openml: "openml", dataset: "dataset",
+};
 
 function elapsed(iso?: string | null): string {
   if (!iso) return "";
@@ -21,6 +42,12 @@ function clip(s: string | null | undefined, n: number): string {
   if (!s) return "";
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
+
+function asObj(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+}
+
+// ── STATE layer ────────────────────────────────────────────────────────────────
 
 export function composeNarration(ariadne: AriadneOverview | null, qm: QmExperiments | null): Record<string, Bubble> {
   const out: Record<string, Bubble> = {};
@@ -106,4 +133,163 @@ export function composeNarration(ariadne: AriadneOverview | null, qm: QmExperime
   }
 
   return out;
+}
+
+// ── EVENT layer ────────────────────────────────────────────────────────────────
+
+const EVENT_TTL_MS = 12_000;
+const LONG_TTL_MS = 90_000; // deliberation/synthesis-style work that runs for minutes
+
+interface TransientBubble {
+  nodeId: string;
+  bubble: Bubble;
+  ttlMs: number;
+}
+
+export function eventBubble(e: LabFoundryEvent): TransientBubble | null {
+  const t = e.event_type;
+  const p = asObj(e.payload);
+  switch (t) {
+    case "source.discovered": {
+      const k = sourceKindOf(e);
+      const nid = k ? SCOUT_NODE[k] : null;
+      const title = asObj(p.source).title;
+      return nid
+        ? { nodeId: nid, bubble: { kind: "running", text: `found “${clip(String(title ?? "a new source"), 70)}”` }, ttlMs: EVENT_TTL_MS }
+        : null;
+    }
+    case "document.ingested":
+      return {
+        nodeId: "mimir",
+        bubble: { kind: "running", text: `certified a ${p.kind ?? "document"} into the Library (${p.trust_tier ?? "tiered"})` },
+        ttlMs: EVENT_TTL_MS,
+      };
+    case "library.sweep_requested": {
+      const topics = Array.isArray(p.topics) ? (p.topics as unknown[]).slice(0, 2).map(String).join(" · ") : null;
+      return {
+        nodeId: "mimir",
+        bubble: { kind: "running", text: topics ? `sweeping the field: ${clip(topics, 70)}` : "sweeping the field for new sources" },
+        ttlMs: LONG_TTL_MS,
+      };
+    }
+    case "library.sweep_settled":
+      return {
+        nodeId: "mimir",
+        bubble: { kind: "reading", text: `sweep settled — scanned ${p.scanned ?? "?"}, ${p.discovered ?? 0} genuinely new` },
+        ttlMs: EVENT_TTL_MS,
+      };
+    case "acquire.requested":
+      return {
+        nodeId: "request-queue",
+        bubble: { kind: "running", text: `fetching: “${clip(String(p.query ?? p.paper ?? "a source"), 70)}”${p.claim_id ? ` · direction #${p.claim_id}` : ""}` },
+        ttlMs: EVENT_TTL_MS,
+      };
+    case "acquire.fulfilled":
+      return { nodeId: "request-queue", bubble: { kind: "reading", text: `shelved “${clip(String(p.title ?? p.query ?? "a source"), 70)}”` }, ttlMs: EVENT_TTL_MS };
+    case "task.created":
+      return { nodeId: "researchers", bubble: { kind: "running", text: `picked up task #${e.target_id ?? "?"}` }, ttlMs: EVENT_TTL_MS };
+    case "task.completed":
+      return { nodeId: "researchers", bubble: { kind: "reading", text: `finished task #${e.target_id ?? "?"} — feeding the direction` }, ttlMs: EVENT_TTL_MS };
+    case "experiment.requested":
+      return {
+        nodeId: "experiments",
+        bubble: { kind: "running", text: `designing an experiment for direction #${p.claim_id ?? "?"}` },
+        ttlMs: LONG_TTL_MS,
+      };
+    case "experiment.completed":
+      return {
+        nodeId: "experiments",
+        bubble: { kind: "reading", text: `run #${p.experiment_id ?? "?"} finished — interpreting the numbers` },
+        ttlMs: EVENT_TTL_MS,
+      };
+    case "experiment.failed":
+      return {
+        nodeId: "experiments",
+        bubble: { kind: "waiting", text: `run #${p.experiment_id ?? "?"} failed — recording the failure as data` },
+        ttlMs: EVENT_TTL_MS,
+      };
+    case "finding.synthesize":
+      return {
+        nodeId: "ariadne",
+        bubble: { kind: "running", text: `synthesizing direction #${p.claim_id ?? "?"} into a finding (${p.experiment_count ?? "?"} experiments)` },
+        ttlMs: LONG_TTL_MS,
+      };
+    case "ariadne.deliberate":
+      return { nodeId: "ariadne", bubble: { kind: "running", text: "re-framing the research agenda from the current field…" }, ttlMs: LONG_TTL_MS };
+    case "ariadne.reflect":
+      return { nodeId: "ariadne", bubble: { kind: "running", text: "reflecting on the standing agenda…" }, ttlMs: LONG_TTL_MS };
+    case "direction.adjudicate":
+      return { nodeId: "gate-promotion", bubble: { kind: "running", text: "adjudicating proposed directions against prior art" }, ttlMs: LONG_TTL_MS };
+    case "direction.reopened":
+      return {
+        nodeId: "ariadne",
+        bubble: { kind: "reading", text: `reopened direction #${p.claim_id ?? "?"} — ${p.new_matching_docs ?? "new"} on-topic papers arrived` },
+        ttlMs: EVENT_TTL_MS,
+      };
+    case "finding.high_signal":
+      return { nodeId: "critic", bubble: { kind: "running", text: `challenging a high-signal finding on direction #${e.target_id ?? "?"}` }, ttlMs: LONG_TTL_MS };
+    default:
+      return null;
+  }
+}
+
+// ── merge + context ────────────────────────────────────────────────────────────
+
+export function useNarration(ariadne: AriadneOverview | null, qm: QmExperiments | null): Record<string, Bubble> {
+  const baseline = useMemo(() => composeNarration(ariadne, qm), [ariadne, qm]);
+  const { recent } = useSharedEvents();
+  const seen = useRef<Set<number>>(new Set());
+  const transientRef = useRef<Record<string, { bubble: Bubble; until: number }>>({});
+  const [transient, setTransient] = useState<Record<string, Bubble>>({});
+
+  const events = useMemo(
+    () =>
+      recent
+        .filter((m): m is Extract<StreamMessage, { type: "event" }> => m.type === "event")
+        .map((m) => m.event),
+    [recent],
+  );
+
+  useEffect(() => {
+    let changed = false;
+    const now = Date.now();
+    for (const e of events) {
+      if (seen.current.has(e.id)) continue;
+      seen.current.add(e.id);
+      const tb = eventBubble(e);
+      if (tb) {
+        transientRef.current[tb.nodeId] = { bubble: tb.bubble, until: now + tb.ttlMs };
+        changed = true;
+      }
+    }
+    if (changed) {
+      setTransient(Object.fromEntries(Object.entries(transientRef.current).map(([k, v]) => [k, v.bubble])));
+    }
+  }, [events]);
+
+  // TTL pruning — fade transient bubbles back to the state layer.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = Date.now();
+      let changed = false;
+      for (const [k, v] of Object.entries(transientRef.current)) {
+        if (v.until <= now) {
+          delete transientRef.current[k];
+          changed = true;
+        }
+      }
+      if (changed) {
+        setTransient(Object.fromEntries(Object.entries(transientRef.current).map(([k, v]) => [k, v.bubble])));
+      }
+    }, 3000);
+    return () => clearInterval(t);
+  }, []);
+
+  return useMemo(() => ({ ...baseline, ...transient }), [baseline, transient]);
+}
+
+export const NarrationContext = createContext<Record<string, Bubble>>({});
+
+export function useNodeBubble(nodeId: string): Bubble | null {
+  return useContext(NarrationContext)[nodeId] ?? null;
 }

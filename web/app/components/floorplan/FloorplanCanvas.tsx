@@ -17,21 +17,15 @@ import { NODE_DEFS, EDGE_DEFS, type NodeDef } from "./topology";
 import { NODE_TYPES, ActivityMeter, type FloorNodeData, type Selected } from "./nodes";
 import { EDGE_TYPES } from "./FlowEdge";
 import { type FloorData } from "./useFloorData";
-import { composeNarration } from "./narration";
+import { NarrationContext, useNarration } from "./narration";
 import { useFlowHeat } from "./useFlowHeat";
 import { useNodeActivity, NodeActivityContext, BUSY_MS } from "./useNodeActivity";
 import { AriadneInspector, GateInspector, LibraryInspector, MimirInspector, OpsInspector, PlannerInspector, QueueInspector, ResearcherInspector, ScoutInspector } from "./inspectors";
 
-function nodeData(
-  def: NodeDef,
-  fd: FloorData,
-  priority: string | null,
-  narration: Record<string, { kind: "running" | "waiting" | "reading"; text: string }>,
-  onOpen: (s: Selected) => void,
-): FloorNodeData {
-  // NOTE: no activity fields here — live activity is read from NodeActivityContext per node,
+function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: (s: Selected) => void): FloorNodeData {
+  // NOTE: no activity/narration fields here — both are read from context per node,
   // so this stays structural and the nodes array reference is stable across event ticks.
-  const base: FloorNodeData = { def, onOpen, bubble: narration[def.id] ?? null };
+  const base: FloorNodeData = { def, onOpen };
   switch (def.type) {
     case "scout":
       return { ...base, panel: fd.scouts[def.sourceKind ?? ""] ?? null, series: fd.scoutSeries[def.sourceKind ?? ""] ?? [] };
@@ -142,8 +136,9 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
 
   const onOpen = useCallback((s: Selected) => setSelected(s), []);
 
-  // plain-language narration per node — recomputed with each floor-data poll
-  const narration = useMemo(() => composeNarration(floorData.ariadne, floorData.qm), [floorData.ariadne, floorData.qm]);
+  // plain-language narration per node — event bubbles land instantly off the stream;
+  // state bubbles refresh with the (event-nudged) polls. Provided via context below.
+  const narration = useNarration(floorData.ariadne, floorData.qm);
 
   const nodes = useMemo<Node<FloorNodeData>[]>(
     () =>
@@ -161,10 +156,10 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
           selectable: !backdrop,
           connectable: false,
           zIndex: backdrop ? 0 : 1,
-          data: nodeData(def, floorData, priority, narration, onOpen),
+          data: nodeData(def, floorData, priority, onOpen),
         };
       }),
-    [floorData, priority, narration, onOpen],
+    [floorData, priority, onOpen],
   );
 
   const edges = useMemo(
@@ -200,6 +195,7 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
 
   return (
     <NodeActivityContext.Provider value={activity}>
+    <NarrationContext.Provider value={narration}>
     <div className={cx("bg-blueprint relative overflow-hidden rounded-wing border border-slate-200 shadow-card", className ?? "h-[calc(100vh-15rem)] min-h-[620px]")}>
       <ReactFlow
         nodes={nodes}
@@ -299,6 +295,7 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
         )}
       </AnimatePresence>
     </div>
+    </NarrationContext.Provider>
     </NodeActivityContext.Provider>
   );
 }
