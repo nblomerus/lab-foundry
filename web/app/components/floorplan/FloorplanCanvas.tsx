@@ -17,14 +17,21 @@ import { NODE_DEFS, EDGE_DEFS, type NodeDef } from "./topology";
 import { NODE_TYPES, ActivityMeter, type FloorNodeData, type Selected } from "./nodes";
 import { EDGE_TYPES } from "./FlowEdge";
 import { type FloorData } from "./useFloorData";
+import { composeNarration } from "./narration";
 import { useFlowHeat } from "./useFlowHeat";
 import { useNodeActivity, NodeActivityContext, BUSY_MS } from "./useNodeActivity";
 import { AriadneInspector, GateInspector, LibraryInspector, MimirInspector, OpsInspector, PlannerInspector, QueueInspector, ResearcherInspector, ScoutInspector } from "./inspectors";
 
-function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: (s: Selected) => void): FloorNodeData {
+function nodeData(
+  def: NodeDef,
+  fd: FloorData,
+  priority: string | null,
+  narration: Record<string, { kind: "running" | "waiting" | "reading"; text: string }>,
+  onOpen: (s: Selected) => void,
+): FloorNodeData {
   // NOTE: no activity fields here — live activity is read from NodeActivityContext per node,
   // so this stays structural and the nodes array reference is stable across event ticks.
-  const base: FloorNodeData = { def, onOpen };
+  const base: FloorNodeData = { def, onOpen, bubble: narration[def.id] ?? null };
   switch (def.type) {
     case "scout":
       return { ...base, panel: fd.scouts[def.sourceKind ?? ""] ?? null, series: fd.scoutSeries[def.sourceKind ?? ""] ?? [] };
@@ -135,6 +142,9 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
 
   const onOpen = useCallback((s: Selected) => setSelected(s), []);
 
+  // plain-language narration per node — recomputed with each floor-data poll
+  const narration = useMemo(() => composeNarration(floorData.ariadne, floorData.qm), [floorData.ariadne, floorData.qm]);
+
   const nodes = useMemo<Node<FloorNodeData>[]>(
     () =>
       NODE_DEFS.map((def) => {
@@ -151,10 +161,10 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
           selectable: !backdrop,
           connectable: false,
           zIndex: backdrop ? 0 : 1,
-          data: nodeData(def, floorData, priority, onOpen),
+          data: nodeData(def, floorData, priority, narration, onOpen),
         };
       }),
-    [floorData, priority, onOpen],
+    [floorData, priority, narration, onOpen],
   );
 
   const edges = useMemo(

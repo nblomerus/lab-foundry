@@ -10,6 +10,7 @@ import { compact } from "../../lib/format";
 import { useNodeMeter, type ActivityState } from "./useNodeActivity";
 import type { AriadneOverview, DebugCosts, HostStats, KnowledgeStats, MimirPanel, ScoutPanel } from "../../lib/api";
 import type { NodeDef } from "./topology";
+import type { Bubble } from "./narration";
 
 export type Selected =
   | { kind: "scout"; sourceKind: string; title: string }
@@ -36,6 +37,7 @@ export interface FloorNodeData {
   activeAt?: number | null; // node's last-active epoch ms (live event stream)
   now?: number; // re-eval tick from useNodeActivity
   activitySeries?: number[]; // bucketed event-rate over the window (live meter)
+  bubble?: Bubble | null; // plain-language narration: what's running here / what this node waits on
   onOpen?: (sel: Selected) => void;
   // React Flow v12 requires node data to extend Record<string, unknown>.
   [key: string]: unknown;
@@ -370,6 +372,31 @@ export function OpsNode({ data }: NodeProps<FN>) {
   );
 }
 
+// --- Narration bubble ----------------------------------------------------
+// A small speech bubble pinned above a node: present-tense, human-readable, and
+// state-driven (it persists exactly as long as the state it describes). kind tints:
+// running = emerald + pulse, waiting = amber, reading = violet.
+const BUBBLE_TONE: Record<string, string> = {
+  running: "border-emerald-200 bg-emerald-50/95 text-emerald-800",
+  waiting: "border-amber-200 bg-amber-50/95 text-amber-800",
+  reading: "border-violet-200 bg-violet-50/95 text-violet-800",
+};
+
+export function NodeBubble({ bubble }: { bubble?: Bubble | null }) {
+  if (!bubble) return null;
+  return (
+    <div className="pointer-events-none absolute -top-2 left-2 right-2 z-20 -translate-y-full">
+      <div className={cx("rounded-lg border px-2 py-1 text-[10px] leading-snug shadow-sm backdrop-blur", BUBBLE_TONE[bubble.kind])} title={bubble.text}>
+        <span className="flex items-start gap-1">
+          {bubble.kind === "running" && <span className="mt-0.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500 pulse-dot" />}
+          <span className="line-clamp-2">{bubble.text}</span>
+        </span>
+      </div>
+      <div className={cx("ml-4 h-2 w-2 -translate-y-1 rotate-45 border-b border-r", BUBBLE_TONE[bubble.kind])} />
+    </div>
+  );
+}
+
 // --- Dormant -----------------------------------------------------------
 // BUILT agents (Ariadne, Planner, Researchers, Request Queue) render a live card
 // with a real-time activity badge + their mode as secondary microcopy. `enabled`
@@ -432,6 +459,7 @@ export function DormantNode({ data }: NodeProps<FN>) {
   if (lv) {
     return (
       <div className={cx("flex h-full w-full cursor-pointer flex-col rounded-node border border-slate-200 bg-white/90 p-3 shadow-card backdrop-blur transition hover:shadow-panel", busyRing(state))}>
+        <NodeBubble bubble={data.bubble} />
         <NodeHandles />
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
@@ -451,6 +479,7 @@ export function DormantNode({ data }: NodeProps<FN>) {
   }
   return (
     <div className="flex h-full w-full cursor-pointer flex-col rounded-node border border-dashed border-slate-200 bg-white/45 p-3 transition hover:bg-white/70">
+      <NodeBubble bubble={data.bubble} />
       <NodeHandles />
       <div className="flex items-center justify-between">
         <div className="flex min-w-0 items-center gap-2">

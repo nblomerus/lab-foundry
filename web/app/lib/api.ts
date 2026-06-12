@@ -336,7 +336,7 @@ export interface AriadneOverview {
     experiments_mode: string; quartermaster_mode: string;
     experiments_running: number; experiments_total: number;
     critic_mode?: string; evaluation_mode?: string; synthesis_mode?: string; novelty_mode?: string;
-    critic_verdicts?: number;
+    critic_verdicts?: number; findings?: number; concluded_directions?: number;
   };
   mission: { id: number; statement: string; framed_at: string } | null;
   directions: AriadneDirection[];
@@ -644,6 +644,8 @@ export interface QmExperiment {
   interpretation?: string | null;
   researcher_notes?: string | null;
   ingested_doc_id?: number | null;
+  worker?: string | null;
+  started_at?: string | null;
   at?: string | null;
 }
 export interface QmExperiments {

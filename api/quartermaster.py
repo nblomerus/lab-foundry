@@ -54,6 +54,8 @@ def _exp_row(r) -> dict:
         "interpretation": r["interpretation"],
         "researcher_notes": (notes[:400] if notes else None),
         "ingested_doc_id": r["ingested_doc_id"],
+        "worker": r["worker"],
+        "started_at": r["started_at"].isoformat() if r["started_at"] else None,
         "at": ts.isoformat() if ts else None,
     }
 
@@ -72,7 +74,7 @@ async def experiments(request: Request, limit: int = 50) -> dict:
             "SELECT e.id, e.kind, e.status, e.params, e.resource_usage, e.researcher_notes, "
             "e.interpretation, e.error, e.requires_gpu, e.gpu_mem_mb, e.priority, "
             "e.wall_clock_budget_s, e.mem_budget_mb, e.kill_reason, e.ingested_doc_id, "
-            "e.started_at, e.completed_at, "
+            "e.started_at, e.completed_at, e.worker, "
             "c.statement AS claim_statement, c.confidence AS claim_confidence "
             "FROM experiment_runs e "
             "LEFT JOIN tasks t ON t.id = e.task_id "
