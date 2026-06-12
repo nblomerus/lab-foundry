@@ -630,6 +630,8 @@ export interface QmExperiment {
   kind: string;
   status: string;
   claim_id?: number | null;
+  claim_statement?: string | null;
+  claim_confidence?: number | null;
   hypothesis?: string | null;
   requires_gpu?: boolean | null;
   gpu_mem_mb?: number | null;
@@ -656,6 +658,8 @@ export interface QmExperimentDetail {
   kind: string;
   status: string;
   claim_id?: number | null;
+  claim_statement?: string | null;
+  claim_confidence?: number | null;
   hypothesis?: string | null;
   dataset_plan?: string | null;
   code?: string | null;

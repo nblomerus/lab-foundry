@@ -40,6 +40,8 @@ def _exp_row(r) -> dict:
         "kind": r["kind"],
         "status": r["status"],
         "claim_id": params.get("claim_id"),
+        "claim_statement": r["claim_statement"],
+        "claim_confidence": float(r["claim_confidence"]) if r["claim_confidence"] is not None else None,
         "hypothesis": params.get("hypothesis"),
         "requires_gpu": r["requires_gpu"],
         "gpu_mem_mb": r["gpu_mem_mb"],
@@ -67,10 +69,15 @@ async def experiments(request: Request, limit: int = 50) -> dict:
             for r in await conn.fetch("SELECT status, count(*) AS n FROM experiment_runs GROUP BY status")
         }
         rows = await conn.fetch(
-            "SELECT id, kind, status, params, resource_usage, researcher_notes, interpretation, error, "
-            "requires_gpu, gpu_mem_mb, priority, wall_clock_budget_s, mem_budget_mb, kill_reason, "
-            "ingested_doc_id, started_at, completed_at "
-            "FROM experiment_runs ORDER BY id DESC LIMIT $1",
+            "SELECT e.id, e.kind, e.status, e.params, e.resource_usage, e.researcher_notes, "
+            "e.interpretation, e.error, e.requires_gpu, e.gpu_mem_mb, e.priority, "
+            "e.wall_clock_budget_s, e.mem_budget_mb, e.kill_reason, e.ingested_doc_id, "
+            "e.started_at, e.completed_at, "
+            "c.statement AS claim_statement, c.confidence AS claim_confidence "
+            "FROM experiment_runs e "
+            "LEFT JOIN tasks t ON t.id = e.task_id "
+            "LEFT JOIN claims c ON c.id = t.claim_id "
+            "ORDER BY e.id DESC LIMIT $1",
             limit,
         )
         mode = await conn.fetchval("SELECT mode FROM agent_modes WHERE agent_name = 'quartermaster'") or "off"
@@ -97,10 +104,15 @@ async def experiment_detail(experiment_id: int, request: Request) -> dict:
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         r = await conn.fetchrow(
-            "SELECT id, kind, status, params, code, result, error, resource_usage, provenance, "
-            "dataset_refs, researcher_notes, interpretation, requires_gpu, gpu_mem_mb, priority, "
-            "wall_clock_budget_s, mem_budget_mb, kill_reason, worker, ingested_doc_id, "
-            "started_at, completed_at FROM experiment_runs WHERE id = $1",
+            "SELECT e.id, e.kind, e.status, e.params, e.code, e.result, e.error, e.resource_usage, "
+            "e.provenance, e.dataset_refs, e.researcher_notes, e.interpretation, e.requires_gpu, "
+            "e.gpu_mem_mb, e.priority, e.wall_clock_budget_s, e.mem_budget_mb, e.kill_reason, "
+            "e.worker, e.ingested_doc_id, e.started_at, e.completed_at, "
+            "c.statement AS claim_statement, c.confidence AS claim_confidence "
+            "FROM experiment_runs e "
+            "LEFT JOIN tasks t ON t.id = e.task_id "
+            "LEFT JOIN claims c ON c.id = t.claim_id "
+            "WHERE e.id = $1",
             experiment_id,
         )
         if r is None:
@@ -112,6 +124,8 @@ async def experiment_detail(experiment_id: int, request: Request) -> dict:
         "kind": r["kind"],
         "status": r["status"],
         "claim_id": params.get("claim_id"),
+        "claim_statement": r["claim_statement"],
+        "claim_confidence": float(r["claim_confidence"]) if r["claim_confidence"] is not None else None,
         "hypothesis": params.get("hypothesis"),
         "dataset_plan": params.get("dataset_plan"),
         "code": r["code"],

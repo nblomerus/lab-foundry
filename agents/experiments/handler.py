@@ -160,6 +160,11 @@ HARD RULES — reject these and derive a real claim from the direction instead:
   "hypothesis generation is absent/trivial", "no results exist yet"). Those are not experiments.
 - NO generic proxy benchmarks (e.g. plain accuracy on a fresh make_classification) UNLESS that
   metric IS the claim. A number that doesn't discriminate the hypothesis is worthless.
+- STRESS THE REGIME THE CLAIM IS ABOUT — design the experiment so the claim COULD fail. If the
+  hypothesis says "low-data", use genuinely small n; if "miscalibration", pick a setting where
+  miscalibration is plausible (noise, shift, model mismatch), not a toy where every method is
+  trivially perfect. Two arms that both succeed easily discriminate NOTHING (we learned this:
+  an exact-vs-sparse GP test on a clean 1D toy returned ECE 0.0009 for both — zero information).
 - NEVER SIMULATE THE PHENOMENON UNDER TEST. If your code ASSUMES the behaviour being measured —
   e.g. drawing "model answers" from an invented per-sample accuracy and then "measuring" that
   voting improves accuracy — the conclusion was baked into the input: fabricated evidence, worse
