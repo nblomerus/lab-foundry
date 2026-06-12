@@ -87,6 +87,30 @@ answers are fine); model OUTPUTS must come from llm.* calls, never be fabricated
     )
 
 
+def _datasets_block() -> str:
+    """The design prompt's /data section, rendered from the benchmark pack's manifest
+    (ops.build_benchmark_pack) at call time — absent pack, absent section."""
+    manifest_path = os.path.join(sandbox.DATASETS_DIR, "manifest.json")
+    try:
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+    except OSError:
+        return ""
+    if not manifest:
+        return ""
+    lines = "\n".join(
+        f"- /data/{d['file']} — {d['n']} rows; {d['task']}; fields: {d['fields']} ({d['license']})" for d in manifest
+    )
+    return f"""
+## Benchmark datasets mounted READ-ONLY at /data (offline, license-clean)
+{lines}
+Load with:  import json;  rows = [json.loads(line) for line in open("/data/gsm8k_test.jsonl")]
+When the hypothesis concerns benchmark-type behaviour, PREFER a real benchmark slice over
+in-code generated probes — sample a SEEDED subset sized to your wall-clock budget (e.g.
+50-200 rows), and report which dataset, slice size, and seed in the result's `dataset`.
+"""
+
+
 async def _build_design(ctx: dict, state, memory) -> PromptLayer:
     hypothesis = ctx.get("hypothesis") or ""
     goal = ctx.get("goal") or ""
@@ -94,6 +118,8 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
     lab_constraints = ctx.get("lab_constraints") or _LAB_CONSTRAINTS
     prior_hypotheses = ctx.get("prior_hypotheses") or []
     llm_block, llm_import, cannot = _llm_endpoint_blocks()
+    data_block = _datasets_block()
+    data_hint = " or a /data benchmark slice (see above)" if data_block else ""
     prior_block = (
         "## Experiments ALREADY run on this direction — test a DISTINCT facet, do NOT repeat these\n"
         + "\n".join(f"- {h}" for h in prior_hypotheses)
@@ -144,13 +170,13 @@ HARD RULES — reject these and derive a real claim from the direction instead:
   An honest infeasible beats fake support.
 If the stated hypothesis is meta/degenerate, DERIVE the most load-bearing testable claim about the
 direction's method and test that — name it explicitly in `hypothesis`.
-{llm_block}
+{llm_block}{data_block}
 Write `code` as a COMPLETE, self-contained Python script:
 - Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch{llm_import}.
-- NO network and NO file access outside the cwd. Synthesize your data, or use a sklearn/torch toy
-  dataset (e.g. make_classification, load_digits, a small random tensor). State your data source in
-  `dataset_plan` (be specific: the generator/loader, its parameters, and shape — this is the dataset's
-  reproducibility record).
+- NO network; file reads only from the cwd and the read-only /data mount. Synthesize your data, use
+  a sklearn/torch toy dataset (e.g. make_classification, load_digits, a small random tensor){data_hint}.
+  State your data source in `dataset_plan` (be specific: the loader/generator, its parameters, the
+  slice + seed — this is the dataset's reproducibility record).
 - Seed every RNG you touch (numpy, torch, python `random`) from `seed` so the run reproduces.
 - Keep it within the wall-clock and memory budgets you estimate. Modest is better than ambitious —
   a clean signal on a toy problem beats a run that times out.

@@ -128,3 +128,48 @@ async def test_sandbox_no_mounts_when_broker_down():
     )
     joined = " ".join(cmd)
     assert "/sock/ollama.sock" not in joined and "/opt/lab/llm.py" not in joined
+
+
+async def test_sandbox_mounts_benchmark_pack_when_present(tmp_path, monkeypatch):
+    """The /data benchmark pack mounts condition-driven, exactly like the LLM socket."""
+    pack = tmp_path / "benchmarks"
+    pack.mkdir()
+    monkeypatch.setattr(sandbox_mod, "DATASETS_DIR", str(pack))
+    cmd = sandbox_mod._build_cmd(
+        "lf-exp-1",
+        "/tmp/exp.py",
+        mem_mb=512,
+        cpus=1.0,
+        requires_gpu=False,
+        gpu_device=None,
+        datasets_dir=str(pack),
+        llm_socket=None,
+    )
+    assert f"{pack}:/data:ro" in " ".join(cmd)
+
+
+async def test_design_prompt_renders_dataset_manifest(tmp_path, monkeypatch):
+    """The design prompt's /data section is rendered from the pack's manifest at call time."""
+    import agents.experiments.handler as EH
+
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "gsm8k_test",
+                    "file": "gsm8k_test.jsonl",
+                    "task": "math",
+                    "n": 1319,
+                    "fields": "question, answer, final_answer",
+                    "license": "MIT",
+                    "source": "x",
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(sandbox_mod, "DATASETS_DIR", str(tmp_path))
+    block = EH._datasets_block()
+    assert "/data/gsm8k_test.jsonl — 1319 rows" in block
+    assert "SEEDED subset" in block
+    monkeypatch.setattr(sandbox_mod, "DATASETS_DIR", str(tmp_path / "missing"))
+    assert EH._datasets_block() == ""

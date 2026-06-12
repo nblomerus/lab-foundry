@@ -49,9 +49,9 @@ _SANDBOX_MODEL_CLAUSE = (
         "- The sandbox HAS a brokered LOCAL-MODEL endpoint: inference-time behaviour of these local "
         f"models IS testable — {_SANDBOX_LLM_MODELS} (≤7B fast, 14B moderate, 27B+ slow). Directions "
         "about sampling/decoding, self-consistency, calibration, prompt-format effects, or embedding "
-        "geometry OF THESE MODELS are fair game; probe inputs must be generated in-code (no external "
-        "benchmark files). Still NOT testable: fine-tuning or training pretrained weights, models "
-        "beyond the local zoo, web-scale benchmarks or internet datasets.\n"
+        "geometry OF THESE MODELS are fair game; probe inputs come from the mounted benchmark pack "
+        "or are generated in-code. Still NOT testable: fine-tuning or training pretrained weights, "
+        "models beyond the local zoo, web-scale benchmarks or internet-fetched datasets.\n"
     )
     if _SANDBOX_LLM_ON
     else (
@@ -69,7 +69,9 @@ LAB_CONSTRAINTS = os.environ.get("ARIADNE_LAB_CONSTRAINTS") or (
     "- EXPERIMENTS run in an OFFLINE sandbox: no network, no external datasets. Available stack: "
     "numpy / scipy / pandas / scikit-learn / xgboost / statsmodels / torch "
     "(CPU + a single modest GPU); classical models are built and trained FROM SCRATCH inside the run; "
-    "data must be synthesized or come from the stack's built-in toy datasets.\n"
+    "data is synthesized, comes from the stack's built-in toy datasets, or from the lab's small "
+    "OFFLINE benchmark pack mounted read-only at /data (GSM8K math, TruthfulQA, BoolQ, HumanEval) — "
+    "benchmark-grounded claims on THOSE sets are testable.\n"
     f"{_SANDBOX_MODEL_CLAUSE}"
     "- Embeddings + hybrid retrieval over a certified corpus (for LITERATURE grounding, not experiments).\n"
     "FAVOUR directions a sandbox experiment can SETTLE TODAY — a falsifiable claim with a measurable "

@@ -42,6 +42,11 @@ _MAX_OUTPUT_BYTES = 256 * 1024  # cap captured stdout/stderr — a runaway print
 LLM_SOCKET = os.environ.get("EXPERIMENT_LLM_SOCKET", "/tmp/labfoundry-llm-broker.sock")
 _LLM_HELPER = os.path.join(os.path.dirname(__file__), "sandbox_llm.py")
 
+# The offline benchmark pack (ops.build_benchmark_pack) — mounted read-only at /data when
+# present, same condition-driven shape as the LLM socket. Real evaluation data for
+# model-behaviour experiments; without it they must generate probe inputs in-code.
+DATASETS_DIR = os.environ.get("EXPERIMENT_DATASETS_DIR", "/mnt/data/labfoundry-benchmarks")
+
 
 def container_name(exp_id: int) -> str:
     return f"lf-exp-{exp_id}"
@@ -183,7 +188,7 @@ async def run_in_container(
         cpus=cpus,
         requires_gpu=requires_gpu,
         gpu_device=gpu_device,
-        datasets_dir=datasets_dir,
+        datasets_dir=datasets_dir or (DATASETS_DIR if os.path.isdir(DATASETS_DIR) else None),
         llm_socket=LLM_SOCKET if os.path.exists(LLM_SOCKET) else None,
     )
     _RUNNING[exp_id] = name
