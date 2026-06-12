@@ -47,10 +47,22 @@ async def handle_ariadne_deliberate(event: dict, dispatcher) -> dict | None:
 
     # Advisory gate: only persist a graded-passing tree (no hallucinated-citation agendas).
     if not report.passed:
+        # Name EVERY predicate — a failure log that only shows citations sent us hunting
+        # through the grader when a different check (schema/goals/grounding/scores) failed.
         log.warning(
-            "ariadne: deliberation FAILED grading (citations=%.0f%%) — not persisting", report.citations_resolved * 100
+            "ariadne: deliberation FAILED grading — not persisting "
+            "(directions=%d schema_valid=%s goals_wellformed=%.0f%% grounded=%.0f%% "
+            "scores_wellformed=%.0f%% citations=%.0f%% of %d, unresolved=%s)",
+            len(out.directions),
+            report.schema_valid,
+            report.claim_goals_wellformed * 100,
+            report.directions_grounded * 100,
+            report.scores_wellformed * 100,
+            report.citations_resolved * 100,
+            report.n_citations,
+            report.unresolved[:3],
         )
-        return {**summary, "persisted": False, "reason": "failed_grading"}
+        return {**summary, "persisted": False, "reason": "failed_grading", "grade": report.model_dump()}
 
     counts = await persist_directions(state, out)
     n_requests = await request_evidence(state, out.requests)  # demand side → Mimir acquire queue

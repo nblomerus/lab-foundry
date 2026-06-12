@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from agents.ariadne import handler, persist, reflect
+from agents.ariadne.grade import GradeReport
 from tests._helpers import ScriptedPool, make_state, patch_chain
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -344,7 +345,17 @@ async def test_request_evidence_empty_and_none(monkeypatch):
 # handler.handle_ariadne_deliberate
 # ════════════════════════════════════════════════════════════════════════════════
 def _grade_report(passed=True, citations_resolved=1.0):
-    return SimpleNamespace(passed=passed, citations_resolved=citations_resolved)
+    # The real model — the handler's failure path reads every predicate + model_dump().
+    return GradeReport(
+        schema_valid=passed,
+        claim_goals_wellformed=1.0,
+        directions_grounded=1.0,
+        citations_resolved=citations_resolved,
+        scores_wellformed=1.0,
+        n_citations=3,
+        unresolved=[],
+        passed=passed,
+    )
 
 
 def _dispatcher(pool=None):
