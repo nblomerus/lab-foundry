@@ -161,6 +161,77 @@ async def _maybe_plan(pool) -> bool:
     return True
 
 
+async def _maybe_scholarship(pool) -> int:
+    """Walk approved directions through the PI's written arc — condition-driven:
+    approved + no literature review → ariadne.review; review final + no proposal →
+    ariadne.propose. The experiment driver below WAITS for the proposal (research is
+    conducted against HER hypotheses), and once a finding lands at a settled point
+    (concluded, or evidence-capped) synthesis.article composes the write-up. One arc
+    step per tick per kind (trickle); day-bucketed dedup so a failed write retries
+    tomorrow, with a pending-check so steps never stack."""
+    emitted = 0
+    async with pool.acquire() as conn:
+        day = await conn.fetchval("SELECT to_char(now(), 'YYYY-MM-DD')")
+
+        async def _emit_step(event_type: str, cid: int) -> bool:
+            if await conn.fetchval(
+                "SELECT count(*) FROM events WHERE event_type = $1 AND status = 'pending'", event_type
+            ):
+                return False
+            res = await conn.execute(
+                "INSERT INTO events (event_type, target_type, target_id, payload, status, dedup_key) "
+                "VALUES ($1, 'claim', $2, $3::jsonb, 'pending', $4) "
+                "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+                event_type,
+                cid,
+                json.dumps({"claim_id": cid}),
+                f"arc-{event_type}-{cid}-{day}",
+            )
+            return res.endswith(" 1")
+
+        # review: approved + active, no final lit_review.
+        cid = await conn.fetchval(
+            f"SELECT c.id FROM claims c JOIN direction_gate dg ON dg.claim_id = c.id "
+            f"WHERE dg.status = 'approved' AND c.claim_kind = 'direction' AND c.status IN {_ACTIVE} "
+            f"AND NOT EXISTS (SELECT 1 FROM research_documents rd "
+            f"  WHERE rd.claim_id = c.id AND rd.kind = 'lit_review' AND rd.status = 'final') "
+            f"ORDER BY c.id LIMIT 1"
+        )
+        if cid is not None and await _emit_step("ariadne.review", cid):
+            emitted += 1
+        # proposal: review final, no final proposal.
+        cid = await conn.fetchval(
+            f"SELECT c.id FROM claims c JOIN direction_gate dg ON dg.claim_id = c.id "
+            f"WHERE dg.status = 'approved' AND c.claim_kind = 'direction' AND c.status IN {_ACTIVE} "
+            f"AND EXISTS (SELECT 1 FROM research_documents rd "
+            f"  WHERE rd.claim_id = c.id AND rd.kind = 'lit_review' AND rd.status = 'final') "
+            f"AND NOT EXISTS (SELECT 1 FROM research_documents rd "
+            f"  WHERE rd.claim_id = c.id AND rd.kind = 'proposal' AND rd.status = 'final') "
+            f"ORDER BY c.id LIMIT 1"
+        )
+        if cid is not None and await _emit_step("ariadne.propose", cid):
+            emitted += 1
+        # article: a finding on file AND a settled point (concluded, or evidence-capped),
+        # no final article yet. Synthesis (the writer of record) composes it.
+        cid = await conn.fetchval(
+            f"SELECT c.id FROM claims c JOIN direction_gate dg ON dg.claim_id = c.id "
+            f"WHERE c.claim_kind = 'direction' AND dg.status = 'approved' "
+            f"AND EXISTS (SELECT 1 FROM research_findings rf WHERE rf.direction_claim_id = c.id) "
+            f"AND (c.status = 'concluded' OR (c.status IN {_ACTIVE} AND "
+            f"     (SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id "
+            f"      WHERE t.claim_id = c.id AND e.status = 'completed') >= $1)) "
+            f"AND NOT EXISTS (SELECT 1 FROM research_documents rd "
+            f"  WHERE rd.claim_id = c.id AND rd.kind = 'article' AND rd.status = 'final') "
+            f"ORDER BY c.id LIMIT 1",
+            EVIDENCE_CAP,
+        )
+        if cid is not None and await _emit_step("synthesis.article", cid):
+            emitted += 1
+    if emitted:
+        log.info("ariadne pace: advanced the research arc (%d step(s))", emitted)
+    return emitted
+
+
 async def _maybe_drive_experiments(pool) -> int:
     """Drive each APPROVED, active, non-concluded, non-HELD direction toward the experiment-coverage
     target. A direction needs >= SYNTHESIS_MIN experiments to be synthesized into a finding, but the
@@ -194,6 +265,12 @@ async def _maybe_drive_experiments(pool) -> int:
             WHERE dg.status = 'approved' AND c.claim_kind = 'direction' AND c.status IN {_ACTIVE}
               AND NOT EXISTS (
                   SELECT 1 FROM direction_adjudications da WHERE da.claim_id = c.id AND da.verdict = 'hold'
+              )
+              -- the traditional arc: experiments are conducted against the PI's PROPOSAL —
+              -- no proposal on file, no experiment series (the scholarship steps above write it).
+              AND EXISTS (
+                  SELECT 1 FROM research_documents rd
+                  WHERE rd.claim_id = c.id AND rd.kind = 'proposal' AND rd.status = 'final'
               )
             """
         )
@@ -406,6 +483,7 @@ async def ariadne_pacemaker(pool, stop: asyncio.Event) -> None:
             await _maybe_adjudicate(pool)  # independent novelty/impact check before the gate
             await _auto_approve(pool)  # hands-off: approve her own top directions (adjudication-gated)
             await _maybe_plan(pool)  # trigger the Planner for approved-but-unplanned directions
+            await _maybe_scholarship(pool)  # the written arc: review → proposal → (experiments) → article
             # Drive every approved direction to the experiment-coverage target so it can reach a
             # finding — but only when the experiments agent can actually run them.
             if EXPERIMENT_COVERAGE_TARGET > 0 and await get_agent_mode(pool, "experiments") in {"advisory", "active"}:

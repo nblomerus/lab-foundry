@@ -117,7 +117,22 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
     claim_statement = ctx.get("claim_statement") or ""
     lab_constraints = ctx.get("lab_constraints") or _LAB_CONSTRAINTS
     prior_hypotheses = ctx.get("prior_hypotheses") or []
+    proposal_hypotheses = ctx.get("proposal_hypotheses") or []
     llm_block, llm_import, cannot = _llm_endpoint_blocks()
+    proposal_block = ""
+    if proposal_hypotheses:
+        hyp_lines = "\n".join(
+            f"- {h.get('hid', 'H?')}: {h.get('statement', '')} "
+            f"(metric: {h.get('metric', '')}; decision: {h.get('threshold', '')})"
+            for h in proposal_hypotheses
+        )
+        proposal_block = (
+            "## The research PROPOSAL's hypotheses (the PI's plan — test the NEXT untested one)\n"
+            f"{hyp_lines}\n"
+            "Pick the first hypothesis NOT already covered by the prior experiments above, set "
+            "`hypothesis` to ITS statement (keep its hid prefix, e.g. 'H2: ...'), and design the "
+            "experiment that decides it by ITS metric and threshold.\n\n"
+        )
     data_block = _datasets_block()
     data_hint = " or a /data benchmark slice (see above)" if data_block else ""
     prior_block = (
@@ -139,7 +154,7 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
 ## Hypothesis to test
 {hypothesis or "(none stated — derive the most load-bearing testable claim from the direction)"}
 
-{prior_block}## Lab compute envelope (the experiment MUST fit this)
+{prior_block}{proposal_block}## Lab compute envelope (the experiment MUST fit this)
 {lab_constraints}
 
 ---
@@ -381,6 +396,15 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
         except Exception:  # noqa: BLE001 — best-effort context
             prior_hypotheses = []
 
+    proposal_hypotheses: list[dict] = []
+    if claim_id is not None and hasattr(state, "get_research_document"):
+        try:
+            proposal = await state.get_research_document(claim_id, "proposal")
+            if proposal:
+                proposal_hypotheses = (proposal.get("meta") or {}).get("hypotheses") or []
+        except Exception:  # noqa: BLE001 — the proposal is best-effort context
+            log.exception("experiments: failed to load proposal for claim %s", claim_id)
+
     prompt = await dispatcher.curator.build(
         invocation_type="experiments.design",
         context={
@@ -389,6 +413,7 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
             "claim_statement": claim_statement,
             "lab_constraints": _LAB_CONSTRAINTS,
             "prior_hypotheses": prior_hypotheses,
+            "proposal_hypotheses": proposal_hypotheses,
         },
     )
     design, run_id = await dispatcher.router.invoke(

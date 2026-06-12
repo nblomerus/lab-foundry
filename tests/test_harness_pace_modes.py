@@ -873,3 +873,39 @@ async def test_set_agent_mode_upsert_and_cache_invalidate():
     assert args[1] == "shadow"
     assert args[2] == "paused"
     assert "ariadne" not in agent_modes._cache  # invalidated
+
+
+# ── _maybe_scholarship: the written research arc ──────────────────────────────
+@aio
+async def test_scholarship_emits_review_for_unreviewed_direction():
+    pool = ScriptedPool(
+        [
+            ("to_char(now()", "2026-06-09"),
+            ("rd.kind = 'lit_review' AND rd.status = 'final') ORDER BY c.id LIMIT 1", 43),
+            ("status = 'pending'", 0),
+            ("INSERT INTO events", "INSERT 0 1"),
+        ]
+    )
+    n = await ariadne_pace._maybe_scholarship(pool)
+    assert n >= 1
+    ins = [c for c in pool.calls if c[0] == "execute" and "ariadne.review" in str(c[2])]
+    assert len(ins) == 1 and ins[0][2][1] == 43  # target claim
+    assert ins[0][2][3].startswith("arc-ariadne.review-43-")
+
+
+@aio
+async def test_scholarship_quiet_when_arc_complete():
+    pool = ScriptedPool([("to_char(now()", "2026-06-09")])  # all stage scans → None
+    assert await ariadne_pace._maybe_scholarship(pool) == 0
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_drive_experiments_waits_for_proposal(monkeypatch):
+    """No final proposal on file → the driver's candidate query excludes the direction
+    (research is conducted against the PI's plan)."""
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", []), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 0
+    sql = next(c[1] for c in pool.calls if c[0] == "fetch" and "direction_gate" in c[1])
+    assert "rd.kind = 'proposal'" in sql  # the gate is in the SQL itself

@@ -29,6 +29,7 @@ import httpx
 # (claim_invalidated / phase_adjudicator / phase_budget_exceeded / phase_transition)
 # are intentionally NOT imported or registered — see the registration block below.
 from agents.ariadne.handler import handle_ariadne_deliberate, handle_ariadne_reflect
+from agents.ariadne.scholarship import handle_ariadne_propose, handle_ariadne_review
 from agents.critic.handler import handle_finding_high_signal
 from agents.evaluation.handler import handle_task_completed
 from agents.evaluation.slop_handler import handle_audit_slop_detected
@@ -42,6 +43,7 @@ from agents.planner.decompose import handle_planner_decompose
 from agents.planner.handler import handle_queue_empty
 from agents.reflection.handler import handle_reflection_requested
 from agents.researcher.grounded_handler import handle_grounded_research
+from agents.synthesis.article import handle_synthesis_article
 from agents.synthesis.handler import handle_finding_synthesize
 from harness.curator import Curator
 from harness.dispatch import Dispatcher
@@ -271,6 +273,10 @@ async def main() -> int:
     # (defaults 'off' under KNOWLEDGE_CORE_ONLY). Flip to advisory/active with ops.agent_mode.
     dispatcher.register("ariadne.deliberate", handle_ariadne_deliberate)
     dispatcher.register("ariadne.reflect", handle_ariadne_reflect)
+    # The PI's written arc (traditional research steps): literature review → proposal.
+    # Same ariadne dial; the pacemaker advances the arc condition-driven.
+    dispatcher.register("ariadne.review", handle_ariadne_review)
+    dispatcher.register("ariadne.propose", handle_ariadne_propose)
     # Novelty (independent adjudicator) — registered ALWAYS; the 'novelty' mode dial gates it.
     # Scores each proposed direction's novelty/impact against the real nearest prior art + the
     # lab's own prior directions; the gate (ariadne_pace) requires its verdict='pass'.
@@ -292,6 +298,8 @@ async def main() -> int:
     # Once a direction has accumulated enough completed experiments, `finding.synthesize` composes them
     # into a paper-shaped FINDING, graduates the direction, and ingests the finding into the Library.
     dispatcher.register("finding.synthesize", handle_finding_synthesize)
+    # The arc's final document — synthesis (the writer of record) composes the article.
+    dispatcher.register("synthesis.article", handle_synthesis_article)
 
     # Mimir — Warden of the Library. ONE agent owns ingest + trust: on a
     # discovered source it stages, classify_trust-gates, then finalizes or

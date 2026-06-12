@@ -1159,6 +1159,26 @@ class PostgresClient:
                 )
             )
 
+    async def get_research_document(self, claim_id: int, kind: str) -> dict | None:
+        """The direction's current (final) research document of `kind` — lit_review /
+        proposal / article. The research arc's readers (proposal builder, experiment
+        designer, article composer) all come through here."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, claim_id, kind, title, body_md, meta, citations, created_at "
+                "FROM research_documents WHERE claim_id = $1 AND kind = $2 AND status = 'final' "
+                "ORDER BY id DESC LIMIT 1",
+                claim_id,
+                kind,
+            )
+        if row is None:
+            return None
+        d = dict(row)
+        for k in ("meta", "citations"):
+            if isinstance(d.get(k), str):
+                d[k] = json.loads(d[k])
+        return d
+
     async def latest_finding_n_for_claim(self, claim_id: int) -> int | None:
         """The evidence size (n_experiments) of the most recent finding for a direction, or None —
         so the synthesizer only re-runs when materially more experiments have accumulated."""

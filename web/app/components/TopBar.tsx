@@ -17,6 +17,7 @@ const TABS = [
   { href: "/ariadne", label: "Ariadne" },
   { href: "/researchers", label: "Researchers" },
   { href: "/experiments", label: "Experiments" },
+  { href: "/research", label: "Research" },
   { href: "/events", label: "Events" },
   { href: "/org", label: "Org" },
   { href: "/trace", label: "Trace" },

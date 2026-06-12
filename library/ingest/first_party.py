@@ -59,6 +59,10 @@ def _is_reproducible(source_kind: str, provenance: dict | None) -> bool:
         # a synthesis is reproducible iff it rests on the lab's OWN certified experiments —
         # the result it claims can be re-derived by re-running those runs (each itself pinned).
         return bool(provenance.get("grounded_in_experiments"))
+    if source_kind == "lab_scholarship":
+        # a research document (lit review / proposal / article) is anchored by its dossier
+        # linkage: the direction it belongs to and its research_documents row.
+        return bool(provenance.get("claim_id")) and bool(provenance.get("research_document_id"))
     return False
 
 
