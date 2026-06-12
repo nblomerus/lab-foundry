@@ -71,14 +71,16 @@ def _decide_rules(
     mission,
     approved_active=0,
     active_directions=1,
+    actionable=1,
     queued=0,
     last_delib=None,
     last_reflect=None,
     now=NOW,
 ):
     """Build the ordered ScriptedPool rules _decide issues (first match wins, so the
-    more specific substrings must precede the broad count(*) ones). active_directions
-    defaults to 1 (agenda alive) so the exhaustion branch stays out of the older tests."""
+    more specific substrings must precede the broad count(*) ones). active_directions /
+    actionable default to 1 (agenda alive + workable) so the exhaustion branch stays
+    out of the older tests."""
     return [
         ("SELECT now()", now),
         ("FROM documents WHERE queryable", corpus),
@@ -87,6 +89,8 @@ def _decide_rules(
         ("FROM direction_gate dg JOIN claims c", approved_active),
         # live directions of any gate status (the agenda-exhaustion probe).
         ("claim_kind='direction' AND status IN", active_directions),
+        # directions that can still move the lab: approved / pending adjudication / passed.
+        ("da.verdict='pass'", actionable),
         # queued deliberate/reflect events.
         ("event_type IN ('ariadne.deliberate','ariadne.reflect')", queued),
         ("event_type='ariadne.deliberate' ORDER BY", [last_delib] if last_delib else []),
@@ -209,6 +213,67 @@ async def test_decide_agenda_exhausted_cooldown_holds_and_skips_reflect(monkeypa
     assert len(flags) == 1
     payload = json.loads(flags[0][2][0])
     assert payload["deliberate_retry_in_s"] == 5400  # 2h - 30min
+
+
+@aio
+async def test_decide_all_held_agenda_forces_deliberate(monkeypatch):
+    """Live directions exist but NONE are actionable (all held, none approved, none pending
+    adjudication) → exhausted in all but name: deliberate fires on the cooldown alone and the
+    indicator carries the unactionable count."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)  # tiny growth, cooldown elapsed
+    pool = ScriptedPool(_decide_rules(corpus=1000, mission=7, active_directions=3, actionable=0, last_delib=last_d))
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.deliberate"
+    flags = [c for c in pool.calls if c[0] == "execute" and "'loop.unclosed'" in c[1]]
+    assert len(flags) == 1
+    payload = json.loads(flags[0][2][0])
+    assert payload["kind"] == "agenda_exhausted"
+    assert payload["active_unactionable"] == 3
+
+
+@aio
+async def test_decide_all_held_blocked_by_committed_work(monkeypatch):
+    """All-held EXCEPT committed in-flight work exists (approved_active > 0) → never re-frame
+    over it; normal flow continues (no exhaustion, no deliberate)."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_MAX_AGE_S", 6 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)
+    last_r = _event_row(_ago(10 * 60), corpus=990)  # recent reflect → nothing fires
+    pool = ScriptedPool(
+        _decide_rules(
+            corpus=1000,
+            mission=7,
+            active_directions=3,
+            actionable=1,  # the approved one counts as actionable
+            approved_active=1,
+            last_delib=last_d,
+            last_reflect=last_r,
+        )
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None
+    assert not any(c[0] == "execute" and "'loop.unclosed'" in c[1] for c in pool.calls)
+
+
+@aio
+async def test_decide_pass_awaiting_approval_skips_exhaustion(monkeypatch):
+    """An adjudicated-pass direction awaiting auto-approve is actionable supply — the
+    exhaustion hatch must NOT fire over it."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    last_d = _event_row(_ago(3 * 3600), corpus=100)
+    last_r = _event_row(_ago(50 * 60), corpus=100)  # grew 900 ≥ 800 → normal reflect
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=2, actionable=1, last_delib=last_d, last_reflect=last_r)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.reflect"
+    assert not any(c[0] == "execute" and "'loop.unclosed'" in c[1] for c in pool.calls)
 
 
 @aio

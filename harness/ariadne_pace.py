@@ -231,13 +231,13 @@ async def _refresh_field_model(pool) -> None:
         log.warning("ariadne pace: field model refresh failed: %s", e)
 
 
-async def _flag_agenda_exhausted(pool, mission_id: int, corpus: int, retry_in_s: float, now) -> None:
-    """loop.unclosed [agenda_exhausted] — a mission with ZERO live directions stalls every
-    downstream lane (plan → research → experiment → synthesize) until a deliberation
-    restocks the agenda; flag it hourly so lab_doctor/closure_audit name the culprit.
-    Sentinel target (target_id 0, mirroring dispatch._emit_indicator) because a NULL
-    target_id never conflicts (Postgres NULLs are distinct) and the hourly dedup would be
-    decorative."""
+async def _flag_agenda_exhausted(pool, mission_id: int, corpus: int, retry_in_s: float, now, *, active: int = 0) -> None:
+    """loop.unclosed [agenda_exhausted] — a mission with ZERO live directions (or only
+    unactionable held ones: `active` > 0) stalls every downstream lane (plan → research →
+    experiment → synthesize) until a deliberation restocks the agenda; flag it hourly so
+    lab_doctor/closure_audit name the culprit. Sentinel target (target_id 0, mirroring
+    dispatch._emit_indicator) because a NULL target_id never conflicts (Postgres NULLs
+    are distinct) and the hourly dedup would be decorative."""
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO events (event_type, target_type, target_id, payload, dedup_key) "
@@ -248,6 +248,7 @@ async def _flag_agenda_exhausted(pool, mission_id: int, corpus: int, retry_in_s:
                     "kind": "agenda_exhausted",
                     "mission_id": mission_id,
                     "corpus": corpus,
+                    "active_unactionable": active,
                     "deliberate_retry_in_s": int(retry_in_s),
                 }
             ),
@@ -285,6 +286,18 @@ async def _decide(pool) -> tuple[str | None, int]:
         active_directions = await conn.fetchval(
             f"SELECT count(*) FROM claims WHERE claim_kind='direction' AND status IN {_ACTIVE}"
         )
+        # Directions that can still MOVE the lab: gate-approved (workable), awaiting the
+        # independent adjudicator (pipeline in progress), or adjudicated 'pass' (auto-
+        # approvable). An agenda where every live direction is HELD is exhausted in all
+        # but name — the planner won't plan it, the driver won't experiment on it, and
+        # auto-approve requires a 'pass' — yet it kept the empty-agenda hatch from firing
+        # (observed 2026-06-12: adjudicator held all 3 fresh directions on real prior art).
+        actionable = await conn.fetchval(
+            f"SELECT count(*) FROM claims c WHERE c.claim_kind='direction' AND c.status IN {_ACTIVE} AND ("
+            f"EXISTS (SELECT 1 FROM direction_gate dg WHERE dg.claim_id=c.id AND dg.status='approved') "
+            f"OR NOT EXISTS (SELECT 1 FROM direction_adjudications da WHERE da.claim_id=c.id) "
+            f"OR EXISTS (SELECT 1 FROM direction_adjudications da WHERE da.claim_id=c.id AND da.verdict='pass'))"
+        )
         # Don't stack triggers if one is already queued.
         if await conn.fetchval(
             "SELECT count(*) FROM events WHERE event_type IN ('ariadne.deliberate','ariadne.reflect') "
@@ -305,19 +318,29 @@ async def _decide(pool) -> tuple[str | None, int]:
     def age(row):
         return (now - row["emitted_at"]).total_seconds() if row else 1e12
 
-    # Agenda EXHAUSTED: a mission exists but zero live directions remain. Reflect no-ops on an
-    # empty agenda, and once intake has relaxed to the 6h agenda cadence the growth gate below
-    # may never trip — without this escape hatch the lab parks silently (observed 2026-06-12:
-    # 43/43 directions terminal, reflect consumed in 4ms, growth 33/3000). Growth is meaningless
-    # with nothing left to steer, so re-frame on the deliberate cooldown alone (anti-thrash for
-    # a deliberation that fails grading and restocks nothing), and skip the pointless reflect.
-    if mission is not None and active_directions == 0:
+    # Agenda EXHAUSTED: a mission exists but zero live directions remain — OR every live
+    # direction is unactionable (none approved, none awaiting adjudication, none passed:
+    # all held). Reflect no-ops on an empty agenda, and once intake has relaxed to the 6h
+    # agenda cadence the growth gate below may never trip — without this escape hatch the
+    # lab parks silently (observed 2026-06-12 twice: 43/43 directions terminal, then a
+    # fresh agenda held wholesale by the adjudicator). Growth is meaningless with nothing
+    # workable to steer, so re-frame on the deliberate cooldown alone (anti-thrash for a
+    # deliberation that restocks nothing) and skip the pointless reflect. The forced
+    # deliberation supersedes the held directions via the normal persist path; a human can
+    # still gate-approve a held direction any time before it fires. approved_active == 0
+    # is required in the all-held arm — never re-frame over committed in-flight work.
+    if mission is not None and (active_directions == 0 or (approved_active == 0 and actionable == 0)):
+        why = (
+            "0 live directions"
+            if active_directions == 0
+            else f"{active_directions} live, none actionable (all held/unapproved)"
+        )
         retry_in = max(0.0, DELIB_COOLDOWN_S - age(last_delib))
-        await _flag_agenda_exhausted(pool, mission, corpus, retry_in, now)
+        await _flag_agenda_exhausted(pool, mission, corpus, retry_in, now, active=active_directions)
         if age(last_delib) >= DELIB_COOLDOWN_S:
-            log.warning("ariadne pace: agenda EXHAUSTED (0 live directions) — forcing deliberate")
+            log.warning("ariadne pace: agenda EXHAUSTED (%s) — forcing deliberate", why)
             return "ariadne.deliberate", corpus
-        log.warning("ariadne pace: agenda EXHAUSTED (0 live directions) — deliberate in %.0fs (cooldown)", retry_in)
+        log.warning("ariadne pace: agenda EXHAUSTED (%s) — deliberate in %.0fs (cooldown)", why, retry_in)
         return None, corpus
 
     # Deliberate: bootstrap, or a big corpus jump after the cooldown — but NEVER while approved
