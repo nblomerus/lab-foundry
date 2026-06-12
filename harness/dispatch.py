@@ -152,6 +152,7 @@ CLOSURE_EXEMPT_EVENTS = frozenset(
         "cost.cap_reached",
         "lessons.reconciled",
         "quartermaster.snapshot",  # QM per-tick compute telemetry — streamed, never handled
+        "direction.reopened",  # closure-reopen breadcrumb (gap → fresh evidence → re-opened)
         # the guard's own indicators (must never recurse into themselves)
         "agent.stalled",
         "agent.slow",
@@ -188,6 +189,20 @@ SCOUT_SETTLE_MIN = float(os.environ.get("CLOSURE_SCOUT_SETTLE_MIN", "20"))  # le
 # stuck direction can still progress to a scout sweep and retirement.
 CLOSURE_ACQUIRE_WAIT_MIN = float(os.environ.get("CLOSURE_ACQUIRE_WAIT_MIN", "10"))
 CLOSURE_LOOKBACK_DAYS = int(os.environ.get("CLOSURE_LOOKBACK_DAYS", "3"))
+
+# Reopen: a declared gap is a verdict on the corpus AS IT WAS, not a death sentence —
+# the field keeps publishing, a broken scout heals, an outage stops masking real
+# sources. When ≥ MATCH_MIN new queryable documents matching a gapped direction's thin
+# topics have been ingested since the gap was declared, the watchdog re-opens the SAME
+# claim (its adjudication + gate approval still stand) and re-queues a research task.
+# A reopened direction that re-gaps gets a fresh invalidated_at, so every reopen cycle
+# costs fresh on-topic evidence — no free oscillation.
+CLOSURE_REOPEN_MATCH_MIN = int(os.environ.get("CLOSURE_REOPEN_MATCH_MIN", "5"))
+# Only directions gapped within this window are watched — older themes belong to a
+# future deliberation, not a mechanical resurrect.
+CLOSURE_REOPEN_WINDOW_DAYS = int(os.environ.get("CLOSURE_REOPEN_WINDOW_DAYS", "21"))
+# At most this many reopens per watchdog tick — trickle back into the gate budget.
+CLOSURE_REOPEN_MAX_PER_TICK = int(os.environ.get("CLOSURE_REOPEN_MAX_PER_TICK", "1"))
 
 
 # -------------------------------------------------------------------------
@@ -859,10 +874,11 @@ class Dispatcher:
         )
 
     async def _declare_gap(self, claim_id: int, reason: str) -> None:
-        """Retire a direction that genuinely can't progress (corpus exhausted AFTER a targeted
-        scout) → frees the approved-direction budget slot for the next direction. Without a state
-        client (e.g. tests), falls back to a loop.unclosed indicator. Best-effort — a failure here
-        must not kill the watchdog."""
+        """Retire a direction that can't progress on TODAY'S corpus (exhausted AFTER a targeted
+        scout) → frees the approved-direction budget slot for the next direction. Not forever:
+        _reopen_gapped_directions re-opens it when enough new on-topic evidence arrives. Without
+        a state client (e.g. tests), falls back to a loop.unclosed indicator. Best-effort — a
+        failure here must not kill the watchdog."""
         state = getattr(self, "state", None)
         if state is None:
             await self._emit_indicator(
@@ -967,6 +983,76 @@ class Dispatcher:
             # (4) STILL thin after acquire + a targeted scout → a genuine research gap. Pivot.
             await self._declare_gap(cid, "research gap: corpus still thin after acquire + targeted scout")
 
+    async def _reopen_gapped_directions(self, conn) -> None:
+        """Gap ≠ dead end. A declared research gap judged the corpus AS IT WAS — the field
+        keeps publishing, and a scout outage can fake a gap — so when enough NEW documents
+        matching the direction's thin topics arrive, re-open the SAME claim (adjudication +
+        gate approval still stand, which also keeps the novelty adjudicator from holding the
+        theme as redundant) and re-queue a research task against the now-richer corpus.
+
+        Bounded: only gaps within CLOSURE_REOPEN_WINDOW_DAYS are watched, at most
+        CLOSURE_REOPEN_MAX_PER_TICK reopen per tick, and a re-gap refreshes invalidated_at so
+        each cycle costs ≥ CLOSURE_REOPEN_MATCH_MIN fresh on-topic documents."""
+        if await get_agent_mode(self.pool, "researcher") not in {"advisory", "active"}:
+            return
+        gapped = await conn.fetch(
+            "SELECT c.id, c.statement, c.invalidated_at FROM claims c "
+            "JOIN direction_gate dg ON dg.claim_id = c.id AND dg.status = 'approved' "
+            "WHERE c.claim_kind = 'direction' AND c.status = 'invalidated' "
+            "AND c.invalidation_reason LIKE 'research gap%' "
+            "AND c.invalidated_at > now() - make_interval(days => $1::int) "
+            "ORDER BY c.invalidated_at LIMIT 12",
+            int(CLOSURE_REOPEN_WINDOW_DAYS),
+        )
+        reopened = 0
+        for g in gapped:
+            if reopened >= CLOSURE_REOPEN_MAX_PER_TICK:
+                return
+            cid = g["id"]
+            topics = [
+                t["q"]
+                for t in await conn.fetch(
+                    "SELECT DISTINCT payload->>'query' AS q FROM events WHERE event_type='acquire.requested' "
+                    "AND payload->>'claim_id' = $1 AND payload->>'query' IS NOT NULL LIMIT 6",
+                    str(cid),
+                )
+            ] or [(g["statement"] or "")[:120]]
+            # Distinct NEW queryable docs whose chunks match ANY thin topic — an OR of websearch
+            # tsqueries against the stored tsv, i.e. the same FTS the researcher will retrieve
+            # with, so "reopenable" means "the researcher would actually see new material".
+            matches = await conn.fetchval(
+                "SELECT count(DISTINCT ch.document_id) FROM chunks ch "
+                "JOIN documents d ON d.id = ch.document_id "
+                "WHERE d.queryable AND d.ingested_at > $1 AND ch.tsv @@ ("
+                "  SELECT string_agg(qt, ' | ')::tsquery FROM ("
+                "    SELECT websearch_to_tsquery('english', t)::text AS qt FROM unnest($2::text[]) t"
+                "  ) s WHERE qt <> ''"
+                ")",
+                g["invalidated_at"],
+                topics,
+            )
+            if (matches or 0) < CLOSURE_REOPEN_MATCH_MIN:
+                continue
+            res = await conn.execute(
+                "UPDATE claims SET status = 'proposed', invalidated_at = NULL, "
+                "invalidated_by_verdict_id = NULL, invalidation_reason = NULL, updated_at = now() "
+                "WHERE id = $1 AND status = 'invalidated'",
+                cid,
+            )
+            if not str(res).endswith(" 1"):
+                continue  # raced — someone else already moved it
+            await conn.execute(
+                "INSERT INTO events (event_type, target_type, target_id, payload, dedup_key) "
+                "VALUES ('direction.reopened', 'claim', $1, $2::jsonb, $3) "
+                "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+                cid,
+                json.dumps({"claim_id": cid, "new_matching_docs": matches, "topics": topics}),
+                f"reopen-{cid}-{int(g['invalidated_at'].timestamp())}",
+            )
+            await self._requeue_direction(conn, cid, g["statement"], "reopened")
+            reopened += 1
+            log.info("closure: REOPENED direction %s — %d new on-topic document(s) since its gap", cid, matches)
+
     # -- Watchdog -------------------------------------------------------
 
     async def _watchdog_loop(self) -> None:
@@ -982,6 +1068,7 @@ class Dispatcher:
                     await self._detect_broken_agents(conn)
                     await self._detect_unclosed_events(conn)
                     await self._advance_research_closure(conn)  # auto-close the research ladder
+                    await self._reopen_gapped_directions(conn)  # gap ≠ dead end: new evidence re-opens
                     await self._detect_stuck_directions(conn)  # flag any residual the ladder didn't clear
                 await self._detect_stalls()
                 await self._reconcile_lessons_if_due()

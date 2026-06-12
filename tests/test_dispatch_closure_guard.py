@@ -281,3 +281,109 @@ async def test_emit_targeted_sweep_carries_claim_and_topics():
     assert s[0]["dedup"] == "closure-scout-43"
     # targeted niche search → relevance ranking, not newest arXiv-wide
     assert s[0]["payload"]["sort"] == "relevance"
+
+
+# ===========================================================================
+# Reopen — _reopen_gapped_directions (gap ≠ dead end)
+# ===========================================================================
+
+
+def _reopen_pool(*, gapped=None, topics=None, matches=0, update="UPDATE 1"):
+    """Scripted DB for the reopen rung. `gapped` rows come from the invalidated-direction
+    scan (keyed on its distinctive c.invalidated_at column list); `matches` is the count of
+    new docs whose chunks FTS-match the direction's thin topics."""
+    if gapped is None:
+        gapped = [
+            {
+                "id": 43,
+                "statement": "Frontier mapping for Gaussian processes",
+                "invalidated_at": _NOW - timedelta(days=2),
+            }
+        ]
+    rules = [
+        ("c.invalidated_at FROM claims", gapped),
+        ("DISTINCT payload->>'query'", topics or [{"q": "deep kernel GP"}]),
+        ("count(DISTINCT ch.document_id)", matches),
+        ("UPDATE claims SET status = 'proposed'", update),
+    ]
+    return ScriptedPool(rules)
+
+
+def _reopen_events(pool):
+    out = []
+    for kind, sql, args in pool.calls:
+        if kind == "execute" and "direction.reopened" in sql:
+            out.append({"claim_id": args[0], "payload": json.loads(args[1]), "dedup": args[2]})
+    return out
+
+
+@pytest.mark.asyncio
+async def test_reopen_fires_on_new_matching_evidence(monkeypatch):
+    """Enough new on-topic docs since the gap → claim back to 'proposed', breadcrumb event,
+    and a fresh research task at the 'reopened' closure stage."""
+    _researcher_active(monkeypatch)
+    monkeypatch.setattr(dispatch_mod, "CLOSURE_REOPEN_MATCH_MIN", 5)
+    pool = _reopen_pool(matches=7)
+    disp = Dispatcher(pool=pool)
+    await disp._reopen_gapped_directions(pool.conn)
+    assert any(c[0] == "execute" and "UPDATE claims SET status = 'proposed'" in c[1] for c in pool.calls)
+    ev = _reopen_events(pool)
+    assert len(ev) == 1 and ev[0]["claim_id"] == 43
+    assert ev[0]["payload"]["new_matching_docs"] == 7
+    assert ev[0]["dedup"].startswith("reopen-43-")
+    tasks = _task_inserts(pool)
+    assert len(tasks) == 1
+    assert tasks[0]["payload"]["closure"]["stage"] == "reopened"
+    assert tasks[0]["claim_id"] == 43
+
+
+@pytest.mark.asyncio
+async def test_reopen_skips_below_match_threshold(monkeypatch):
+    """A trickle of new docs that don't reach the threshold leaves the gap standing."""
+    _researcher_active(monkeypatch)
+    monkeypatch.setattr(dispatch_mod, "CLOSURE_REOPEN_MATCH_MIN", 5)
+    pool = _reopen_pool(matches=4)
+    disp = Dispatcher(pool=pool)
+    await disp._reopen_gapped_directions(pool.conn)
+    assert not any(c[0] == "execute" for c in pool.calls)
+    assert _task_inserts(pool) == []
+
+
+@pytest.mark.asyncio
+async def test_reopen_trickles_one_per_tick(monkeypatch):
+    """Two reopenable gaps, cap 1 → only the OLDEST gap reopens this tick (no gate flood)."""
+    _researcher_active(monkeypatch)
+    monkeypatch.setattr(dispatch_mod, "CLOSURE_REOPEN_MATCH_MIN", 1)
+    monkeypatch.setattr(dispatch_mod, "CLOSURE_REOPEN_MAX_PER_TICK", 1)
+    gapped = [
+        {"id": 43, "statement": "GP frontier", "invalidated_at": _NOW - timedelta(days=2)},
+        {"id": 44, "statement": "LoRA edge cases", "invalidated_at": _NOW - timedelta(days=1)},
+    ]
+    pool = _reopen_pool(gapped=gapped, matches=9)
+    disp = Dispatcher(pool=pool)
+    await disp._reopen_gapped_directions(pool.conn)
+    ev = _reopen_events(pool)
+    assert len(ev) == 1 and ev[0]["claim_id"] == 43
+    assert len(_task_inserts(pool)) == 1
+
+
+@pytest.mark.asyncio
+async def test_reopen_raced_update_skips_followups(monkeypatch):
+    """If the UPDATE matched no row (claim moved concurrently), neither the breadcrumb event
+    nor the task re-queue may fire."""
+    _researcher_active(monkeypatch)
+    monkeypatch.setattr(dispatch_mod, "CLOSURE_REOPEN_MATCH_MIN", 1)
+    pool = _reopen_pool(matches=9, update="UPDATE 0")
+    disp = Dispatcher(pool=pool)
+    await disp._reopen_gapped_directions(pool.conn)
+    assert _reopen_events(pool) == []
+    assert _task_inserts(pool) == []
+
+
+@pytest.mark.asyncio
+async def test_reopen_noop_when_researcher_paused(monkeypatch):
+    _researcher_active(monkeypatch, mode="off")
+    pool = _reopen_pool(matches=9)
+    disp = Dispatcher(pool=pool)
+    await disp._reopen_gapped_directions(pool.conn)
+    assert pool.calls == []  # gated before any DB read
