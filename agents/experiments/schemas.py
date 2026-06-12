@@ -36,6 +36,15 @@ class ExperimentDesign(BaseModel):
     est_mem_mb: int = Field(default=2048, ge=128, description="Estimated memory budget in MB.")
     seed: int = Field(default=0, description="RNG seed for reproducibility (set every library's seed in the code).")
     dataset_plan: str = Field(default="", description="How the script obtains its data (synthesize / toy dataset).")
+    infeasible: bool = Field(
+        default=False,
+        description=(
+            "True when the hypothesis CANNOT be computed with the offline sandbox stack (it needs a "
+            "pretrained LLM, network access, or an external dataset). Set code to '' — never bridge the "
+            "gap with a simulation of the expected outcome; that is fabricated evidence."
+        ),
+    )
+    infeasible_reason: str = Field(default="", description="Why the hypothesis is untestable in the sandbox, if so.")
 
 
 class ExperimentReport(BaseModel):

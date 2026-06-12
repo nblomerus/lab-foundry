@@ -37,8 +37,10 @@ try:
     from agents.ariadne.loop import LAB_CONSTRAINTS as _LAB_CONSTRAINTS
 except ImportError:  # pragma: no cover — defensive; the export exists today
     _LAB_CONSTRAINTS = (
-        "Single modest GPU, local models up to ~32B. Favour inference-time / eval / small studies; "
-        "NO large training, NO network, NO external data fetch — synthesize or use sklearn/torch toy datasets."
+        "OFFLINE sandbox: no network, no pretrained weights, no external data. Stack: numpy/scipy/"
+        "pandas/scikit-learn/xgboost/statsmodels/torch (CPU + one modest GPU, from-scratch models only). "
+        "Favour classical ML / from-scratch torch / algorithmic claims; synthesize inputs or use the "
+        "stack's toy datasets. NEVER simulate the phenomenon under test."
     )
 
 
@@ -93,8 +95,16 @@ HARD RULES — reject these and derive a real claim from the direction instead:
   "hypothesis generation is absent/trivial", "no results exist yet"). Those are not experiments.
 - NO generic proxy benchmarks (e.g. plain accuracy on a fresh make_classification) UNLESS that
   metric IS the claim. A number that doesn't discriminate the hypothesis is worthless.
-If the stated hypothesis is meta/degenerate or untestable, DERIVE the most load-bearing testable
-claim about the direction's method and test that — name it explicitly in `hypothesis`.
+- NEVER SIMULATE THE PHENOMENON UNDER TEST. If your code ASSUMES the behaviour being measured —
+  e.g. drawing "model answers" from an invented per-sample accuracy and then "measuring" that
+  voting improves accuracy — the conclusion was baked into the input: fabricated evidence, worse
+  than no experiment. The script must COMPUTE the phenomenon: actually fit/train/run the model or
+  algorithm on data. Synthetic INPUTS are fine; synthetic OUTCOMES are not.
+- If the hypothesis cannot be COMPUTED with the preinstalled offline stack — it needs a pretrained
+  LLM's behaviour, network access, or an external dataset — do NOT approximate it. Set `infeasible`
+  true, say why in `infeasible_reason`, set `code` to "". An honest infeasible beats fake support.
+If the stated hypothesis is meta/degenerate, DERIVE the most load-bearing testable claim about the
+direction's method and test that — name it explicitly in `hypothesis`.
 
 Write `code` as a COMPLETE, self-contained Python script:
 - Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch.
@@ -196,6 +206,9 @@ a timeout because it was too slow, or no JSON printed) and FIX it. Common fixes:
 - Timeout (the run was killed) → make it cheaper: fewer samples/iterations, a smaller model.
 - No result → ensure the LAST stdout line is a single JSON object and nothing prints after it.
 - Wrong numbers → fix the logic so the metric actually bears on the hypothesis.
+NEVER "fix" a failure by replacing real computation with a simulation of the expected outcome
+(e.g. an unavailable model swapped for sampled answers at an assumed accuracy) — if the real
+computation is impossible in this sandbox, return `infeasible` true instead of fake code.
 
 Return the COMPLETE corrected script in `code` (not a diff), keeping it self-contained, seeded,
 network-free, and inside the budgets. Conform to ExperimentDesign (reuse the same hypothesis).
@@ -316,6 +329,39 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
         step_name="experiments.design",
     )
 
+    if design.infeasible:
+        # The honest dead-end: the hypothesis cannot be COMPUTED in the offline sandbox and
+        # simulating it would be fabricated evidence. Record a failed attempt with the reason
+        # as the run's note — the coverage driver counts attempts (its give-up cap stops
+        # re-driving the direction), the spine re-armer sees a handled run (no churn), and
+        # Ariadne's reflect reads WHY the direction can't be tested on this hardware.
+        reason = (design.infeasible_reason or "not computable with the offline sandbox stack").strip()
+        exp_id = await state.queue_experiment(
+            task_id=task_id,
+            inquiry_id=payload.get("inquiry_id"),
+            kind="code",
+            params={"hypothesis": design.hypothesis, "claim_id": claim_id, "infeasible": True},
+            code="",
+            wall_clock_budget_s=0,
+            mem_budget_mb=0,
+            requires_gpu=False,
+            gpu_mem_mb=None,
+            priority=0,
+            provenance={"infeasible": True},
+            dataset_refs=None,
+        )
+        await state.record_experiment_result(exp_id, status="failed", error=f"infeasible on lab sandbox: {reason}")
+        await state.set_experiment_interpretation(
+            exp_id,
+            None,
+            None,
+            f"Untestable on the lab's offline sandbox: {reason}. The direction needs capabilities "
+            "the sandbox lacks (pretrained models / network / external data) — fabricating a "
+            "simulation instead would not bear on the claim.",
+        )
+        log.info("experiments: design INFEASIBLE for claim %s (task %s): %s", claim_id, task_id, reason[:120])
+        return {"infeasible": True, "experiment_id": exp_id, "claim_id": claim_id, "reason": reason}
+
     code_hash = hashlib.sha256(design.code.encode()).hexdigest()[:16]
     # Provenance = the reproducibility basis. Capture the image DIGEST (immutable),
     # not just the tag (a rebuild repoints it), alongside seed + code hash. With
@@ -333,7 +379,9 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
         kind="code",
         params={"hypothesis": design.hypothesis, "claim_id": claim_id, "dataset_plan": design.dataset_plan},
         code=design.code,
-        wall_clock_budget_s=min(1800, design.est_wall_clock_s),
+        # Floor at 120s: designs have estimated 10-60s and the session budget killed runs
+        # before a single attempt finished ("session budget 10s exhausted after 0 attempt(s)").
+        wall_clock_budget_s=max(120, min(1800, design.est_wall_clock_s)),
         mem_budget_mb=design.est_mem_mb,
         requires_gpu=design.requires_gpu,
         gpu_mem_mb=design.gpu_mem_mb or (4096 if design.requires_gpu else None),

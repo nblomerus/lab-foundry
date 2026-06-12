@@ -434,3 +434,31 @@ async def test_build_debug_empty_ctx_uses_fallbacks():
     assert "(no error captured)" in layer.content
     assert "(no direction statement)" in layer.content
     assert EH._LAB_CONSTRAINTS in layer.content
+
+
+async def test_requested_infeasible_records_failed_run_and_skips_queue_path():
+    """An infeasible design (needs a pretrained LLM / network) is recorded as a FAILED run with
+    the reason as its note — the coverage driver counts the attempt, the re-armer sees a handled
+    run, and NO sandbox code is queued. Simulating the outcome instead is forbidden upstream."""
+    design = _design(code="", infeasible=True, infeasible_reason="needs a pretrained 7B model")
+    disp = _disp(design=design, get_claim=_claim(), queue_experiment=51)
+    out = await EH.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
+    assert out["infeasible"] is True and out["experiment_id"] == 51
+    assert "pretrained 7B model" in out["reason"]
+    _, kw = disp.state.queue_experiment.await_args
+    assert kw["code"] == "" and kw["params"]["infeasible"] is True
+    disp.state.record_experiment_result.assert_awaited_once()
+    _args, rkw = disp.state.record_experiment_result.await_args
+    assert rkw["status"] == "failed" and "infeasible on lab sandbox" in rkw["error"]
+    disp.state.set_experiment_interpretation.assert_awaited_once()
+    note = disp.state.set_experiment_interpretation.await_args.args[3]
+    assert "Untestable on the lab's offline sandbox" in note
+
+
+async def test_requested_floors_tiny_wall_clock_budget():
+    """Design-estimated 10-60s budgets killed runs before one attempt finished — floor at 120s."""
+    design = _design(est_wall_clock_s=10)
+    disp = _disp(design=design, get_claim=_claim(), queue_experiment=1)
+    await EH.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
+    _, kw = disp.state.queue_experiment.await_args
+    assert kw["wall_clock_budget_s"] == 120
