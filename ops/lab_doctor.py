@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 
@@ -38,6 +39,28 @@ def _line(mark: str, text: str) -> None:
 
 def _h(title: str) -> None:
     print(f"\n{title}")
+
+
+async def _pulse(conn) -> None:
+    """The lab's heartbeat — what it is doing RIGHT NOW and what it is waiting on.
+    A pulse is emitted every watchdog tick (5 min); a stale one means the watchdog
+    itself is down, which is the real 'lab looks dead'."""
+    _h("NOW — latest lab.pulse (doing + waiting_on, emitted every watchdog tick)")
+    row = await conn.fetchrow(
+        "SELECT emitted_at, payload, extract(epoch FROM now() - emitted_at) AS age_s "
+        "FROM events WHERE event_type = 'lab.pulse' ORDER BY id DESC LIMIT 1"
+    )
+    if row is None:
+        _line(_WARN, "no lab.pulse yet — harness predates the heartbeat or never ticked")
+        return
+    p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+    age = int(row["age_s"])
+    stale = age > 15 * 60  # > 3 missed ticks ⇒ the watchdog is down — THIS is a dead lab
+    _line(_BAD if stale else _OK, f"pulse age: {age // 60}m{age % 60:02d}s" + (" — WATCHDOG DOWN?" if stale else ""))
+    for s in p.get("doing", []):
+        _line(_DOT, f"doing:   {s}")
+    for s in p.get("waiting_on", []):
+        _line(_DOT, f"waiting: {s}")
 
 
 async def _activity(conn, hours: int) -> None:
@@ -206,7 +229,7 @@ async def run(hours: int) -> int:
     print("=" * 78 + f"\nLAB DOCTOR  (read-only; window={hours}h)\n" + "=" * 78)
     conn = await asyncpg.connect(dsn)
     try:
-        for check in (_activity, _errors, _stuck, _stalls, _closure, _gates, _cost, _mimir, _modes, _agents):
+        for check in (_pulse, _activity, _errors, _stuck, _stalls, _closure, _gates, _cost, _mimir, _modes, _agents):
             try:
                 await (check(conn, hours) if check in (_activity, _stalls, _closure, _gates, _mimir) else check(conn))
             except Exception as e:  # noqa: BLE001 — one check failing must not sink the report

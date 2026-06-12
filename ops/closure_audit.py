@@ -122,6 +122,25 @@ async def _unadvanced_completed(conn) -> None:
     _line(_OK if not n else _WARN, f"active claims with a completed task but no evidence: {n}")
 
 
+async def _eaten_events(conn, days: int) -> None:
+    _h("Eaten events — loop-bearing events that terminated without their handler running")
+    rows = await conn.fetch(
+        "SELECT event_type, COALESCE(suppression_reason,'failed') AS why, count(*) AS n, max(emitted_at) AS last "
+        "FROM events WHERE emitted_at > now() - ($1||' days')::interval "
+        "AND (status='failed' OR (status='suppressed' AND suppression_reason <> 'no_handler')) "
+        "AND NOT (event_type = ANY($2)) "
+        "GROUP BY 1, 2 ORDER BY 3 DESC",
+        str(days),
+        list(CLOSURE_EXEMPT_EVENTS),
+    )
+    if not rows:
+        _line(_OK, "no loop-bearing event was failed or gate-suppressed in the window")
+    for r in rows:
+        # failed = a handler crashed/timed out (terminal — nothing retries event rows);
+        # everything else is a gate (dial/cost/slop/cooldown/manual) eating the trace.
+        _line(_BAD if r["why"] == "failed" else _WARN, f"{r['event_type']} [{r['why']}]: {r['n']}  (last {r['last']})")
+
+
 async def _indicators(conn, days: int) -> None:
     _h("loop.unclosed indicators emitted by the live guard")
     rows = await conn.fetch(
@@ -145,9 +164,16 @@ async def run(days: int) -> int:
     print("=" * 78 + f"\nCLOSURE AUDIT  (read-only; window={days}d)\n" + "=" * 78)
     conn = await asyncpg.connect(dsn)
     try:
-        for check in (_event_closure, _stuck_directions, _thin_corpus_orphans, _unadvanced_completed, _indicators):
+        for check in (
+            _event_closure,
+            _eaten_events,
+            _stuck_directions,
+            _thin_corpus_orphans,
+            _unadvanced_completed,
+            _indicators,
+        ):
             try:
-                await (check(conn, days) if check in (_event_closure, _indicators) else check(conn))
+                await (check(conn, days) if check in (_event_closure, _eaten_events, _indicators) else check(conn))
             except Exception as e:  # noqa: BLE001 — one check failing must not sink the report
                 _line(_BAD, f"{check.__name__} check errored: {str(e)[:120]}")
     finally:

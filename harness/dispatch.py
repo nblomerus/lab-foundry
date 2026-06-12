@@ -154,6 +154,7 @@ CLOSURE_EXEMPT_EVENTS = frozenset(
         "quartermaster.snapshot",  # QM per-tick compute telemetry — streamed, never handled
         "direction.reopened",  # closure-reopen breadcrumb (gap → fresh evidence → re-opened)
         "library.sweep_settled",  # sweep result artifact — poll-read by the closure ladder
+        "lab.pulse",  # the lab's heartbeat — what's happening + waiting_on, per watchdog tick
         # the guard's own indicators (must never recurse into themselves)
         "agent.stalled",
         "agent.slow",
@@ -1244,6 +1245,126 @@ class Dispatcher:
             if pumped:
                 log.info("rearm: re-emitted finding.high_signal for %d unattacked finding(s)", pumped)
 
+    # -- Heartbeat / eaten-event guard ----------------------------------
+
+    async def _detect_eaten_events(self, conn) -> None:
+        """Loop-bearing events that terminated WITHOUT their handler doing the work —
+        failed (crash/timeout) or suppressed by a gate (agent_off/shadow, cost_cap,
+        slop_pause, cooldown, manual clears). All of these are TERMINAL (nothing retries
+        an event row), so each one silently closed a trace; the spine re-armer recovers
+        what state still shows, but the guard must SAY it's happening — a paused
+        evaluation dial once ate 5,754 task.completed audits with zero indicators."""
+        hour = await conn.fetchval("SELECT to_char(now(), 'YYYY-MM-DD\"T\"HH24')")
+        rows = await conn.fetch(
+            "SELECT event_type, COALESCE(suppression_reason,'failed') AS why, count(*) AS n FROM events "
+            "WHERE emitted_at > now() - interval '1 hour' "
+            "AND (status='failed' OR (status='suppressed' AND suppression_reason <> 'no_handler')) "
+            "AND NOT (event_type = ANY($1)) "
+            "GROUP BY 1, 2 HAVING count(*) >= $2",
+            list(CLOSURE_EXEMPT_EVENTS),
+            UNCLOSED_EVENT_MIN,
+        )
+        for r in rows:
+            await self._emit_indicator(
+                "loop.unclosed",
+                {"kind": "eaten_event", "event_type": r["event_type"], "why": r["why"], "count": r["n"]},
+                dedup=f"eaten-{r['event_type']}-{r['why']}-{hour}",
+            )
+
+    async def _emit_lab_pulse(self, conn) -> None:
+        """The lab's heartbeat: one `lab.pulse` per watchdog tick saying what is happening
+        RIGHT NOW (doing) and why anything idle is idle (waiting_on) — derived from state,
+        not inferred from event noise. Without it, a lab that is ingesting + sitting on
+        ladders/gates/cooldowns is indistinguishable from a dead one: the feed shows only
+        suppressed telemetry and the journal goes quiet. Also logged at INFO so journalctl
+        always shows a live narrative. Read the latest pulse via lab_doctor or the events
+        feed; a pulse older than ~3 ticks means the watchdog itself is down."""
+        w = await conn.fetchrow(
+            "SELECT "
+            "(SELECT count(*) FROM tasks WHERE status='pending') AS tasks_pending, "
+            "(SELECT count(*) FROM tasks WHERE status='running') AS tasks_running, "
+            "(SELECT count(*) FROM experiment_runs WHERE status='queued') AS exp_queued, "
+            "(SELECT count(*) FROM experiment_runs WHERE status='running') AS exp_running, "
+            "(SELECT count(*) FROM events WHERE status='pending') AS events_pending, "
+            "(SELECT count(*) FROM events WHERE status='pending' AND event_type IN "
+            " ('source.discovered','document.parsed','library.sweep_requested','acquire.requested')) AS intake_pending, "
+            "(SELECT count(*) FROM documents WHERE ingested_at > now() - interval '10 minutes') AS docs_10m"
+        )
+        dirs = await conn.fetch(
+            "SELECT c.id, dg.status AS gate, "
+            "(SELECT t.result->>'disposition' FROM tasks t WHERE t.claim_id=c.id ORDER BY t.id DESC LIMIT 1) AS disp, "
+            "(SELECT count(*) FROM tasks t WHERE t.claim_id=c.id AND t.status IN ('pending','running')) AS open_tasks, "
+            "(SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id=e.task_id "
+            " WHERE t.claim_id=c.id AND e.status NOT IN ('completed','failed','killed')) AS open_exps, "
+            "(SELECT da.verdict FROM direction_adjudications da WHERE da.claim_id=c.id "
+            " ORDER BY da.decided_at DESC LIMIT 1) AS verdict "
+            "FROM claims c LEFT JOIN direction_gate dg ON dg.claim_id=c.id "
+            "WHERE c.claim_kind='direction' AND c.status = ANY($1) ORDER BY c.id",
+            list(ACTIVE_CLAIM),
+        )
+        dials = await conn.fetch(
+            "SELECT agent_name, mode FROM agent_modes WHERE mode IN ('off','shadow') ORDER BY agent_name"
+        )
+        eaten = await conn.fetch(
+            "SELECT event_type, COALESCE(suppression_reason,'failed') AS why, count(*) AS n FROM events "
+            "WHERE emitted_at > now() - interval '1 hour' "
+            "AND (status='failed' OR (status='suppressed' AND suppression_reason <> 'no_handler')) "
+            "AND NOT (event_type = ANY($1)) GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 8",
+            list(CLOSURE_EXEMPT_EVENTS),
+        )
+        gapped_watch = await conn.fetchval(
+            "SELECT count(*) FROM claims c JOIN direction_gate dg ON dg.claim_id=c.id AND dg.status='approved' "
+            "WHERE c.claim_kind='direction' AND c.status='invalidated' "
+            "AND c.invalidation_reason LIKE 'research gap%' "
+            "AND c.invalidated_at > now() - make_interval(days => $1::int)",
+            int(CLOSURE_REOPEN_WINDOW_DAYS),
+        )
+
+        doing: list[str] = []
+        if w["tasks_running"] or w["tasks_pending"]:
+            doing.append(f"research: {w['tasks_running']} running / {w['tasks_pending']} queued task(s)")
+        if w["exp_running"] or w["exp_queued"]:
+            doing.append(f"experiments: {w['exp_running']} running / {w['exp_queued']} queued")
+        if w["intake_pending"] or w["docs_10m"]:
+            doing.append(f"library intake: {w['intake_pending']} in pipeline, {w['docs_10m']} doc(s) ingested last 10m")
+
+        waiting: list[str] = []
+        approved = [d for d in dirs if d["gate"] == "approved"]
+        for d in approved:
+            if d["open_tasks"] or d["open_exps"]:
+                continue  # in flight — it shows under `doing`
+            held = " · HELD by adjudicator (no experiments will be driven)" if d["verdict"] == "hold" else ""
+            waiting.append(
+                f"direction {d['id']}: idle after '{d['disp'] or 'no research yet'}' — closure ladder owns it{held}"
+            )
+        ungated = [d for d in dirs if d["gate"] != "approved"]
+        if ungated:
+            held_n = sum(1 for d in ungated if d["verdict"] == "hold")
+            waiting.append(
+                f"{len(ungated)} direction(s) outside the gate ({held_n} held by adjudicator) — planner won't touch them"
+            )
+        if not dirs:
+            waiting.append("agenda empty — the exhaustion hatch will force a deliberation")
+        if gapped_watch:
+            waiting.append(f"{gapped_watch} gapped direction(s) on the reopen watchlist")
+        if dials:
+            waiting.append("dials off: " + ", ".join(f"{r['agent_name']}({r['mode']})" for r in dials))
+        for r in eaten:
+            waiting.append(f"eaten last hour: {r['event_type']} [{r['why']}] ×{r['n']}")
+
+        payload = {
+            "work": dict(w),
+            "directions": {"active": len(dirs), "approved": len(approved), "gapped_watch": gapped_watch},
+            "doing": doing or ["idle"],
+            "waiting_on": waiting or ["nothing — fully drained"],
+        }
+        await conn.execute(
+            "INSERT INTO events (event_type, target_type, target_id, payload) "
+            "VALUES ('lab.pulse', 'system', 0, $1::jsonb)",
+            json.dumps(payload),
+        )
+        log.info("pulse: %s | waiting on: %s", "; ".join(doing) or "idle", "; ".join(waiting) or "nothing")
+
     # -- Watchdog -------------------------------------------------------
 
     async def _watchdog_loop(self) -> None:
@@ -1262,6 +1383,8 @@ class Dispatcher:
                     await self._reopen_gapped_directions(conn)  # gap ≠ dead end: new evidence re-opens
                     await self._rearm_research_spines(conn)  # one-shot spine events re-derive from state
                     await self._detect_stuck_directions(conn)  # flag any residual the ladder didn't clear
+                    await self._detect_eaten_events(conn)  # failed / gate-suppressed loop events, visibly
+                    await self._emit_lab_pulse(conn)  # heartbeat: doing + waiting_on, every tick
                 await self._detect_stalls()
                 await self._reconcile_lessons_if_due()
                 await self._sweep_library_if_due()

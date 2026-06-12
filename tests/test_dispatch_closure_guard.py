@@ -554,3 +554,96 @@ async def test_rearm_spines_gated_per_agent_dial(monkeypatch):
     assert _rearm_emits(pool, "finding.synthesize") == []
     assert _rearm_emits(pool, "finding.high_signal") == []
     assert [a["target_id"] for a in _rearm_emits(pool, "task.completed")] == [501]
+
+
+# ===========================================================================
+# Heartbeat — _emit_lab_pulse + _detect_eaten_events
+# ===========================================================================
+
+_PULSE_WORK = {
+    "tasks_pending": 0,
+    "tasks_running": 0,
+    "exp_queued": 0,
+    "exp_running": 0,
+    "events_pending": 12,
+    "intake_pending": 7,
+    "docs_10m": 3,
+}
+
+
+def _pulse_pool(*, work=None, dirs=None, dials=None, eaten=None, gapped=0):
+    rules = [
+        ("tasks_pending", work or _PULSE_WORK),
+        ("LEFT JOIN direction_gate", dirs or []),
+        ("FROM agent_modes WHERE mode IN", dials or []),
+        ("COALESCE(suppression_reason,'failed')", eaten or []),
+        ("LIKE 'research gap%'", gapped),
+        ("to_char(now()", "2026-06-09T18"),
+    ]
+    return ScriptedPool(rules)
+
+
+def _pulse_payloads(pool):
+    return [json.loads(args[0]) for kind, sql, args in pool.calls if kind == "execute" and "'lab.pulse'" in sql]
+
+
+@pytest.mark.asyncio
+async def test_pulse_narrates_doing_and_waiting(monkeypatch):
+    """Intake busy + one approved-but-idle HELD direction + one ungated + a paused dial +
+    an eaten event class → the pulse names ALL of it; the lab can't silently look dead."""
+    _researcher_active(monkeypatch)
+    dirs = [
+        {"id": 50, "gate": "approved", "disp": "thin_corpus", "open_tasks": 0, "open_exps": 0, "verdict": "hold"},
+        {"id": 67, "gate": None, "disp": "thin_corpus", "open_tasks": 0, "open_exps": 0, "verdict": "hold"},
+    ]
+    dials = [{"agent_name": "evaluation", "mode": "off"}]
+    eaten = [{"event_type": "task.completed", "why": "agent_off", "n": 4}]
+    pool = _pulse_pool(dirs=dirs, dials=dials, eaten=eaten, gapped=3)
+    disp = Dispatcher(pool=pool)
+    await disp._emit_lab_pulse(pool.conn)
+    (p,) = _pulse_payloads(pool)
+    assert any("library intake: 7 in pipeline" in s for s in p["doing"])
+    assert any(s.startswith("direction 50: idle after 'thin_corpus'") and "HELD" in s for s in p["waiting_on"])
+    assert any("1 direction(s) outside the gate (1 held" in s for s in p["waiting_on"])
+    assert any("3 gapped direction(s) on the reopen watchlist" in s for s in p["waiting_on"])
+    assert any(s == "dials off: evaluation(off)" for s in p["waiting_on"])
+    assert any(s == "eaten last hour: task.completed [agent_off] ×4" for s in p["waiting_on"])
+    assert p["directions"] == {"active": 2, "approved": 1, "gapped_watch": 3}
+
+
+@pytest.mark.asyncio
+async def test_pulse_idle_lab_says_so(monkeypatch):
+    """A fully drained lab pulses 'idle' + 'agenda empty' — explicit, not silent."""
+    _researcher_active(monkeypatch)
+    work = dict(_PULSE_WORK, intake_pending=0, docs_10m=0)
+    pool = _pulse_pool(work=work, gapped=0)
+    disp = Dispatcher(pool=pool)
+    await disp._emit_lab_pulse(pool.conn)
+    (p,) = _pulse_payloads(pool)
+    assert p["doing"] == ["idle"]
+    assert any("agenda empty" in s for s in p["waiting_on"])
+
+
+@pytest.mark.asyncio
+async def test_detect_eaten_events_emits_indicator(monkeypatch):
+    """Failed / gate-suppressed loop events become loop.unclosed[eaten_event] (hourly dedup) —
+    the 5,754 dial-off-eaten audits would have shown up within the hour."""
+    _researcher_active(monkeypatch)
+    eaten = [{"event_type": "task.completed", "why": "agent_off", "n": 9}]
+    pool = ScriptedPool(
+        [
+            ("to_char(now()", "2026-06-09T18"),
+            ("COALESCE(suppression_reason,'failed')", eaten),
+        ]
+    )
+    disp = Dispatcher(pool=pool)
+    await disp._detect_eaten_events(pool.conn)
+    flagged = _indicator(pool, "loop.unclosed")
+    assert len(flagged) == 1
+    assert flagged[0]["payload"] == {
+        "kind": "eaten_event",
+        "event_type": "task.completed",
+        "why": "agent_off",
+        "count": 9,
+    }
+    assert flagged[0]["dedup"] == "eaten-task.completed-agent_off-2026-06-09T18"
