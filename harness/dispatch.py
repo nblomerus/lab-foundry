@@ -1219,7 +1219,7 @@ class Dispatcher:
                 "WHERE f.audit_verdict = 'pass' AND f.relevance_score >= 8 "
                 "AND c.status = ANY($1) "
                 "AND f.created_at < now() - make_interval(mins => $2::int) "
-                "AND NOT EXISTS (SELECT 1 FROM critic_verdicts cv WHERE cv.thesis_id = f.claim_id "
+                "AND NOT EXISTS (SELECT 1 FROM critic_verdicts cv WHERE cv.claim_id = f.claim_id "
                 "  AND cv.created_at > f.created_at) "
                 "AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.status = 'pending' "
                 "  AND ev.event_type = 'finding.high_signal' AND ev.target_id = f.claim_id) "
