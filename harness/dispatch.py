@@ -153,6 +153,7 @@ CLOSURE_EXEMPT_EVENTS = frozenset(
         "lessons.reconciled",
         "quartermaster.snapshot",  # QM per-tick compute telemetry — streamed, never handled
         "direction.reopened",  # closure-reopen breadcrumb (gap → fresh evidence → re-opened)
+        "library.sweep_settled",  # sweep result artifact — poll-read by the closure ladder
         # the guard's own indicators (must never recurse into themselves)
         "agent.stalled",
         "agent.slow",
@@ -182,6 +183,9 @@ UNCLOSED_EVENT_MIN = int(os.environ.get("CLOSURE_UNCLOSED_EVENT_MIN", "3"))
 # generous and env-tunable; the ladder is idempotent (one step per eligible tick).
 ACTIVE_CLAIM = ("proposed", "tested", "weakly_supported", "replicated")
 SCOUT_SETTLE_MIN = float(os.environ.get("CLOSURE_SCOUT_SETTLE_MIN", "20"))  # let a scout sweep ingest
+# How long a requested targeted sweep may go without a `library.sweep_settled` artifact
+# before the ladder flags it (handler crashed/suppressed) and re-fires it.
+SCOUT_UNSETTLED_MAX_MIN = float(os.environ.get("CLOSURE_SCOUT_UNSETTLED_MAX_MIN", "60"))
 # The ladder waits for a direction's IN-FLIGHT acquire batch to resolve before advancing.
 # But acquires stuck deep in Mimir's backlog stay 'pending' for a long time (and mostly
 # resolve to rejected/already_have anyway), which would BLOCK the ladder forever. Only
@@ -970,28 +974,59 @@ class Dispatcher:
                 "AND payload->>'claim_id' = $1",
                 str(cid),
             )
+            now = await conn.fetchval("SELECT now()")
+            day = f"{now:%Y-%m-%d}"
+            topics = [
+                r["q"]
+                for r in await conn.fetch(
+                    "SELECT DISTINCT payload->>'query' AS q FROM events WHERE event_type='acquire.requested' "
+                    "AND payload->>'claim_id' = $1 AND payload->>'query' IS NOT NULL LIMIT 6",
+                    str(cid),
+                )
+            ] or [(c["statement"] or "")[:120]]
             # (2b) never scouted → fire ONE targeted scout sweep on this direction's thin topics.
+            # Day-bucketed dedup: a sweep that never settles or settles blind gets ONE fresh
+            # attempt per day instead of being one-shot for the lab's lifetime.
             if scout_at is None:
-                topics = [
-                    r["q"]
-                    for r in await conn.fetch(
-                        "SELECT DISTINCT payload->>'query' AS q FROM events WHERE event_type='acquire.requested' "
-                        "AND payload->>'claim_id' = $1 AND payload->>'query' IS NOT NULL LIMIT 6",
-                        str(cid),
-                    )
-                ] or [(c["statement"] or "")[:120]]
-                await self._emit_targeted_sweep(conn, cid, topics, f"closure-scout-{cid}")
+                await self._emit_targeted_sweep(conn, cid, topics, f"closure-scout-{cid}-{day}")
                 log.info("closure: fired targeted scout sweep for direction %s (topics=%d)", cid, len(topics))
                 continue
-            now = await conn.fetchval("SELECT now()")
-            if (now - scout_at).total_seconds() < SCOUT_SETTLE_MIN * 60:
-                continue  # let the scout's sources discover + ingest
-            # (3) scout settled, not yet re-attempted post-scout → scouted retry.
+            # The sweep's RESULT artifact, not its request time. No settle ⇒ the handler died
+            # (crash / suppression); scanned == 0 ⇒ the sweep ran BLIND (network outage, API
+            # cooldown, swallowed non-200s). Neither is scientific emptiness — neither may walk
+            # this direction toward a declared gap. Both flag the culprit and retry daily.
+            settle = await conn.fetchrow(
+                "SELECT emitted_at, (payload->>'scanned')::int AS scanned FROM events "
+                "WHERE event_type='library.sweep_settled' AND payload->>'claim_id' = $1 "
+                "ORDER BY id DESC LIMIT 1",
+                str(cid),
+            )
+            if settle is None or settle["emitted_at"] < scout_at:
+                if (now - scout_at).total_seconds() < SCOUT_UNSETTLED_MAX_MIN * 60:
+                    continue  # sweep still in flight
+                await self._emit_indicator(
+                    "loop.unclosed",
+                    {"kind": "sweep_unsettled", "claim_id": cid},
+                    dedup=f"unclosed-sweep-{cid}-{day}",
+                )
+                await self._emit_targeted_sweep(conn, cid, topics, f"closure-scout-{cid}-{day}")
+                continue
+            if settle["scanned"] == 0:
+                await self._emit_indicator(
+                    "loop.unclosed",
+                    {"kind": "sweep_blind", "claim_id": cid},
+                    dedup=f"unclosed-blind-{cid}-{day}",
+                )
+                await self._emit_targeted_sweep(conn, cid, topics, f"closure-scout-{cid}-{day}")
+                continue
+            if (now - settle["emitted_at"]).total_seconds() < SCOUT_SETTLE_MIN * 60:
+                continue  # the sweep saw the field; let its discovered sources ingest
+            # (3) scout settled with real coverage, not yet re-attempted post-scout → scouted retry.
             if stage != "scouted_retry":
                 await self._requeue_direction(conn, cid, c["statement"], "scouted_retry")
                 log.info("closure: re-queued direction %s (scouted_retry — scout has settled)", cid)
                 continue
-            # (4) STILL thin after acquire + a targeted scout → a genuine research gap. Pivot.
+            # (4) STILL thin after acquire + a HEALTHY targeted scout → a genuine research gap. Pivot.
             await self._declare_gap(cid, "research gap: corpus still thin after acquire + targeted scout")
 
     async def _reopen_gapped_directions(self, conn) -> None:

@@ -114,8 +114,11 @@ async def test_detect_stuck_directions_emits_per_direction():
 # ===========================================================================
 
 
-def _ladder_pool(latest, *, pending_acq=0, fulfilled_new=0, scout_at=None, topics=None, now=_NOW, candidates=None):
-    """Scripted DB for one ladder candidate (#43). `latest` is the most-recent task row."""
+def _ladder_pool(
+    latest, *, pending_acq=0, fulfilled_new=0, scout_at=None, settle=None, topics=None, now=_NOW, candidates=None
+):
+    """Scripted DB for one ladder candidate (#43). `latest` is the most-recent task row;
+    `settle` is the sweep's library.sweep_settled result row ({emitted_at, scanned})."""
     if candidates is None:
         candidates = [{"id": 43, "statement": "Frontier mapping for Gaussian processes"}]
     rules = [
@@ -124,6 +127,7 @@ def _ladder_pool(latest, *, pending_acq=0, fulfilled_new=0, scout_at=None, topic
         ("status='pending' AND emitted_at", pending_acq),  # the ladder's RECENT-pending-acquire wait
         ("'status' = 'fulfilled'", fulfilled_new),
         ("max(emitted_at) FROM events WHERE event_type='library.sweep_requested'", scout_at),
+        ("library.sweep_settled", [settle] if settle else []),
         ("DISTINCT payload->>'query'", topics or [{"q": "deep kernel GP"}, {"q": "spectral mixture kernel"}]),
         ("SELECT now()", now),
     ]
@@ -160,6 +164,7 @@ async def test_ladder_fires_one_scout_when_acquire_exhausted(monkeypatch):
     assert sweeps[0]["claim_id"] == 43
     assert sweeps[0]["payload"]["claim_id"] == 43
     assert sweeps[0]["payload"]["topics"] == ["deep kernel GP", "spectral mixture kernel"]
+    assert sweeps[0]["dedup"].startswith("closure-scout-43-")  # day-bucketed, not one-shot
     assert _task_inserts(pool) == []  # don't re-queue until the scout settles
 
 
@@ -167,7 +172,8 @@ async def test_ladder_fires_one_scout_when_acquire_exhausted(monkeypatch):
 async def test_ladder_requeues_scouted_after_settle(monkeypatch):
     _researcher_active(monkeypatch)
     latest = {"completed_at": _NOW - timedelta(hours=3), "disp": "thin_corpus", "stage": "acquire_retry"}
-    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1))  # scouted 1h ago > 20m settle
+    settle = {"emitted_at": _NOW - timedelta(minutes=40), "scanned": 17}  # HEALTHY: saw the field
+    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1), settle=settle)
     disp = Dispatcher(pool=pool)
     await disp._advance_research_closure(pool.conn)
     tasks = _task_inserts(pool)
@@ -178,7 +184,8 @@ async def test_ladder_requeues_scouted_after_settle(monkeypatch):
 async def test_ladder_declares_gap_after_scouted_retry_still_thin(monkeypatch):
     _researcher_active(monkeypatch)
     latest = {"completed_at": _NOW - timedelta(hours=3), "disp": "thin_corpus", "stage": "scouted_retry"}
-    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1))
+    settle = {"emitted_at": _NOW - timedelta(minutes=40), "scanned": 17}  # gap only after a HEALTHY scout
+    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1), settle=settle)
     disp = Dispatcher(pool=pool)
     disp.state = AsyncMock()
     await disp._advance_research_closure(pool.conn)
@@ -212,7 +219,8 @@ async def test_ladder_gap_swallows_invalidate_failure(monkeypatch):
     """A gap-declaration that raises must NOT kill the watchdog sweep."""
     _researcher_active(monkeypatch)
     latest = {"completed_at": _NOW - timedelta(hours=3), "disp": "thin_corpus", "stage": "scouted_retry"}
-    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1))
+    settle = {"emitted_at": _NOW - timedelta(minutes=40), "scanned": 17}
+    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1), settle=settle)
     disp = Dispatcher(pool=pool)
     disp.state = AsyncMock()
     disp.state.invalidate_claim.side_effect = RuntimeError("claim vanished")
@@ -224,7 +232,8 @@ async def test_ladder_gap_swallows_invalidate_failure(monkeypatch):
 async def test_ladder_gap_without_state_emits_indicator(monkeypatch):
     _researcher_active(monkeypatch)
     latest = {"completed_at": _NOW - timedelta(hours=3), "disp": "thin_corpus", "stage": "scouted_retry"}
-    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1))
+    settle = {"emitted_at": _NOW - timedelta(minutes=40), "scanned": 17}
+    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1), settle=settle)
     disp = Dispatcher(pool=pool)  # no .state attached
     await disp._advance_research_closure(pool.conn)
     flagged = _indicator(pool, "loop.unclosed")
@@ -249,6 +258,53 @@ async def test_ladder_waits_while_scout_not_settled(monkeypatch):
     disp = Dispatcher(pool=pool)
     await disp._advance_research_closure(pool.conn)
     assert _task_inserts(pool) == []  # neither re-queue nor gap until the scout has settled
+
+
+@pytest.mark.asyncio
+async def test_ladder_unsettled_sweep_flags_and_refires_instead_of_advancing(monkeypatch):
+    """Sweep requested long ago but NO settle artifact (handler crashed/suppressed) → flag the
+    culprit + re-fire the sweep (day-bucketed); never scouted_retry, never a gap."""
+    _researcher_active(monkeypatch)
+    latest = {"completed_at": _NOW - timedelta(hours=3), "disp": "thin_corpus", "stage": "acquire_retry"}
+    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=2), settle=None)  # > 60m unsettled
+    disp = Dispatcher(pool=pool)
+    disp.state = AsyncMock()
+    await disp._advance_research_closure(pool.conn)
+    flagged = _indicator(pool, "loop.unclosed")
+    assert flagged and flagged[0]["payload"]["kind"] == "sweep_unsettled"
+    assert len(_sweep_inserts(pool)) == 1  # fresh day-bucketed attempt
+    assert _task_inserts(pool) == []
+    disp.state.invalidate_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ladder_blind_sweep_flags_and_refires_instead_of_gap(monkeypatch):
+    """Sweep settled with scanned == 0 (outage/cooldown/swallowed non-200s — the scouts were
+    BLIND) → flag + retry; an infrastructure failure must not become a declared research gap."""
+    _researcher_active(monkeypatch)
+    latest = {"completed_at": _NOW - timedelta(hours=3), "disp": "thin_corpus", "stage": "scouted_retry"}
+    settle = {"emitted_at": _NOW - timedelta(minutes=40), "scanned": 0}
+    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1), settle=settle)
+    disp = Dispatcher(pool=pool)
+    disp.state = AsyncMock()
+    await disp._advance_research_closure(pool.conn)
+    flagged = _indicator(pool, "loop.unclosed")
+    assert flagged and flagged[0]["payload"]["kind"] == "sweep_blind"
+    assert len(_sweep_inserts(pool)) == 1
+    disp.state.invalidate_claim.assert_not_awaited()  # the gap is NOT declared on a blind sweep
+
+
+@pytest.mark.asyncio
+async def test_ladder_waits_for_ingest_after_fresh_settle(monkeypatch):
+    """Healthy settle but younger than the ingest window → wait (no requeue, no gap)."""
+    _researcher_active(monkeypatch)
+    latest = {"completed_at": _NOW - timedelta(hours=3), "disp": "thin_corpus", "stage": "acquire_retry"}
+    settle = {"emitted_at": _NOW - timedelta(minutes=5), "scanned": 9}  # < 20m settle window
+    pool = _ladder_pool(latest, scout_at=_NOW - timedelta(minutes=10), settle=settle)
+    disp = Dispatcher(pool=pool)
+    await disp._advance_research_closure(pool.conn)
+    assert _task_inserts(pool) == []
+    assert _sweep_inserts(pool) == []
 
 
 @pytest.mark.asyncio

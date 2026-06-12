@@ -391,5 +391,7 @@ async def handle_sweep_requested(event: dict, dispatcher) -> dict | None:
     topics = payload.get("topics")
     # A targeted closure scout (library.sweep_requested carrying a claim_id) asks for relevance
     # ranking so a niche direction's sweep finds on-topic papers; the standing sweep stays newest.
+    # The claim_id rides through to the sweep's settle artifact so the closure ladder can tell
+    # "this direction's scout ran and saw N" apart from "the scout never ran".
     sort = payload.get("sort", "submittedDate")
-    return await run_discovery_sweep(topics, dispatcher.state, sort=sort)
+    return await run_discovery_sweep(topics, dispatcher.state, sort=sort, claim_id=payload.get("claim_id"))

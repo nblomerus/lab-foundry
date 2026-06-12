@@ -219,7 +219,12 @@ def _source_target_id(canonical_key: str) -> int:
 
 
 async def run_discovery_sweep(
-    topics: list[str] | None, state, *, per_topic: int | None = None, sort: str = "submittedDate"
+    topics: list[str] | None,
+    state,
+    *,
+    per_topic: int | None = None,
+    sort: str = "submittedDate",
+    claim_id: int | None = None,
 ) -> dict:
     """Run the scouts over `topics` and emit `source.discovered` for genuinely-new
     sources. Each scout pages deeper via a per-source cursor (so it doesn't keep
@@ -230,7 +235,14 @@ async def run_discovery_sweep(
     also picks `per_topic` (aggressive when Ariadne is dark, gentle when she's
     steering) unless an explicit `per_topic` is given.
 
-    Returns {"scanned": <descriptors found>, "discovered": <new emitted>, "topics": [...]}.
+    ALWAYS settles: emits one `library.sweep_settled` carrying {claim_id, scanned,
+    discovered, errors} even on zero yield — "the scouts ran and found nothing" must
+    be distinguishable from "the scouts never ran" (scanned == 0 ⇒ the sweep was
+    BLIND: outage / API cooldown / swallowed non-200s), or the closure ladder
+    launders an infrastructure failure into a declared research gap.
+
+    Returns {"scanned": <descriptors found>, "discovered": <new emitted>,
+    "errors": <scouts that raised>, "topics": [...]}.
     """
     if topics is None:
         topics, planned_per_topic = await plan_sweep(state)
@@ -243,6 +255,7 @@ async def run_discovery_sweep(
     # the same newest-N). The cursor is per-source; the scout keeps its internal
     # per-topic pacing by taking the whole topic list at one offset.
     descriptors = []
+    scout_errors = 0
     for name in _enabled_scout_names():
         scout = _SCOUTS[name]  # looked up live so tests can monkeypatch _SCOUTS
         scout_per_topic = min(per_topic, _PER_TOPIC_CAP.get(name, per_topic))
@@ -262,6 +275,7 @@ async def run_discovery_sweep(
                 kw["sort"] = sort
             descriptors.extend(await scout(topics, **kw))
         except Exception:  # noqa: BLE001 — one scout failing must not sink the sweep
+            scout_errors += 1
             log.exception("collectors: scout %s failed", name)
 
     # NOVELTY GATE — drop anything already in the corpus, then ask the seen-ledger
@@ -305,5 +319,27 @@ async def run_discovery_sweep(
             payload={"topics": topics, "count": len(new), "new": new[:20]},
         )
 
-    log.info("discovery sweep: %d/%d new sources (topics=%s)", len(new), len(descriptors), topics)
-    return {"scanned": len(descriptors), "discovered": len(new), "topics": topics}
+    # SETTLE — unconditional result artifact (the sweep's "I ran, here's what I saw").
+    # The closure ladder reads this instead of the request's emission time: no settle =
+    # the handler died; scanned == 0 = the sweep was blind. Neither may become a "gap".
+    await state.emit_corpus_event(
+        "library.sweep_settled",
+        target_type="sweep",
+        target_id=claim_id or 0,
+        payload={
+            "claim_id": claim_id,
+            "topics": topics,
+            "scanned": len(descriptors),
+            "discovered": len(new),
+            "errors": scout_errors,
+        },
+    )
+
+    log.info(
+        "discovery sweep: %d/%d new sources, %d scout error(s) (topics=%s)",
+        len(new),
+        len(descriptors),
+        scout_errors,
+        topics,
+    )
+    return {"scanned": len(descriptors), "discovered": len(new), "errors": scout_errors, "topics": topics}

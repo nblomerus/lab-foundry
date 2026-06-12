@@ -354,7 +354,7 @@ async def test_sweep_runs_discovery_with_payload_topics(monkeypatch):
     state = make_state()
     out = await H.handle_sweep_requested({"payload": {"topics": ["t1", "t2"]}}, _Disp(state))
     assert out == {"scanned": 5, "discovered": 2}
-    sweep.assert_awaited_once_with(["t1", "t2"], state, sort="submittedDate")
+    sweep.assert_awaited_once_with(["t1", "t2"], state, sort="submittedDate", claim_id=None)
 
 
 async def test_sweep_no_payload_topics_passes_none(monkeypatch):
@@ -363,7 +363,7 @@ async def test_sweep_no_payload_topics_passes_none(monkeypatch):
     monkeypatch.setattr(H, "run_discovery_sweep", sweep)
     state = make_state()
     await H.handle_sweep_requested({"payload": {}}, _Disp(state))
-    sweep.assert_awaited_once_with(None, state, sort="submittedDate")
+    sweep.assert_awaited_once_with(None, state, sort="submittedDate", claim_id=None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -923,7 +923,13 @@ async def test_sweep_scout_failure_is_swallowed(monkeypatch):
     monkeypatch.setitem(C._SCOUTS, "arxiv", _boom)
     st = _sweep_state()
     res = await C.run_discovery_sweep(["topic"], st)
-    assert res == {"scanned": 0, "discovered": 0, "topics": ["topic"]}
+    # The failure is swallowed (sweep survives) but COUNTED — the settle artifact must
+    # let the closure ladder tell a blind sweep apart from genuine emptiness.
+    assert res == {"scanned": 0, "discovered": 0, "errors": 1, "topics": ["topic"]}
+    settles = [c for c in st.emit_corpus_event.await_args_list if c.args[0] == "library.sweep_settled"]
+    assert len(settles) == 1
+    assert settles[0].kwargs["payload"]["scanned"] == 0
+    assert settles[0].kwargs["payload"]["errors"] == 1
 
 
 async def test_sweep_cursor_failure_defaults_offset_zero(monkeypatch):

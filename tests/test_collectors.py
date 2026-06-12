@@ -89,6 +89,34 @@ async def test_sweep_skips_already_ingested(db, monkeypatch):
         await _clean(db)
 
 
+async def test_sweep_always_settles_with_result_artifact(db, monkeypatch):
+    """Every sweep emits library.sweep_settled — even a zero-yield one — carrying claim_id,
+    scanned, discovered, and scout error count, so the closure ladder can tell 'ran and saw
+    nothing' apart from 'never ran / ran blind'."""
+    import agents.mimir.collectors as collectors
+
+    async def _broken_scout(topics, per_topic=5, **_):
+        raise RuntimeError("network down")
+
+    monkeypatch.setitem(collectors._SCOUTS, "arxiv", _broken_scout)
+    await _clean(db)
+    try:
+        res = await collectors.run_discovery_sweep(["anything"], db, claim_id=43)
+        assert res["scanned"] == 0
+        assert res["errors"] >= 1
+
+        row = await db.pool.fetchrow(
+            "SELECT payload FROM events WHERE event_type = 'library.sweep_settled' ORDER BY id DESC"
+        )
+        assert row is not None
+        payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+        assert payload["claim_id"] == 43
+        assert payload["scanned"] == 0
+        assert payload["errors"] >= 1
+    finally:
+        await _clean(db)
+
+
 async def test_sweep_emits_trends_digest(db, monkeypatch):
     import agents.mimir.collectors as collectors
 

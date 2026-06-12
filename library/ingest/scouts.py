@@ -215,7 +215,12 @@ async def scout_github(topics: list[str], per_topic: int = 5, *, start: int = 0)
                     f"{_GITHUB_API}/search/repositories",
                     params={"q": topic, "sort": "stars", "per_page": per_topic, "page": page},
                 )
-                items = resp.json().get("items", []) if resp.status_code == 200 else []
+                if resp.status_code != 200:
+                    # Never swallow a non-200 silently: a rate-limited/blocked scout that
+                    # returns [] is indistinguishable from "no repos exist" downstream.
+                    log.warning("scout_github: topic %r HTTP %d — GitHub search degraded", topic, resp.status_code)
+                    continue
+                items = resp.json().get("items", [])
             except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
                 log.warning("scout_github: topic %r failed: %s", topic, e)
                 continue
@@ -259,7 +264,10 @@ async def scout_dataset(topics: list[str], per_topic: int = 5, *, start: int = 0
                     f"{_HF_API}/api/datasets",
                     params={"search": topic, "sort": "downloads", "direction": -1, "limit": per_topic},
                 )
-                items = resp.json() if resp.status_code == 200 else []
+                if resp.status_code != 200:
+                    log.warning("scout_dataset: topic %r HTTP %d — HF hub degraded", topic, resp.status_code)
+                    continue
+                items = resp.json()
             except Exception as e:  # noqa: BLE001 — one bad topic must not sink the sweep
                 log.warning("scout_dataset: topic %r failed: %s", topic, e)
                 continue
