@@ -70,19 +70,23 @@ def _decide_rules(
     corpus,
     mission,
     approved_active=0,
+    active_directions=1,
     queued=0,
     last_delib=None,
     last_reflect=None,
     now=NOW,
 ):
     """Build the ordered ScriptedPool rules _decide issues (first match wins, so the
-    more specific substrings must precede the broad count(*) ones)."""
+    more specific substrings must precede the broad count(*) ones). active_directions
+    defaults to 1 (agenda alive) so the exhaustion branch stays out of the older tests."""
     return [
         ("SELECT now()", now),
         ("FROM documents WHERE queryable", corpus),
         ("claim_kind='mission'", mission),
         # approved_active count — direction_gate JOIN claims.
         ("FROM direction_gate dg JOIN claims c", approved_active),
+        # live directions of any gate status (the agenda-exhaustion probe).
+        ("claim_kind='direction' AND status IN", active_directions),
         # queued deliberate/reflect events.
         ("event_type IN ('ariadne.deliberate','ariadne.reflect')", queued),
         ("event_type='ariadne.deliberate' ORDER BY", [last_delib] if last_delib else []),
@@ -164,6 +168,64 @@ async def test_decide_reflect_cooldown_blocks(monkeypatch):
     pool = ScriptedPool(_decide_rules(corpus=1000, mission=1, last_delib=last_d, last_reflect=last_r))
     et, _ = await ariadne_pace._decide(pool)
     assert et is None
+
+
+@aio
+async def test_decide_agenda_exhausted_forces_deliberate(monkeypatch):
+    """Mission set but ZERO live directions → deliberate fires on the cooldown alone (growth is
+    irrelevant with nothing to steer) and the agenda_exhausted indicator is emitted."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)  # growth 10 ≪ 3000, cooldown elapsed
+    pool = ScriptedPool(_decide_rules(corpus=1000, mission=7, active_directions=0, last_delib=last_d))
+    et, corpus = await ariadne_pace._decide(pool)
+    assert et == "ariadne.deliberate"
+    assert corpus == 1000
+    flags = [c for c in pool.calls if c[0] == "execute" and "'loop.unclosed'" in c[1]]
+    assert len(flags) == 1
+    payload = json.loads(flags[0][2][0])
+    assert payload["kind"] == "agenda_exhausted"
+    assert payload["mission_id"] == 7
+    assert flags[0][2][1].startswith("agenda-exhausted-")
+
+
+@aio
+async def test_decide_agenda_exhausted_cooldown_holds_and_skips_reflect(monkeypatch):
+    """Exhausted inside the deliberate cooldown → no event at all (reflect would no-op on an
+    empty agenda, so it is skipped even when its own conditions are met); the indicator still
+    fires, carrying the retry ETA."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_MAX_AGE_S", 6 * 3600)
+    last_d = _event_row(_ago(30 * 60), corpus=0)  # 30 min < 2h cooldown
+    last_r = _event_row(_ago(7 * 3600), corpus=0)  # reflect WOULD fire (max-age) if not exhausted
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=0, last_delib=last_d, last_reflect=last_r)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None
+    flags = [c for c in pool.calls if c[0] == "execute" and "'loop.unclosed'" in c[1]]
+    assert len(flags) == 1
+    payload = json.loads(flags[0][2][0])
+    assert payload["deliberate_retry_in_s"] == 5400  # 2h - 30min
+
+
+@aio
+async def test_decide_live_directions_skip_exhaustion(monkeypatch):
+    """With live directions the exhaustion branch must not fire — normal reflect flow, no flag."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_MAX_AGE_S", 6 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=100)
+    last_r = _event_row(_ago(50 * 60), corpus=100)  # grew 900 ≥ 800, cooldown passed
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=2, last_delib=last_d, last_reflect=last_r)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.reflect"
+    assert not any(c[0] == "execute" and "'loop.unclosed'" in c[1] for c in pool.calls)
 
 
 @aio

@@ -8,8 +8,10 @@ landscape may have shifted and she should re-assess. Cooldowns are the only time
 guards (anti-thrash). On each trigger it first refreshes the field model so she reads the
 CURRENT landscape, then emits:
 
-  * ariadne.deliberate — re-frame the whole agenda (rare: no mission yet, or a big corpus
-    jump). persist_directions supersedes the prior mission, so missions don't pile up.
+  * ariadne.deliberate — re-frame the whole agenda (rare: no mission yet, a big corpus
+    jump, or the agenda is EXHAUSTED — every direction terminal — in which case growth is
+    irrelevant and only the deliberate cooldown gates the re-frame).
+    persist_directions supersedes the prior mission, so missions don't pile up.
   * ariadne.reflect    — steer the standing agenda (the regular beat).
 
 Gated on ARIADNE_PACE (env, default OFF), mirroring the other *_LOOP gates. It only fires
@@ -226,6 +228,30 @@ async def _refresh_field_model(pool) -> None:
         log.warning("ariadne pace: field model refresh failed: %s", e)
 
 
+async def _flag_agenda_exhausted(pool, mission_id: int, corpus: int, retry_in_s: float, now) -> None:
+    """loop.unclosed [agenda_exhausted] — a mission with ZERO live directions stalls every
+    downstream lane (plan → research → experiment → synthesize) until a deliberation
+    restocks the agenda; flag it hourly so lab_doctor/closure_audit name the culprit.
+    Sentinel target (target_id 0, mirroring dispatch._emit_indicator) because a NULL
+    target_id never conflicts (Postgres NULLs are distinct) and the hourly dedup would be
+    decorative."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO events (event_type, target_type, target_id, payload, dedup_key) "
+            "VALUES ('loop.unclosed', 'system', 0, $1::jsonb, $2) "
+            "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+            json.dumps(
+                {
+                    "kind": "agenda_exhausted",
+                    "mission_id": mission_id,
+                    "corpus": corpus,
+                    "deliberate_retry_in_s": int(retry_in_s),
+                }
+            ),
+            f"agenda-exhausted-{now:%Y-%m-%dT%H}",
+        )
+
+
 async def _emit(pool, event_type: str, corpus: int) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
@@ -251,6 +277,11 @@ async def _decide(pool) -> tuple[str | None, int]:
             f"SELECT count(*) FROM direction_gate dg JOIN claims c ON c.id = dg.claim_id "
             f"WHERE dg.status = 'approved' AND c.claim_kind = 'direction' AND c.status IN {_ACTIVE}"
         )
+        # Live directions of ANY gate status — zero means the agenda is exhausted (every
+        # direction invalidated/superseded/graduated) and nothing downstream can run.
+        active_directions = await conn.fetchval(
+            f"SELECT count(*) FROM claims WHERE claim_kind='direction' AND status IN {_ACTIVE}"
+        )
         # Don't stack triggers if one is already queued.
         if await conn.fetchval(
             "SELECT count(*) FROM events WHERE event_type IN ('ariadne.deliberate','ariadne.reflect') "
@@ -270,6 +301,21 @@ async def _decide(pool) -> tuple[str | None, int]:
 
     def age(row):
         return (now - row["emitted_at"]).total_seconds() if row else 1e12
+
+    # Agenda EXHAUSTED: a mission exists but zero live directions remain. Reflect no-ops on an
+    # empty agenda, and once intake has relaxed to the 6h agenda cadence the growth gate below
+    # may never trip — without this escape hatch the lab parks silently (observed 2026-06-12:
+    # 43/43 directions terminal, reflect consumed in 4ms, growth 33/3000). Growth is meaningless
+    # with nothing left to steer, so re-frame on the deliberate cooldown alone (anti-thrash for
+    # a deliberation that fails grading and restocks nothing), and skip the pointless reflect.
+    if mission is not None and active_directions == 0:
+        retry_in = max(0.0, DELIB_COOLDOWN_S - age(last_delib))
+        await _flag_agenda_exhausted(pool, mission, corpus, retry_in, now)
+        if age(last_delib) >= DELIB_COOLDOWN_S:
+            log.warning("ariadne pace: agenda EXHAUSTED (0 live directions) — forcing deliberate")
+            return "ariadne.deliberate", corpus
+        log.warning("ariadne pace: agenda EXHAUSTED (0 live directions) — deliberate in %.0fs (cooldown)", retry_in)
+        return None, corpus
 
     # Deliberate: bootstrap, or a big corpus jump after the cooldown — but NEVER while approved
     # directions are in flight (don't re-frame committed work; keeps gate/auto-approve durable).
