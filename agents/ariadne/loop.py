@@ -36,25 +36,47 @@ ARIADNE_MODEL = os.environ.get("ARIADNE_MODEL", os.environ.get("DEEPSEEK_MODEL",
 
 # The lab's compute envelope — so Ariadne frames directions that actually FIT the hardware
 # instead of chasing data-centre problems. Overridable by env (ARIADNE_LAB_CONSTRAINTS).
+# The sandbox's model access is CONDITIONAL: with the inference broker up
+# (EXPERIMENT_LLM_BROKER), local-model behaviour is genuinely testable; without it, any
+# pretrained-model direction would force the designer to simulate — so it's forbidden.
+_SANDBOX_LLM_ON = os.environ.get("EXPERIMENT_LLM_BROKER", "").lower() in {"on", "1", "true"}
+_SANDBOX_LLM_MODELS = os.environ.get(
+    "EXPERIMENT_LLM_MODELS",
+    "mistral:7b-instruct-q4_K_M, qwen2.5:14b-instruct-q4_K_M, qwen2.5-coder:7b, nomic-embed-text",
+)
+_SANDBOX_MODEL_CLAUSE = (
+    (
+        "- The sandbox HAS a brokered LOCAL-MODEL endpoint: inference-time behaviour of these local "
+        f"models IS testable — {_SANDBOX_LLM_MODELS} (≤7B fast, 14B moderate, 27B+ slow). Directions "
+        "about sampling/decoding, self-consistency, calibration, prompt-format effects, or embedding "
+        "geometry OF THESE MODELS are fair game; probe inputs must be generated in-code (no external "
+        "benchmark files). Still NOT testable: fine-tuning or training pretrained weights, models "
+        "beyond the local zoo, web-scale benchmarks or internet datasets.\n"
+    )
+    if _SANDBOX_LLM_ON
+    else (
+        "DO NOT propose directions whose decisive test needs a PRETRAINED model's behaviour — sampling/"
+        "decoding strategies on 7B+ LLMs, quantization of pretrained nets, prompting or agentic "
+        "scaffolding, LoRA fine-tunes, web-scale retrieval benchmarks. The sandbox cannot run them; "
+        "the lab would be forced to simulate the outcome, which is fabricated evidence. If such a "
+        "direction is irresistible, score feasibility 1 and expect it to be held.\n"
+    )
+)
 LAB_CONSTRAINTS = os.environ.get("ARIADNE_LAB_CONSTRAINTS") or (
     "This is a SMALL autonomous lab, NOT a data centre. Compute envelope:\n"
     "- LLM inference (DeepSeek cloud + local Ollama) serves the lab's AGENTS — reading, reasoning, "
-    "writing. It is NOT reachable from the experiment sandbox.\n"
-    "- EXPERIMENTS run in an OFFLINE sandbox: no network, no pretrained model weights, no external "
-    "datasets. Available stack: numpy / scipy / pandas / scikit-learn / xgboost / statsmodels / torch "
-    "(CPU + a single modest GPU) — models must be built and trained FROM SCRATCH inside the run; data "
-    "must be synthesized or come from the stack's built-in toy datasets.\n"
+    "writing. The experiment sandbox reaches models ONLY as stated below.\n"
+    "- EXPERIMENTS run in an OFFLINE sandbox: no network, no external datasets. Available stack: "
+    "numpy / scipy / pandas / scikit-learn / xgboost / statsmodels / torch "
+    "(CPU + a single modest GPU); classical models are built and trained FROM SCRATCH inside the run; "
+    "data must be synthesized or come from the stack's built-in toy datasets.\n"
+    f"{_SANDBOX_MODEL_CLAUSE}"
     "- Embeddings + hybrid retrieval over a certified corpus (for LITERATURE grounding, not experiments).\n"
     "FAVOUR directions a sandbox experiment can SETTLE TODAY — a falsifiable claim with a measurable "
     "threshold, decided by code that outputs a metric: classical ML (GPs, kernels, SVMs, XGBoost, "
     "calibration, uncertainty), small FROM-SCRATCH torch models (optimization dynamics, architecture "
     "ablations, generalization, loss-landscape questions on synthetic or built-in datasets), and "
     "algorithmic / statistical claims (sampling, estimators, bandits, retrieval-scoring math).\n"
-    "DO NOT propose directions whose decisive test needs a PRETRAINED model's behaviour — sampling/"
-    "decoding strategies on 7B+ LLMs, quantization of pretrained nets, prompting or agentic "
-    "scaffolding, LoRA fine-tunes, web-scale retrieval benchmarks. The sandbox cannot run them; "
-    "the lab would be forced to simulate the outcome, which is fabricated evidence. If such a "
-    "direction is irresistible, score feasibility 1 and expect it to be held.\n"
     "DO NOT frame META directions about the lab's OWN machinery — hypothesis-generation, "
     "retrieval-augmented-LLM 'methodology', 'evidence packs', or literature surveys. The lab STUDIES "
     "ml/ai methods; it does NOT study how it does research. 'Analyse the literature on X' is NOT a "

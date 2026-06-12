@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 
 from agents.experiments import sandbox
 from agents.experiments.schemas import ExperimentDesign, ExperimentReport
@@ -49,12 +50,50 @@ except ImportError:  # pragma: no cover — defensive; the export exists today
 # -------------------------------------------------------------------------
 
 
+def _llm_endpoint_blocks() -> tuple[str, str, str]:
+    """The design prompt's local-model capability section — present only while the
+    inference broker is up (EXPERIMENT_LLM_BROKER), read at call time so a flip doesn't
+    need a reimport. Returns (llm_block, llm_import_suffix, infeasible_cannot_clause)."""
+    if os.environ.get("EXPERIMENT_LLM_BROKER", "").lower() not in {"on", "1", "true"}:
+        return (
+            "",
+            "",
+            "it needs a pretrained LLM's behaviour, network access, or an external dataset",
+        )
+    models = os.environ.get(
+        "EXPERIMENT_LLM_MODELS",
+        "mistral:7b-instruct-q4_K_M, qwen2.5:14b-instruct-q4_K_M, qwen2.5-coder:7b, nomic-embed-text",
+    )
+    block = f"""
+## Local model endpoint — REAL model behaviour IS testable
+The sandbox mounts a lab helper at /opt/lab/llm.py — the ONLY model access (a brokered
+local Ollama over a unix socket; the sandbox still has NO network). Local models: {models}.
+    import sys; sys.path.insert(0, "/opt/lab"); import llm
+    text = llm.generate("mistral:7b-instruct-q4_K_M", prompt, temperature=0.0, seed=seed)
+    reply = llm.chat(model, [{{"role": "user", "content": "..."}}], temperature=0.8)
+    vecs = llm.embed("nomic-embed-text", [s1, s2])
+Use it to MEASURE real model behaviour: sampling/decoding strategies, self-consistency,
+calibration, prompt-format effects, embedding geometry. Calls serialize with the lab's
+other GPU work — roughly seconds per 7B call, tens of seconds at 14B+. Budget honestly:
+n_calls × per-call seconds must fit est_wall_clock_s (cap 1800); prefer ≤7B models and a
+modest call count. Generate probe INPUTS in-code (arithmetic/logic problems with known
+answers are fine); model OUTPUTS must come from llm.* calls, never be fabricated.
+"""
+    return (
+        block,
+        " (plus the mounted /opt/lab/llm.py helper described above)",
+        "it needs models beyond the local zoo, fine-tuning or training of pretrained weights, "
+        "network access, or an external dataset",
+    )
+
+
 async def _build_design(ctx: dict, state, memory) -> PromptLayer:
     hypothesis = ctx.get("hypothesis") or ""
     goal = ctx.get("goal") or ""
     claim_statement = ctx.get("claim_statement") or ""
     lab_constraints = ctx.get("lab_constraints") or _LAB_CONSTRAINTS
     prior_hypotheses = ctx.get("prior_hypotheses") or []
+    llm_block, llm_import, cannot = _llm_endpoint_blocks()
     prior_block = (
         "## Experiments ALREADY run on this direction — test a DISTINCT facet, do NOT repeat these\n"
         + "\n".join(f"- {h}" for h in prior_hypotheses)
@@ -100,14 +139,14 @@ HARD RULES — reject these and derive a real claim from the direction instead:
   voting improves accuracy — the conclusion was baked into the input: fabricated evidence, worse
   than no experiment. The script must COMPUTE the phenomenon: actually fit/train/run the model or
   algorithm on data. Synthetic INPUTS are fine; synthetic OUTCOMES are not.
-- If the hypothesis cannot be COMPUTED with the preinstalled offline stack — it needs a pretrained
-  LLM's behaviour, network access, or an external dataset — do NOT approximate it. Set `infeasible`
-  true, say why in `infeasible_reason`, set `code` to "". An honest infeasible beats fake support.
+- If the hypothesis cannot be COMPUTED with what the sandbox offers — {cannot} — do NOT
+  approximate it. Set `infeasible` true, say why in `infeasible_reason`, set `code` to "".
+  An honest infeasible beats fake support.
 If the stated hypothesis is meta/degenerate, DERIVE the most load-bearing testable claim about the
 direction's method and test that — name it explicitly in `hypothesis`.
-
+{llm_block}
 Write `code` as a COMPLETE, self-contained Python script:
-- Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch.
+- Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch{llm_import}.
 - NO network and NO file access outside the cwd. Synthesize your data, or use a sklearn/torch toy
   dataset (e.g. make_classification, load_digits, a small random tensor). State your data source in
   `dataset_plan` (be specific: the generator/loader, its parameters, and shape — this is the dataset's

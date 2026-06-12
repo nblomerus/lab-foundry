@@ -35,6 +35,13 @@ IMAGE = os.environ.get("EXPERIMENT_IMAGE", "labfoundry-experiment:py311")
 HEARTBEAT_S = float(os.environ.get("EXPERIMENT_HEARTBEAT_S", "15"))
 _MAX_OUTPUT_BYTES = 256 * 1024  # cap captured stdout/stderr — a runaway print can't OOM the harness
 
+# The harness's inference-only LLM broker (harness/llm_broker.py). When its unix socket
+# exists at launch, it is bind-mounted into the container together with the stdlib
+# helper — the sandbox stays --network none; inference is the ONLY re-admitted
+# capability. Condition-driven: broker off → socket absent → nothing mounted.
+LLM_SOCKET = os.environ.get("EXPERIMENT_LLM_SOCKET", "/tmp/labfoundry-llm-broker.sock")
+_LLM_HELPER = os.path.join(os.path.dirname(__file__), "sandbox_llm.py")
+
 
 def container_name(exp_id: int) -> str:
     return f"lf-exp-{exp_id}"
@@ -61,6 +68,7 @@ def _build_cmd(
     requires_gpu: bool,
     gpu_device: str | None,
     datasets_dir: str | None,
+    llm_socket: str | None = None,
 ) -> list[str]:
     cmd = [
         "docker",
@@ -113,6 +121,9 @@ def _build_cmd(
         cmd += ["--gpus", f"device={gpu_device}" if gpu_device is not None else "all"]
     if datasets_dir:
         cmd += ["-v", f"{datasets_dir}:/data:ro"]
+    if llm_socket:
+        # The socket mount is rw (connecting writes); the helper is ro. Network stays none.
+        cmd += ["-v", f"{llm_socket}:/sock/ollama.sock", "-v", f"{_LLM_HELPER}:/opt/lab/llm.py:ro"]
     cmd += [IMAGE, "python", "/work/exp.py"]
     return cmd
 
@@ -173,6 +184,7 @@ async def run_in_container(
         requires_gpu=requires_gpu,
         gpu_device=gpu_device,
         datasets_dir=datasets_dir,
+        llm_socket=LLM_SOCKET if os.path.exists(LLM_SOCKET) else None,
     )
     _RUNNING[exp_id] = name
     start = time.monotonic()

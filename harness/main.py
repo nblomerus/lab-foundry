@@ -340,6 +340,16 @@ async def main() -> int:
         qm_task = asyncio.create_task(quartermaster_watchdog(pool, stop_event, router=router, curator=curator))
         log.info("quartermaster ENABLED (QUARTERMASTER)")
 
+    # Experiment LLM broker — the sandbox's inference-only window to local models (unix
+    # socket, whitelisted endpoints, shares the Router's GPULock). Gated on
+    # EXPERIMENT_LLM_BROKER (default OFF); the sandbox mounts the socket only if it exists.
+    broker_task = None
+    if os.environ.get("EXPERIMENT_LLM_BROKER", "").lower() in {"on", "1", "true"}:
+        from harness.llm_broker import run_llm_broker
+
+        broker_task = asyncio.create_task(run_llm_broker(gpu_lock, stop_event))
+        log.info("experiment LLM broker ENABLED (EXPERIMENT_LLM_BROKER)")
+
     log.info("harness ready; entering dispatch loop")
     runner = asyncio.create_task(dispatcher.run())
 
@@ -356,6 +366,9 @@ async def main() -> int:
         if qm_task is not None:
             qm_task.cancel()
             await qm_task
+        if broker_task is not None:
+            broker_task.cancel()
+            await broker_task
 
     await router.close()
     await pool.close()
