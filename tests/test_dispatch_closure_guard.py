@@ -387,3 +387,114 @@ async def test_reopen_noop_when_researcher_paused(monkeypatch):
     disp = Dispatcher(pool=pool)
     await disp._reopen_gapped_directions(pool.conn)
     assert pool.calls == []  # gated before any DB read
+
+
+# ===========================================================================
+# Re-arm — _rearm_research_spines (one-shot spine events re-derive from state)
+# ===========================================================================
+
+
+def _rearm_pool(*, exp_rows=None, synth_rows=None, audit_rows=None, critic_rows=None):
+    """Scripted DB for the spine re-armer. Each spine's scan is keyed on a substring unique
+    to its SQL; unsupplied spines scan empty (the fetch default)."""
+    rules = [("to_char(now()", "2026-06-09")]
+    if exp_rows is not None:
+        rules.append(("COALESCE(e.interpretation, e.researcher_notes)", exp_rows))
+    if synth_rows is not None:
+        rules.append(("max(rf.n_experiments)", synth_rows))
+    if audit_rows is not None:
+        rules.append(("f.audit_verdict IS NULL", audit_rows))
+    if critic_rows is not None:
+        rules.append(("f.audit_verdict = 'pass'", critic_rows))
+    return ScriptedPool(rules)
+
+
+def _rearm_emits(pool, event_type):
+    out = []
+    for kind, sql, args in pool.calls:
+        if kind == "execute" and "INSERT INTO events" in sql and args and args[0] == event_type:
+            out.append({"target_id": args[2], "payload": json.loads(args[3]), "dedup": args[4]})
+    return out
+
+
+@pytest.mark.asyncio
+async def test_rearm_uninterpreted_experiments(monkeypatch):
+    """Terminal runs nothing interpreted → experiment.completed for completed, .failed for
+    killed/failed, fresh day-bucketed dedup, payload marked rearmed."""
+    _researcher_active(monkeypatch)  # all dials read 'active'
+    exp_rows = [
+        {"id": 7, "status": "completed", "task_id": 70, "claim_id": 43},
+        {"id": 8, "status": "killed", "task_id": 71, "claim_id": 44},
+    ]
+    pool = _rearm_pool(exp_rows=exp_rows)
+    disp = Dispatcher(pool=pool)
+    await disp._rearm_research_spines(pool.conn)
+    done = _rearm_emits(pool, "experiment.completed")
+    failed = _rearm_emits(pool, "experiment.failed")
+    assert len(done) == 1 and done[0]["payload"]["experiment_id"] == 7 and done[0]["payload"]["rearmed"]
+    assert done[0]["dedup"] == "rearm-exp-7-2026-06-09"
+    assert len(failed) == 1 and failed[0]["payload"]["experiment_id"] == 8
+
+
+@pytest.mark.asyncio
+async def test_rearm_starving_synthesis(monkeypatch):
+    _researcher_active(monkeypatch)
+    pool = _rearm_pool(synth_rows=[{"id": 43, "done": 4}])
+    disp = Dispatcher(pool=pool)
+    await disp._rearm_research_spines(pool.conn)
+    synth = _rearm_emits(pool, "finding.synthesize")
+    assert len(synth) == 1
+    assert synth[0]["target_id"] == 43
+    assert synth[0]["payload"] == {"claim_id": 43, "experiment_count": 4, "rearmed": True}
+    assert synth[0]["dedup"] == "rearm-synth-43-2026-06-09"
+
+
+@pytest.mark.asyncio
+async def test_rearm_unaudited_findings(monkeypatch):
+    _researcher_active(monkeypatch)
+    pool = _rearm_pool(audit_rows=[{"id": 501}, {"id": 502}])
+    disp = Dispatcher(pool=pool)
+    await disp._rearm_research_spines(pool.conn)
+    audits = _rearm_emits(pool, "task.completed")
+    assert [a["target_id"] for a in audits] == [501, 502]
+    assert all(a["payload"] == {"rearmed": True} for a in audits)
+
+
+@pytest.mark.asyncio
+async def test_rearm_unattacked_high_signal_one_per_claim(monkeypatch):
+    """Two unattacked high-signal findings on the SAME claim → one re-emit (the critic
+    attacks the claim; stacking per-finding events would hammer it)."""
+    _researcher_active(monkeypatch)
+    critic_rows = [
+        {"id": 901, "claim_id": 43, "relevance_score": 9},
+        {"id": 902, "claim_id": 43, "relevance_score": 8},
+        {"id": 903, "claim_id": 44, "relevance_score": 8},
+    ]
+    pool = _rearm_pool(critic_rows=critic_rows)
+    disp = Dispatcher(pool=pool)
+    await disp._rearm_research_spines(pool.conn)
+    attacks = _rearm_emits(pool, "finding.high_signal")
+    assert [(a["target_id"], a["payload"]["finding_id"]) for a in attacks] == [(43, 901), (44, 903)]
+
+
+@pytest.mark.asyncio
+async def test_rearm_spines_gated_per_agent_dial(monkeypatch):
+    """Each spine honours ITS agent's dial: with only 'evaluation' active, the experiment /
+    synthesis / critic scans never run — no churn for paused agents, work kept in state."""
+
+    async def _mode(pool, agent):
+        return "active" if agent == "evaluation" else "off"
+
+    monkeypatch.setattr(dispatch_mod, "get_agent_mode", _mode)
+    pool = _rearm_pool(
+        exp_rows=[{"id": 7, "status": "completed", "task_id": 70, "claim_id": 43}],
+        synth_rows=[{"id": 43, "done": 4}],
+        audit_rows=[{"id": 501}],
+        critic_rows=[{"id": 901, "claim_id": 43, "relevance_score": 9}],
+    )
+    disp = Dispatcher(pool=pool)
+    await disp._rearm_research_spines(pool.conn)
+    assert _rearm_emits(pool, "experiment.completed") == []
+    assert _rearm_emits(pool, "finding.synthesize") == []
+    assert _rearm_emits(pool, "finding.high_signal") == []
+    assert [a["target_id"] for a in _rearm_emits(pool, "task.completed")] == [501]

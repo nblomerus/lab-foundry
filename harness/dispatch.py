@@ -204,6 +204,17 @@ CLOSURE_REOPEN_WINDOW_DAYS = int(os.environ.get("CLOSURE_REOPEN_WINDOW_DAYS", "2
 # At most this many reopens per watchdog tick — trickle back into the gate budget.
 CLOSURE_REOPEN_MAX_PER_TICK = int(os.environ.get("CLOSURE_REOPEN_MAX_PER_TICK", "1"))
 
+# Re-arm: the spine events (experiment.completed/failed → interpret, finding.synthesize
+# → conclude, task.completed → audit, finding.high_signal → critic attack) ride one-shot
+# dedup keys — one crash, timeout, dial-off or cost-cap suppression of that single event
+# used to drop the trace forever. The re-armer derives the dropped work from CURRENT
+# STATE and re-emits with a fresh day-bucketed key; a paused agent's spine is skipped
+# (no churn) but the state keeps the work, so it fires when the dial returns.
+REARM_GRACE_MIN = float(os.environ.get("CLOSURE_REARM_GRACE_MIN", "30"))
+REARM_CAP_PER_TICK = int(os.environ.get("CLOSURE_REARM_CAP_PER_TICK", "10"))
+# Same env var the synthesis agent reads — the re-armer's threshold must never drift from it.
+REARM_SYNTH_MIN = int(os.environ.get("SYNTHESIS_MIN_EXPERIMENTS", "3"))
+
 
 # -------------------------------------------------------------------------
 # Dispatcher
@@ -1053,6 +1064,151 @@ class Dispatcher:
             reopened += 1
             log.info("closure: REOPENED direction %s — %d new on-topic document(s) since its gap", cid, matches)
 
+    async def _rearm_research_spines(self, conn) -> None:
+        """Re-arm the one-shot spines from CURRENT STATE — the audit's #1 silent-flatline
+        class. Each loop-closing event rides a one-shot dedup key, so a single crash,
+        timeout, dial-off or cost-cap suppression used to orphan the work forever. This
+        rung doesn't replay event history; it asks the DB what is true NOW — a terminal
+        run nothing interpreted, a threshold-crossing direction with no finding on that
+        much evidence, an unaudited finding, an unattacked high-signal finding — and
+        re-emits the missing event with a fresh day-bucketed key (≤1 re-arm per item per
+        day). Per-spine mode gates keep a paused agent from churning suppressions; the
+        work survives in state and re-arms when its dial returns."""
+        day = await conn.fetchval("SELECT to_char(now(), 'YYYY-MM-DD')")
+
+        async def _pump(event_type: str, target_type: str, target_id: int, payload: dict, dedup: str) -> None:
+            await conn.execute(
+                "INSERT INTO events (event_type, target_type, target_id, payload, dedup_key) "
+                "VALUES ($1, $2, $3, $4::jsonb, $5) "
+                "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+                event_type,
+                target_type,
+                target_id,
+                json.dumps(payload),
+                dedup,
+            )
+
+        # (a) INTERPRET — terminal experiment runs that nothing ever interpreted (no summary
+        # AND no failure note; quartermaster kills + runner crashes land here event-less).
+        if await get_agent_mode(self.pool, "experiments") in {"advisory", "active"}:
+            rows = await conn.fetch(
+                "SELECT e.id, e.status, e.task_id, t.claim_id FROM experiment_runs e "
+                "LEFT JOIN tasks t ON t.id = e.task_id "
+                "WHERE e.status IN ('completed','failed','killed') "
+                "AND COALESCE(e.interpretation, e.researcher_notes) IS NULL "
+                "AND COALESCE(e.completed_at, e.killed_at) < now() - make_interval(mins => $1::int) "
+                "AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.status = 'pending' "
+                "  AND ev.event_type IN ('experiment.completed','experiment.failed') "
+                "  AND ev.payload->>'experiment_id' = e.id::text) "
+                "ORDER BY e.id LIMIT $2",
+                int(REARM_GRACE_MIN),
+                REARM_CAP_PER_TICK,
+            )
+            for r in rows:
+                et = "experiment.completed" if r["status"] == "completed" else "experiment.failed"
+                await _pump(
+                    et,
+                    "experiment",
+                    r["id"],
+                    {"experiment_id": r["id"], "claim_id": r["claim_id"], "task_id": r["task_id"], "rearmed": True},
+                    f"rearm-exp-{r['id']}-{day}",
+                )
+            if rows:
+                log.info("rearm: re-emitted %d experiment interpretation event(s)", len(rows))
+
+        # (b) CONCLUDE — approved directions whose completed-run count crossed the synthesis
+        # threshold but whose latest finding (if any) rests on less evidence than exists now.
+        if await get_agent_mode(self.pool, "synthesis") in {"advisory", "active"}:
+            rows = await conn.fetch(
+                "SELECT c.id, count(e.*) AS done FROM claims c "
+                "JOIN direction_gate dg ON dg.claim_id = c.id AND dg.status = 'approved' "
+                "JOIN tasks t ON t.claim_id = c.id "
+                "JOIN experiment_runs e ON e.task_id = t.id AND e.status = 'completed' "
+                "WHERE c.claim_kind = 'direction' AND c.status = ANY($1) "
+                "AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.status = 'pending' "
+                "  AND ev.event_type = 'finding.synthesize' AND ev.target_id = c.id) "
+                "GROUP BY c.id "
+                "HAVING count(e.*) >= $2 "
+                "AND max(e.completed_at) < now() - make_interval(mins => $3::int) "
+                "AND COALESCE((SELECT max(rf.n_experiments) FROM research_findings rf "
+                "  WHERE rf.direction_claim_id = c.id), 0) < count(e.*) "
+                "LIMIT $4",
+                list(ACTIVE_CLAIM),
+                REARM_SYNTH_MIN,
+                int(REARM_GRACE_MIN),
+                REARM_CAP_PER_TICK,
+            )
+            for r in rows:
+                await _pump(
+                    "finding.synthesize",
+                    "claim",
+                    r["id"],
+                    {"claim_id": r["id"], "experiment_count": r["done"], "rearmed": True},
+                    f"rearm-synth-{r['id']}-{day}",
+                )
+            if rows:
+                log.info("rearm: re-emitted finding.synthesize for %d starving direction(s)", len(rows))
+
+        # (c) AUDIT — completed research tasks (live claims) still holding unaudited findings.
+        # The evaluation handler is idempotent (it audits only unaudited findings), so a
+        # re-emitted task.completed is safe.
+        if await get_agent_mode(self.pool, "evaluation") in {"advisory", "active"}:
+            rows = await conn.fetch(
+                "SELECT DISTINCT t.id FROM findings f "
+                "JOIN tasks t ON t.id = f.task_id "
+                "JOIN claims c ON c.id = f.claim_id "
+                "WHERE f.audit_verdict IS NULL AND t.status = 'completed' AND t.department = 'research' "
+                "AND c.status = ANY($1) "
+                "AND t.completed_at < now() - make_interval(mins => $2::int) "
+                "AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.status = 'pending' "
+                "  AND ev.event_type = 'task.completed' AND ev.target_id = t.id) "
+                "ORDER BY t.id LIMIT $3",
+                list(ACTIVE_CLAIM),
+                int(REARM_GRACE_MIN),
+                REARM_CAP_PER_TICK,
+            )
+            for r in rows:
+                await _pump("task.completed", "task", r["id"], {"rearmed": True}, f"rearm-audit-{r['id']}-{day}")
+            if rows:
+                log.info("rearm: re-emitted task.completed for %d task(s) with unaudited findings", len(rows))
+
+        # (d) ATTACK — audited-pass, high-relevance findings (the ≥8 bar mirrors
+        # state.update_finding_audit's high-signal emission) on live claims that no critic
+        # verdict has reviewed since they landed. One finding per claim per tick — the
+        # critic attacks the CLAIM, so stacking events per finding would hammer it.
+        if await get_agent_mode(self.pool, "critic") in {"advisory", "active"}:
+            rows = await conn.fetch(
+                "SELECT f.id, f.claim_id, f.relevance_score FROM findings f "
+                "JOIN claims c ON c.id = f.claim_id "
+                "WHERE f.audit_verdict = 'pass' AND f.relevance_score >= 8 "
+                "AND c.status = ANY($1) "
+                "AND f.created_at < now() - make_interval(mins => $2::int) "
+                "AND NOT EXISTS (SELECT 1 FROM critic_verdicts cv WHERE cv.thesis_id = f.claim_id "
+                "  AND cv.created_at > f.created_at) "
+                "AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.status = 'pending' "
+                "  AND ev.event_type = 'finding.high_signal' AND ev.target_id = f.claim_id) "
+                "ORDER BY f.id LIMIT $3",
+                list(ACTIVE_CLAIM),
+                int(REARM_GRACE_MIN),
+                REARM_CAP_PER_TICK,
+            )
+            seen_claims: set[int] = set()
+            pumped = 0
+            for r in rows:
+                if r["claim_id"] in seen_claims:
+                    continue
+                seen_claims.add(r["claim_id"])
+                await _pump(
+                    "finding.high_signal",
+                    "claim",
+                    r["claim_id"],
+                    {"finding_id": r["id"], "score": float(r["relevance_score"]), "rearmed": True},
+                    f"rearm-highsig-{r['id']}-{day}",
+                )
+                pumped += 1
+            if pumped:
+                log.info("rearm: re-emitted finding.high_signal for %d unattacked finding(s)", pumped)
+
     # -- Watchdog -------------------------------------------------------
 
     async def _watchdog_loop(self) -> None:
@@ -1069,6 +1225,7 @@ class Dispatcher:
                     await self._detect_unclosed_events(conn)
                     await self._advance_research_closure(conn)  # auto-close the research ladder
                     await self._reopen_gapped_directions(conn)  # gap ≠ dead end: new evidence re-opens
+                    await self._rearm_research_spines(conn)  # one-shot spine events re-derive from state
                     await self._detect_stuck_directions(conn)  # flag any residual the ladder didn't clear
                 await self._detect_stalls()
                 await self._reconcile_lessons_if_due()

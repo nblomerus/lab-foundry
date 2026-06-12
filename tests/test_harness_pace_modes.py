@@ -390,7 +390,9 @@ async def test_drive_experiments_drives_only_under_target_idle_directions(monkey
     assert args[0] == 61  # target_id = the under-target idle direction
     payload = json.loads(args[1])
     assert payload == {"claim_id": 61, "task_id": 500, "trigger": "coverage"}
-    assert args[2] == "drive-exp-61-1"  # dedup round keyed on attempts (so failures retry)
+    # dedup round keyed on attempts (so failures retry) + a 6h bucket (so a DEAD request —
+    # crashed/suppressed event, no run created — re-arms instead of deadlocking forever)
+    assert args[2].startswith("drive-exp-61-1-")
 
 
 @aio

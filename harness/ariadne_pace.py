@@ -158,9 +158,12 @@ async def _maybe_drive_experiments(pool) -> int:
     the NEXT experiment for any under-target direction with nothing in flight: every approved direction
     marches to a finding (breadth), not just whichever one a researcher happened to flag. Serial per
     direction (the in-flight guard) → naturally fair; the QM's concurrency cap bounds the whole lane.
-    The dedup round keys on TOTAL attempts (completed + failed) so a failed run retries, with a give-up
-    cap so a broken direction can't churn forever. Held-by-adjudication directions are skipped (don't
-    spend compute on work the independent reviewer flagged as redundant)."""
+    The dedup round keys on TOTAL attempts (completed + failed) PLUS a 6h time bucket: attempts alone
+    deadlocked — a requested event that died (handler crash, dial-off/cost-cap suppression) created no
+    run, so attempts never changed and the same key blocked every retry forever. The bucket re-arms a
+    dead request within 6h, while the in-flight guard keeps a LIVE request from double-firing (a
+    designed experiment is queued → inflight > 0 → skip). Give-up cap unchanged. Held-by-adjudication
+    directions are skipped (don't spend compute on work the independent reviewer flagged as redundant)."""
     emitted = 0
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -195,7 +198,7 @@ async def _maybe_drive_experiments(pool) -> int:
                 "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
                 r["id"],
                 json.dumps({"claim_id": r["id"], "task_id": r["task_id"], "trigger": "coverage"}),
-                f"drive-exp-{r['id']}-{r['attempts']}",
+                f"drive-exp-{r['id']}-{r['attempts']}-{int(time.time() // 21600)}",
             )
             if res.endswith(" 1"):
                 emitted += 1

@@ -259,9 +259,10 @@ async def handle_task_completed(event: dict, dispatcher) -> dict | None:
         # modules define AuditBatch in their own namespace.)
         audit_batch = AuditBatch(scores=[s.model_dump() for s in audit_batch_v2.scores])
         if run_id == 0:
-            # All cross-checks failed — skip the rest of the handler. The
-            # event will be marked consumed but findings remain unaudited;
-            # the watchdog re-emits task.completed if nothing audits them.
+            # All cross-checks failed — skip the rest of the handler. The event is
+            # marked consumed but the findings remain unaudited; the watchdog's spine
+            # re-armer (dispatch._rearm_research_spines) re-emits task.completed for
+            # them after the grace window, so the audit is deferred, not lost.
             return {"skipped": True, "reason": "v2 audit: all cross_check steps failed"}
     else:
         prompt = await dispatcher.curator.build(
