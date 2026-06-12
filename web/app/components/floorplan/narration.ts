@@ -146,7 +146,9 @@ interface TransientBubble {
   ttlMs: number;
 }
 
-export function eventBubble(e: LabFoundryEvent): TransientBubble | null {
+const ALL_SCOUTS = ["web", "arxiv", "github", "openml", "dataset"];
+
+export function eventBubbles(e: LabFoundryEvent): TransientBubble[] {
   const t = e.event_type;
   const p = asObj(e.payload);
   switch (t) {
@@ -155,81 +157,95 @@ export function eventBubble(e: LabFoundryEvent): TransientBubble | null {
       const nid = k ? SCOUT_NODE[k] : null;
       const title = asObj(p.source).title;
       return nid
-        ? { nodeId: nid, bubble: { kind: "running", text: `found “${clip(String(title ?? "a new source"), 70)}”` }, ttlMs: EVENT_TTL_MS }
-        : null;
+        ? [{ nodeId: nid, bubble: { kind: "running", text: `found “${clip(String(title ?? "a new source"), 70)}”` }, ttlMs: EVENT_TTL_MS }]
+        : [];
     }
     case "document.ingested":
-      return {
+      return [{
         nodeId: "mimir",
         bubble: { kind: "running", text: `certified a ${p.kind ?? "document"} into the Library (${p.trust_tier ?? "tiered"})` },
         ttlMs: EVENT_TTL_MS,
-      };
+      }];
     case "library.sweep_requested": {
-      const topics = Array.isArray(p.topics) ? (p.topics as unknown[]).slice(0, 2).map(String).join(" · ") : null;
-      return {
-        nodeId: "mimir",
-        bubble: { kind: "running", text: topics ? `sweeping the field: ${clip(topics, 70)}` : "sweeping the field for new sources" },
-        ttlMs: LONG_TTL_MS,
-      };
+      // The briefing the user asked to SEE: Mimir dispatches the sweep, and every scout
+      // gets told what to look for (the sweep's topics fan out to all of them).
+      const topicList = Array.isArray(p.topics) ? (p.topics as unknown[]).map(String) : [];
+      const topics = topicList.slice(0, 2).join(" · ");
+      const claim = p.claim_id ? ` (for direction #${p.claim_id})` : "";
+      const out: TransientBubble[] = [
+        {
+          nodeId: "mimir",
+          bubble: { kind: "running", text: topics ? `briefing the scouts${claim}: ${clip(topics, 60)}` : "briefing the scouts for a field sweep" },
+          ttlMs: LONG_TTL_MS,
+        },
+      ];
+      for (const sc of ALL_SCOUTS) {
+        out.push({
+          nodeId: sc,
+          bubble: { kind: "running", text: topics ? `told to look for: ${clip(topics, 60)}` : "told to sweep the field" },
+          ttlMs: LONG_TTL_MS,
+        });
+      }
+      return out;
     }
     case "library.sweep_settled":
-      return {
+      return [{
         nodeId: "mimir",
         bubble: { kind: "reading", text: `sweep settled — scanned ${p.scanned ?? "?"}, ${p.discovered ?? 0} genuinely new` },
         ttlMs: EVENT_TTL_MS,
-      };
+      }];
     case "acquire.requested":
-      return {
+      return [{
         nodeId: "request-queue",
         bubble: { kind: "running", text: `fetching: “${clip(String(p.query ?? p.paper ?? "a source"), 70)}”${p.claim_id ? ` · direction #${p.claim_id}` : ""}` },
         ttlMs: EVENT_TTL_MS,
-      };
+      }];
     case "acquire.fulfilled":
-      return { nodeId: "request-queue", bubble: { kind: "reading", text: `shelved “${clip(String(p.title ?? p.query ?? "a source"), 70)}”` }, ttlMs: EVENT_TTL_MS };
+      return [{ nodeId: "request-queue", bubble: { kind: "reading", text: `shelved “${clip(String(p.title ?? p.query ?? "a source"), 70)}”` }, ttlMs: EVENT_TTL_MS }];
     case "task.created":
-      return { nodeId: "researchers", bubble: { kind: "running", text: `picked up task #${e.target_id ?? "?"}` }, ttlMs: EVENT_TTL_MS };
+      return [{ nodeId: "researchers", bubble: { kind: "running", text: `picked up task #${e.target_id ?? "?"}` }, ttlMs: EVENT_TTL_MS }];
     case "task.completed":
-      return { nodeId: "researchers", bubble: { kind: "reading", text: `finished task #${e.target_id ?? "?"} — feeding the direction` }, ttlMs: EVENT_TTL_MS };
+      return [{ nodeId: "researchers", bubble: { kind: "reading", text: `finished task #${e.target_id ?? "?"} — feeding the direction` }, ttlMs: EVENT_TTL_MS }];
     case "experiment.requested":
-      return {
+      return [{
         nodeId: "experiments",
         bubble: { kind: "running", text: `designing an experiment for direction #${p.claim_id ?? "?"}` },
         ttlMs: LONG_TTL_MS,
-      };
+      }];
     case "experiment.completed":
-      return {
+      return [{
         nodeId: "experiments",
         bubble: { kind: "reading", text: `run #${p.experiment_id ?? "?"} finished — interpreting the numbers` },
         ttlMs: EVENT_TTL_MS,
-      };
+      }];
     case "experiment.failed":
-      return {
+      return [{
         nodeId: "experiments",
         bubble: { kind: "waiting", text: `run #${p.experiment_id ?? "?"} failed — recording the failure as data` },
         ttlMs: EVENT_TTL_MS,
-      };
+      }];
     case "finding.synthesize":
-      return {
+      return [{
         nodeId: "ariadne",
         bubble: { kind: "running", text: `synthesizing direction #${p.claim_id ?? "?"} into a finding (${p.experiment_count ?? "?"} experiments)` },
         ttlMs: LONG_TTL_MS,
-      };
+      }];
     case "ariadne.deliberate":
-      return { nodeId: "ariadne", bubble: { kind: "running", text: "re-framing the research agenda from the current field…" }, ttlMs: LONG_TTL_MS };
+      return [{ nodeId: "ariadne", bubble: { kind: "running", text: "re-framing the research agenda from the current field…" }, ttlMs: LONG_TTL_MS }];
     case "ariadne.reflect":
-      return { nodeId: "ariadne", bubble: { kind: "running", text: "reflecting on the standing agenda…" }, ttlMs: LONG_TTL_MS };
+      return [{ nodeId: "ariadne", bubble: { kind: "running", text: "reflecting on the standing agenda…" }, ttlMs: LONG_TTL_MS }];
     case "direction.adjudicate":
-      return { nodeId: "gate-promotion", bubble: { kind: "running", text: "adjudicating proposed directions against prior art" }, ttlMs: LONG_TTL_MS };
+      return [{ nodeId: "gate-promotion", bubble: { kind: "running", text: "adjudicating proposed directions against prior art" }, ttlMs: LONG_TTL_MS }];
     case "direction.reopened":
-      return {
+      return [{
         nodeId: "ariadne",
         bubble: { kind: "reading", text: `reopened direction #${p.claim_id ?? "?"} — ${p.new_matching_docs ?? "new"} on-topic papers arrived` },
         ttlMs: EVENT_TTL_MS,
-      };
+      }];
     case "finding.high_signal":
-      return { nodeId: "critic", bubble: { kind: "running", text: `challenging a high-signal finding on direction #${e.target_id ?? "?"}` }, ttlMs: LONG_TTL_MS };
+      return [{ nodeId: "critic", bubble: { kind: "running", text: `challenging a high-signal finding on direction #${e.target_id ?? "?"}` }, ttlMs: LONG_TTL_MS }];
     default:
-      return null;
+      return [];
   }
 }
 
@@ -256,8 +272,7 @@ export function useNarration(ariadne: AriadneOverview | null, qm: QmExperiments 
     for (const e of events) {
       if (seen.current.has(e.id)) continue;
       seen.current.add(e.id);
-      const tb = eventBubble(e);
-      if (tb) {
+      for (const tb of eventBubbles(e)) {
         transientRef.current[tb.nodeId] = { bubble: tb.bubble, until: now + tb.ttlMs };
         changed = true;
       }
