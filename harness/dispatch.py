@@ -1297,7 +1297,7 @@ class Dispatcher:
             "(SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id=e.task_id "
             " WHERE t.claim_id=c.id AND e.status NOT IN ('completed','failed','killed')) AS open_exps, "
             "(SELECT da.verdict FROM direction_adjudications da WHERE da.claim_id=c.id "
-            " ORDER BY da.decided_at DESC LIMIT 1) AS verdict "
+            " ORDER BY da.created_at DESC LIMIT 1) AS verdict "
             "FROM claims c LEFT JOIN direction_gate dg ON dg.claim_id=c.id "
             "WHERE c.claim_kind='direction' AND c.status = ANY($1) ORDER BY c.id",
             list(ACTIVE_CLAIM),
