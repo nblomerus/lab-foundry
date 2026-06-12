@@ -319,6 +319,22 @@ async def agents(request: Request) -> dict:
                 mm["emits"] = _EMITS.get(inv)
             modes.append(mm)
         catalog.append({**a, "modes": modes, "has_suite": a["id"] in SUITES})
+    # Status comes from the LIVE mode dial, not the catalog's static field — the static
+    # values were written when only Mimir was alive and read "planned" long after the
+    # research workflow went live. Dial: advisory|active → live, shadow → shadow,
+    # off → paused. An agent with no dial row keeps its catalog default.
+    try:
+        dial = {
+            r["agent_name"]: r["mode"] for r in await eng.state.pool.fetch("SELECT agent_name, mode FROM agent_modes")
+        }
+        status_of = {"advisory": "live", "active": "live", "shadow": "shadow", "off": "paused"}
+        for a in catalog:
+            mode = dial.get(a["id"])
+            if mode is not None:
+                a["status"] = status_of.get(mode, a["status"])
+                a["mode"] = mode
+    except Exception:  # noqa: BLE001 — the dial table is additive context; never sink the catalog
+        pass
     try:
         claims = [{"id": c.id, "claim": c.statement} for c in await eng.state.get_active_claims(limit=25)]
     except Exception:  # noqa: BLE001

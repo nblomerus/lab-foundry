@@ -111,9 +111,11 @@ async def overview(request: Request) -> dict:
             r["agent_name"]: r["mode"]
             for r in await conn.fetch(
                 "SELECT agent_name, mode FROM agent_modes "
-                "WHERE agent_name IN ('planner','researcher','experiments','quartermaster')"
+                "WHERE agent_name IN ('planner','researcher','experiments','quartermaster',"
+                "'critic','evaluation','synthesis','novelty')"
             )
         }
+        critic_verdicts = await conn.fetchval("SELECT count(*) FROM critic_verdicts")
         # Total reflects the LIVE agenda — exclude tasks belonging to retired (invalidated)
         # directions; those are dead history (a few are kept only for experiment/finding lineage).
         research_tasks = await conn.fetchval(
@@ -173,6 +175,11 @@ async def overview(request: Request) -> dict:
             "research_tasks_running": research_running,
             "experiments_mode": modes.get("experiments", "off"),
             "quartermaster_mode": modes.get("quartermaster", "off"),
+            "critic_mode": modes.get("critic", "off"),
+            "evaluation_mode": modes.get("evaluation", "off"),
+            "synthesis_mode": modes.get("synthesis", "off"),
+            "novelty_mode": modes.get("novelty", "off"),
+            "critic_verdicts": critic_verdicts,
             "experiments_running": exp_running,
             "experiments_total": exp_total,
             "concluded_directions": concluded_directions,

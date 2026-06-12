@@ -335,6 +335,8 @@ export interface AriadneOverview {
     research_tasks: number; research_tasks_pending: number; research_tasks_running: number;
     experiments_mode: string; quartermaster_mode: string;
     experiments_running: number; experiments_total: number;
+    critic_mode?: string; evaluation_mode?: string; synthesis_mode?: string; novelty_mode?: string;
+    critic_verdicts?: number;
   };
   mission: { id: number; statement: string; framed_at: string } | null;
   directions: AriadneDirection[];

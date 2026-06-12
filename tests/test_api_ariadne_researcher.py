@@ -59,7 +59,7 @@ def _overview_rules(*, mission, directions, lessons, focus, modes):
         ("SELECT count(*) FROM claims", [{"count": 42}]),
         ("'acquire.requested' AND status = 'pending'", [{"count": 3}]),  # live queue depth (must precede the 24h rule)
         ("acquire.requested", [{"count": 7}]),
-        ("WHERE agent_name IN ('planner','researcher','experiments','quartermaster')", modes),
+        ("WHERE agent_name IN ('planner','researcher','experiments','quartermaster',", modes),
         ("department = 'research' AND status = 'pending'", [{"count": 1}]),
         ("department = 'research' AND status = 'running'", [{"count": 2}]),
         ("c.status IS NULL OR c.status", [{"count": 3}]),  # the live-agenda total (excludes invalidated dirs)

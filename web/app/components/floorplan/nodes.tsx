@@ -375,9 +375,13 @@ export function OpsNode({ data }: NodeProps<FN>) {
 // with a real-time activity badge + their mode as secondary microcopy. `enabled`
 // = the agent's mode is advisory|active (else it shows Offline, not "Planned" —
 // it's a built agent that's paused, distinct from the never-built dashed rooms).
+const BUILT_DORMANT_IDS = new Set(["ariadne", "request-queue", "planner", "researchers", "experiments", "critic", "gate-promotion"]);
+
 function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
   { value: string; sub: string; enabled: boolean; mode: string | null } | null {
-  if (!ariadne) return null;
+  // No overview payload yet (loading / one failed poll) must NOT relabel BUILT agents
+  // as "Planned" — that chip is reserved for never-built rooms.
+  if (!ariadne) return BUILT_DORMANT_IDS.has(def.id) ? { value: "—", sub: "connecting…", enabled: false, mode: null } : null;
   const ag = ariadne.at_a_glance;
   const on = (m: string | null | undefined) => m === "advisory" || m === "active";
   if (def.id === "ariadne") {
@@ -408,6 +412,15 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
     const m = ag.experiments_mode ?? "off";
     const running = ag.experiments_running ?? 0;
     return { value: `${ag.experiments_total ?? 0} runs`, sub: on(m) ? (running > 0 ? `${running} in flight` : "idle — awaiting a request") : "paused", enabled: on(m), mode: m };
+  }
+  if (def.id === "critic") {
+    const m = ag.critic_mode ?? "off";
+    return { value: `${ag.critic_verdicts ?? 0} verdicts`, sub: on(m) ? "challenging high-signal findings" : "paused", enabled: on(m), mode: m };
+  }
+  if (def.id === "gate-promotion") {
+    // The direction gate is LIVE: approved in-flight vs budget; the novelty adjudicator feeds it.
+    const m = ag.novelty_mode ?? "off";
+    return { value: `${ag.approved ?? 0}/${ag.gate_budget ?? 0} approved`, sub: on(m) ? "adjudicate → approve · hold" : "adjudicator paused", enabled: true, mode: m };
   }
   return null;
 }
