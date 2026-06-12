@@ -38,6 +38,10 @@ DELIB_COOLDOWN_S = float(os.environ.get("ARIADNE_DELIB_COOLDOWN_S", str(2 * 3600
 REFLECT_GROWTH = int(os.environ.get("ARIADNE_REFLECT_GROWTH", "800"))  # new docs → reflect
 REFLECT_COOLDOWN_S = float(os.environ.get("ARIADNE_REFLECT_COOLDOWN_S", str(45 * 60)))
 REFLECT_MAX_AGE_S = float(os.environ.get("ARIADNE_REFLECT_MAX_AGE_S", str(6 * 3600)))
+# A BARREN deliberate (ran but persisted no mission/directions — e.g. failed grading even
+# after the handler's corrective retry) gets a shorter exhaustion-retry than the full
+# cooldown: the lab is parked, the failure was an output flake, waiting 2h compounds it.
+DELIB_BARREN_RETRY_S = float(os.environ.get("ARIADNE_DELIB_BARREN_RETRY_S", str(30 * 60)))
 # Hands-off autonomy: she approves her own top directions (decided_by='auto') up to the budget.
 AUTO_APPROVE = os.environ.get("ARIADNE_AUTO_APPROVE", "").lower() in {"on", "1", "true"}
 AUTO_APPROVE_MIN = float(os.environ.get("ARIADNE_AUTO_APPROVE_MIN_COMPOSITE", "3.5"))
@@ -310,6 +314,12 @@ async def _decide(pool) -> tuple[str | None, int]:
         last_reflect = await conn.fetchrow(
             "SELECT emitted_at, payload FROM events WHERE event_type='ariadne.reflect' ORDER BY id DESC LIMIT 1"
         )
+        # State-derived "did the last deliberate actually produce an agenda?" — if no
+        # mission/direction claim was created after it fired, it was BARREN (failed
+        # grading / crashed) and the exhaustion branch may retry on the shorter cooldown.
+        last_agenda_at = await conn.fetchval(
+            "SELECT max(created_at) FROM claims WHERE claim_kind IN ('mission','direction')"
+        )
 
     def grew_since(row):
         base = _corpus_of(row)
@@ -335,10 +345,15 @@ async def _decide(pool) -> tuple[str | None, int]:
             if active_directions == 0
             else f"{active_directions} live, none actionable (all held/unapproved)"
         )
-        retry_in = max(0.0, DELIB_COOLDOWN_S - age(last_delib))
+        # A barren last deliberate (nothing persisted after it fired) retries sooner — the
+        # flake already cost the lab idle time; don't bill it the full re-frame cooldown.
+        barren = last_delib is not None and (last_agenda_at is None or last_agenda_at < last_delib["emitted_at"])
+        cooldown = DELIB_BARREN_RETRY_S if barren else DELIB_COOLDOWN_S
+        retry_in = max(0.0, cooldown - age(last_delib))
         await _flag_agenda_exhausted(pool, mission, corpus, retry_in, now, active=active_directions)
-        if age(last_delib) >= DELIB_COOLDOWN_S:
-            log.warning("ariadne pace: agenda EXHAUSTED (%s) — forcing deliberate", why)
+        if age(last_delib) >= cooldown:
+            barren_note = ", last was barren" if barren else ""
+            log.warning("ariadne pace: agenda EXHAUSTED (%s%s) — forcing deliberate", why, barren_note)
             return "ariadne.deliberate", corpus
         log.warning("ariadne pace: agenda EXHAUSTED (%s) — deliberate in %.0fs (cooldown)", why, retry_in)
         return None, corpus

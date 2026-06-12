@@ -38,18 +38,23 @@ ARIADNE_MODEL = os.environ.get("ARIADNE_MODEL", os.environ.get("DEEPSEEK_MODEL",
 # instead of chasing data-centre problems. Overridable by env (ARIADNE_LAB_CONSTRAINTS).
 LAB_CONSTRAINTS = os.environ.get("ARIADNE_LAB_CONSTRAINTS") or (
     "This is a SMALL autonomous lab, NOT a data centre. Compute envelope:\n"
-    "- LLM inference via DeepSeek (cloud API) + local Ollama models up to ~32B (a single modest GPU; >14B is slow).\n"
-    "- Embeddings + hybrid retrieval over a ~46k-document certified corpus.\n"
-    "- Light CPU / single-GPU analysis and small, reproducible experiments.\n"
-    "NOT available: large-scale training or fine-tuning, multi-GPU / data-centre compute, "
-    "pretraining foundation models, or huge proprietary datasets.\n"
-    "FAVOUR SUBSTANTIVE ML/AI research questions you can ANSWER by RUNNING A REAL EXPERIMENT on this "
-    "hardware — measure and compare ACTUAL methods/models and produce a number: inference-time "
-    "techniques (quantization, KV-cache, speculative/parallel decoding, sampling strategies), small "
-    "fine-tunes (LoRA/adapters on <=7B), efficiency / latency / throughput, calibration & robustness, "
-    "retrieval-method quality, classical-ML methods (GP/SVM/XGBoost/etc.) on tractable datasets, "
-    "prompting / agentic methods evaluated against real baselines. Each direction is a FALSIFIABLE claim "
-    "with a measurable threshold, settled by code that outputs a metric.\n"
+    "- LLM inference (DeepSeek cloud + local Ollama) serves the lab's AGENTS — reading, reasoning, "
+    "writing. It is NOT reachable from the experiment sandbox.\n"
+    "- EXPERIMENTS run in an OFFLINE sandbox: no network, no pretrained model weights, no external "
+    "datasets. Available stack: numpy / scipy / pandas / scikit-learn / xgboost / statsmodels / torch "
+    "(CPU + a single modest GPU) — models must be built and trained FROM SCRATCH inside the run; data "
+    "must be synthesized or come from the stack's built-in toy datasets.\n"
+    "- Embeddings + hybrid retrieval over a certified corpus (for LITERATURE grounding, not experiments).\n"
+    "FAVOUR directions a sandbox experiment can SETTLE TODAY — a falsifiable claim with a measurable "
+    "threshold, decided by code that outputs a metric: classical ML (GPs, kernels, SVMs, XGBoost, "
+    "calibration, uncertainty), small FROM-SCRATCH torch models (optimization dynamics, architecture "
+    "ablations, generalization, loss-landscape questions on synthetic or built-in datasets), and "
+    "algorithmic / statistical claims (sampling, estimators, bandits, retrieval-scoring math).\n"
+    "DO NOT propose directions whose decisive test needs a PRETRAINED model's behaviour — sampling/"
+    "decoding strategies on 7B+ LLMs, quantization of pretrained nets, prompting or agentic "
+    "scaffolding, LoRA fine-tunes, web-scale retrieval benchmarks. The sandbox cannot run them; "
+    "the lab would be forced to simulate the outcome, which is fabricated evidence. If such a "
+    "direction is irresistible, score feasibility 1 and expect it to be held.\n"
     "DO NOT frame META directions about the lab's OWN machinery — hypothesis-generation, "
     "retrieval-augmented-LLM 'methodology', 'evidence packs', or literature surveys. The lab STUDIES "
     "ml/ai methods; it does NOT study how it does research. 'Analyse the literature on X' is NOT a "
@@ -294,10 +299,17 @@ async def _deliberate(
 
 
 async def run_shadow(
-    state, *, model: str = ARIADNE_MODEL, focus: str | None = None, emit_conversation: bool = False
+    state,
+    *,
+    model: str = ARIADNE_MODEL,
+    focus: str | None = None,
+    feedback: str | None = None,
+    emit_conversation: bool = False,
 ) -> AriadneOutput:
     """Read seed problem + agenda, recall prior art, deliberate. WRITES NOTHING to the corpus.
-    `focus` (e.g. an injected debug request) narrows the deliberation to a topic. When
+    `focus` (e.g. an injected debug request) narrows the deliberation to a topic. `feedback`
+    carries the grader's corrective notes from a FAILED previous attempt (the handler's
+    one-shot retry) so the model fixes the actual defects instead of re-rolling blind. When
     `emit_conversation` is True (the LIVE pacemaker path), the Ariadne↔Mimir GraphRAG exchange
     is emitted (mimir.ask/mimir.answered) so the floorplan shows it; the read-only firstlight
     dry-run leaves it False so nothing is written."""
@@ -305,6 +317,8 @@ async def run_shadow(
     seed = cs.problem_statement
     if focus:
         seed = f"{seed}\n\nFOCUS THIS DELIBERATION ON: {focus}"
+    if feedback:
+        seed = f"{seed}\n\n## VALIDATION FEEDBACK — your previous agenda FAILED these checks; fix ALL of them\n{feedback}"
 
     # The agenda tree (claim_kind='mission'/'direction'/'hypothesis'). Empty on a fresh
     # lab — shadow Ariadne frames from scratch. Kept defensive: any read failure → empty.

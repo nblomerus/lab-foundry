@@ -75,6 +75,7 @@ def _decide_rules(
     queued=0,
     last_delib=None,
     last_reflect=None,
+    last_agenda_at=None,
     now=NOW,
 ):
     """Build the ordered ScriptedPool rules _decide issues (first match wins, so the
@@ -91,6 +92,9 @@ def _decide_rules(
         ("claim_kind='direction' AND status IN", active_directions),
         # directions that can still move the lab: approved / pending adjudication / passed.
         ("da.verdict='pass'", actionable),
+        # newest mission/direction creation time — barren-deliberate detection (defaults to NOW,
+        # i.e. the last deliberate DID produce an agenda, so older tests stay on the full cooldown).
+        ("max(created_at) FROM claims WHERE claim_kind IN", last_agenda_at if last_agenda_at is not None else now),
         # queued deliberate/reflect events.
         ("event_type IN ('ariadne.deliberate','ariadne.reflect')", queued),
         ("event_type='ariadne.deliberate' ORDER BY", [last_delib] if last_delib else []),
@@ -231,6 +235,46 @@ async def test_decide_all_held_agenda_forces_deliberate(monkeypatch):
     payload = json.loads(flags[0][2][0])
     assert payload["kind"] == "agenda_exhausted"
     assert payload["active_unactionable"] == 3
+
+
+@aio
+async def test_decide_barren_deliberate_retries_on_short_cooldown(monkeypatch):
+    """The last deliberate produced NOTHING (no mission/direction created after it) → the
+    exhaustion branch retries on DELIB_BARREN_RETRY_S instead of billing the full cooldown."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    monkeypatch.setattr(ariadne_pace, "DELIB_BARREN_RETRY_S", 30 * 60)
+    last_d = _event_row(_ago(35 * 60), corpus=990)  # 35 min ago: > barren retry, < full cooldown
+    pool = ScriptedPool(
+        _decide_rules(
+            corpus=1000,
+            mission=7,
+            active_directions=0,
+            last_delib=last_d,
+            last_agenda_at=_ago(5 * 3600),  # agenda predates the barren deliberate
+        )
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.deliberate"
+
+
+@aio
+async def test_decide_fruitful_deliberate_keeps_full_cooldown(monkeypatch):
+    """The last deliberate DID restock (agenda newer than it) → exhaustion still respects the
+    FULL cooldown at the same 35-minute age."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    monkeypatch.setattr(ariadne_pace, "DELIB_BARREN_RETRY_S", 30 * 60)
+    last_d = _event_row(_ago(35 * 60), corpus=990)
+    pool = ScriptedPool(
+        _decide_rules(
+            corpus=1000,
+            mission=7,
+            active_directions=0,  # (it restocked, then everything resolved again)
+            last_delib=last_d,
+            last_agenda_at=_ago(30 * 60),  # created AFTER the deliberate → not barren
+        )
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None  # 35 min < 2h full cooldown
 
 
 @aio

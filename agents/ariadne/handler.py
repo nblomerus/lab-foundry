@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from agents.ariadne.grade import grade, grade_reflection
+from agents.ariadne.grade import grade, grade_feedback, grade_reflection
 from agents.ariadne.loop import run_shadow
 from agents.ariadne.persist import persist_directions, persist_reflection, request_evidence
 from agents.ariadne.reflect import run_reflection
@@ -33,11 +33,22 @@ async def handle_ariadne_deliberate(event: dict, dispatcher) -> dict | None:
     # still untouched — only telemetry events are written; persist happens below for adv/active).
     out = await run_shadow(state, focus=focus, emit_conversation=True)
     report = await grade(out)
+    retried = False
+    if not report.passed and mode in {"advisory", "active"}:
+        # ONE corrective retry: grading failures are usually output flaws (ungrounded
+        # directions, missing kill-conditions) the model fixes when TOLD what it got wrong —
+        # without this, a flake parks the research front for a whole deliberate cooldown.
+        feedback = grade_feedback(report)
+        log.warning("ariadne: deliberation failed grading — one corrective retry:\n%s", feedback)
+        out = await run_shadow(state, focus=focus, emit_conversation=True, feedback=feedback)
+        report = await grade(out)
+        retried = True
     summary = {
         "mode": mode,
         "directions": len(out.directions),
         "graded_pass": report.passed,
         "citations_resolved": round(report.citations_resolved, 2),
+        "retried": retried,
     }
 
     # shadow should not reach here (dispatcher pauses it) — defend anyway: write nothing.

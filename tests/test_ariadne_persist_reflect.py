@@ -784,3 +784,34 @@ async def test_mimir_reflect_brief_answer_failure_returns_empty(monkeypatch):
     monkeypatch.setattr(reflect, "answer_question", _boom)
     block = await reflect._mimir_reflect_brief(SimpleNamespace(pool=pool), "m", "a", emit=True)
     assert block == ""
+
+
+@pytest.mark.asyncio
+async def test_deliberate_failed_grading_retries_once_with_feedback(monkeypatch):
+    """First grade fails, retry passes: run_shadow is called twice — the second time with the
+    grader's corrective feedback — and the passing agenda persists with retried=True."""
+    out, pd, _re = _wire_deliberate(monkeypatch, mode="advisory", passed=True)
+    fail = _grade_report(passed=False)
+    fail.directions_grounded = 0.0
+    ok = _grade_report(passed=True)
+    monkeypatch.setattr(handler, "grade", AsyncMock(side_effect=[fail, ok]))
+    res = await handler.handle_ariadne_deliberate({"payload": {}}, _dispatcher())
+    assert res["persisted"] is True
+    assert res["retried"] is True
+    assert handler.run_shadow.await_count == 2
+    _a, kwargs = handler.run_shadow.call_args
+    assert "grounded_in citations" in kwargs["feedback"]
+    pd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deliberate_double_grade_failure_gives_up(monkeypatch):
+    """Both attempts fail grading → not persisted, retried=True, exactly one retry (no loop)."""
+    _out, pd, _re = _wire_deliberate(monkeypatch, mode="advisory", passed=False)
+    fail = _grade_report(passed=False)
+    monkeypatch.setattr(handler, "grade", AsyncMock(side_effect=[fail, fail]))
+    res = await handler.handle_ariadne_deliberate({"payload": {}}, _dispatcher())
+    assert res["persisted"] is False and res["reason"] == "failed_grading"
+    assert res["retried"] is True
+    assert handler.run_shadow.await_count == 2
+    pd.assert_not_awaited()

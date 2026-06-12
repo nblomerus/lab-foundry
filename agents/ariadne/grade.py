@@ -118,6 +118,29 @@ async def grade(out: AriadneOutput) -> GradeReport:
     )
 
 
+def grade_feedback(report: GradeReport) -> str:
+    """Corrective instructions from a failed GradeReport — fed back into the handler's
+    one-shot retry deliberation so the model fixes the actual defects, not a blind re-roll."""
+    fixes: list[str] = []
+    if not report.schema_valid:
+        fixes.append(
+            "- Produce AT LEAST 3 directions, each with a non-empty novelty_rationale, stakes, "
+            "and at least one claim_goal."
+        )
+    if report.claim_goals_wellformed < 1.0:
+        fixes.append("- EVERY claim_goal needs a non-empty expectation AND a non-empty kill_condition.")
+    if report.directions_grounded < 1.0:
+        fixes.append(
+            "- EVERY direction must list grounded_in citations — real papers (title or arxiv id) "
+            "from the corpus context you were shown, not invented ones."
+        )
+    if report.citations_resolved < 0.8:
+        fixes.append(f"- These citations did not resolve to corpus papers — cite real ones: {report.unresolved[:5]}")
+    if report.scores_wellformed < 1.0:
+        fixes.append("- EVERY direction needs the full scores object, each dimension an integer 1..5.")
+    return "\n".join(fixes) or "- The output failed validation; follow the output schema exactly."
+
+
 class ReflectionGrade(BaseModel):
     verdicts_valid: float  # fraction referencing a REAL standing id with a valid assessment
     n_verdicts: int
