@@ -1286,3 +1286,28 @@ async def test_session_emit_event_writes_row():
     assert json.loads(last[3]) == {"step": "synthesize"}
     assert last[4] == 12
     assert last[5] == 9  # session_id
+
+
+# ── the never-idle pump: research-front probe ─────────────────────────────────
+@pytest.mark.asyncio
+async def test_research_front_idle_true_when_hands_empty():
+    pool = ScriptedPool([("open_tasks", {"open_tasks": 0, "open_exps": 0})])
+    disp = Dispatcher(pool=pool)
+    assert await disp._research_front_idle() is True
+
+
+@pytest.mark.asyncio
+async def test_research_front_idle_false_with_open_work():
+    pool = ScriptedPool([("open_tasks", {"open_tasks": 0, "open_exps": 1})])
+    disp = Dispatcher(pool=pool)
+    assert await disp._research_front_idle() is False
+
+
+@pytest.mark.asyncio
+async def test_research_front_probe_failure_means_not_idle():
+    class _BoomPool:
+        def acquire(self):
+            raise RuntimeError("db gone")
+
+    disp = Dispatcher(pool=_BoomPool())
+    assert await disp._research_front_idle() is False  # fail closed: don't pump blind

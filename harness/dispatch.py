@@ -1453,28 +1453,52 @@ class Dispatcher:
         await self._emit_sweep(str(int(now.timestamp() // (hours * 3600))))
         log.info("library: emitted agenda sweep (every %sh)", hours)
 
+    async def _research_front_idle(self) -> bool:
+        """The lab's hands are empty: no research task open and no experiment in flight.
+        Used by the pump so the lab is NEVER fully idle — when there's nothing else to
+        do, it reads more of the field. The corpus growth this produces is not busywork:
+        it feeds Ariadne's deliberate/reflect growth triggers, the gap-reopen watchlist,
+        and the field model — idleness composts into research supply."""
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT (SELECT count(*) FROM tasks WHERE department = 'research' "
+                    "        AND status IN ('pending','running')) AS open_tasks, "
+                    "(SELECT count(*) FROM experiment_runs WHERE status IN ('queued','running')) AS open_exps"
+                )
+            return (row["open_tasks"] or 0) == 0 and (row["open_exps"] or 0) == 0
+        except Exception:  # noqa: BLE001 — a probe failure must not kill the pump
+            log.exception("pump: research-front probe failed")
+            return False
+
     async def _discovery_pump_loop(self) -> None:
-        """Continuous library-intake pump — the base-building driver while Ariadne
-        (the PI) is dark. CONDITION-driven, not interval-driven: whenever the
-        intake backlog runs below a low-water mark it fires the next discovery
-        slice, so the pipeline is always working and never idles between ticks.
-        Bounded by backpressure (it waits while the backlog is healthy) plus a
+        """Continuous library-intake pump. CONDITION-driven, not interval-driven:
+        whenever the intake backlog runs below a low-water mark it fires the next
+        discovery slice, so the pipeline is always working and never idles between
+        ticks. Bounded by backpressure (it waits while the backlog is healthy) plus a
         short min-gap covering a sweep's fetch latency so requests don't stack.
-        Idle while the loop is off or once Ariadne is active (the agenda sweep
-        takes over then)."""
+
+        Runs in two regimes: while Ariadne is dark it base-builds AGGRESSIVELY and
+        unconditionally; once she's active it pumps only when the RESEARCH FRONT is
+        idle (no open tasks, no experiments in flight) — the lab must never show a
+        fully idle floor; an idle lab reads more of the field."""
         low_water = int(os.environ.get("LIBRARY_PUMP_LOW_WATER", "40"))
         check_s = float(os.environ.get("LIBRARY_PUMP_CHECK_SECONDS", "10"))
         min_gap_s = float(os.environ.get("LIBRARY_PUMP_MIN_GAP_SECONDS", "60"))
         while self._running:
             try:
                 loop_on = os.environ.get("MIMIR_LOOP", "").lower() in {"v1", "on"}
-                if loop_on and not self._ariadne_active():
+                if loop_on:
                     now = datetime.now(UTC)
                     gap_ok = self._last_pump_emit is None or (now - self._last_pump_emit).total_seconds() >= min_gap_s
-                    if gap_ok and await self._intake_backlog() < low_water:
+                    if (
+                        gap_ok
+                        and await self._intake_backlog() < low_water
+                        and (not self._ariadne_active() or await self._research_front_idle())
+                    ):
                         self._last_pump_emit = now
                         await self._emit_sweep(f"pump-{int(now.timestamp())}")
-                        log.info("pump: intake backlog low — fired next discovery slice")
+                        log.info("pump: intake backlog low + lab hands empty — fired next discovery slice")
             except Exception:  # noqa: BLE001 — the pump must never die
                 log.exception("discovery pump iteration failed")
             await asyncio.sleep(check_s)
