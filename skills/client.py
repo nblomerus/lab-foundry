@@ -234,6 +234,28 @@ class LessonsClient:
                 threshold,
             )
 
+    async def record_applications(self, lesson_ids: list[int], agent_run_id: int | None) -> int:
+        """Record that a run CONSUMED these lessons (outcome judged later by the lesson
+        judge). The Curator→Router path records its own applications (harness/router.py);
+        this is for paths that bypass it — Ariadne's deliberate/reflect recall — which
+        previously left her lessons unjudgeable (0 promotions ever). Idempotent per
+        (lesson, run)."""
+        if not lesson_ids or agent_run_id is None:
+            return 0
+        n = 0
+        async with self.pool.acquire() as conn:
+            for lid in lesson_ids:
+                res = await conn.execute(
+                    "INSERT INTO lesson_applications (lesson_id, agent_run_id) "
+                    "SELECT $1, $2 WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM lesson_applications WHERE lesson_id = $1 AND agent_run_id = $2)",
+                    lid,
+                    agent_run_id,
+                )
+                if res.endswith(" 1"):
+                    n += 1
+        return n
+
     async def credit_recurrence(self, lesson_id: int, derived_from_run_id: int) -> None:
         """
         A near-duplicate lesson was re-discovered. Instead of inserting a row,

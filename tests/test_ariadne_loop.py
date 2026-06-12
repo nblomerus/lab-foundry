@@ -185,8 +185,8 @@ async def test_recall_lessons_empty_rows():
 @pytest.mark.asyncio
 async def test_recall_lessons_formats_with_and_without_condition():
     rows = [
-        {"lesson_text": "Use strong baselines", "applies_when": {"when": "weak eval"}, "status": "active"},
-        {"lesson_text": "Prefer light methods", "applies_when": None, "status": "probationary"},
+        {"id": 1, "lesson_text": "Use strong baselines", "applies_when": {"when": "weak eval"}, "status": "active"},
+        {"id": 2, "lesson_text": "Prefer light methods", "applies_when": None, "status": "probationary"},
     ]
     pool = ScriptedPool(rules=[("FROM lessons", rows)])
     out = await loop.recall_lessons(pool)
@@ -281,7 +281,14 @@ async def test_recall_prior_art_field_brief_path(monkeypatch):
             ("FROM field_model", [{"concept_name": "agentic RAG"}]),
             (
                 "FROM lessons",
-                [{"lesson_text": "Use strong baselines", "applies_when": {"when": "weak eval"}, "status": "active"}],
+                [
+                    {
+                        "id": 1,
+                        "lesson_text": "Use strong baselines",
+                        "applies_when": {"when": "weak eval"},
+                        "status": "active",
+                    }
+                ],
             ),
         ]
     )

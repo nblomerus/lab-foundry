@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 
+from agents.ariadne import loop as ariadne_loop
 from agents.ariadne.grade import grade, grade_feedback, grade_reflection
 from agents.ariadne.loop import run_shadow
 from agents.ariadne.persist import persist_directions, persist_reflection, request_evidence
@@ -77,6 +78,14 @@ async def handle_ariadne_deliberate(event: dict, dispatcher) -> dict | None:
 
     counts = await persist_directions(state, out)
     n_requests = await request_evidence(state, out.requests)  # demand side → Mimir acquire queue
+    # The lessons this deliberation consumed become judgeable applications — without this,
+    # Ariadne's recall path bypassed the Router's recording and no lesson could ever promote.
+    lessons_client = getattr(dispatcher, "lessons", None)
+    if lessons_client is not None:
+        try:
+            await lessons_client.record_applications(list(ariadne_loop.LAST_RECALLED_LESSON_IDS), current_run_id())
+        except Exception:  # noqa: BLE001 — application accounting must not fail the deliberation
+            log.exception("ariadne: recording lesson applications failed")
     log.info("ariadne: %s — persisted %s, queued %d evidence requests", mode, counts, n_requests)
     return {**summary, "persisted": True, **counts, "evidence_requests": n_requests}
 
@@ -104,5 +113,11 @@ async def handle_ariadne_reflect(event: dict, dispatcher) -> dict | None:
 
     # The reflect run is the last _chain_complete on this session — credit re-derived lessons to it.
     counts = await persist_reflection(state, out, valid_ids, run_id=current_run_id())
+    lessons_client = getattr(dispatcher, "lessons", None)
+    if lessons_client is not None:
+        try:
+            await lessons_client.record_applications(list(ariadne_loop.LAST_RECALLED_LESSON_IDS), current_run_id())
+        except Exception:  # noqa: BLE001
+            log.exception("ariadne reflect: recording lesson applications failed")
     log.info("ariadne reflect: %s — applied %s", mode, counts)
     return {**summary, "persisted": True, **counts}

@@ -484,11 +484,11 @@ async def test_maybe_adjudicate_emits(monkeypatch):
 async def test_drive_experiments_drives_only_under_target_idle_directions(monkeypatch):
     monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
     rows = [
-        {"id": 61, "done": 1, "attempts": 1, "inflight": 0, "task_id": 500},  # under target, idle → DRIVE
-        {"id": 62, "done": 3, "attempts": 3, "inflight": 0, "task_id": 501},  # at target → skip
-        {"id": 63, "done": 0, "attempts": 0, "inflight": 1, "task_id": 502},  # in flight → skip (serial/fair)
-        {"id": 64, "done": 0, "attempts": 0, "inflight": 0, "task_id": None},  # no task → skip
-        {"id": 65, "done": 0, "attempts": 9, "inflight": 0, "task_id": 503},  # give-up cap (>=3*3) → skip
+        {"id": 61, "done": 1, "attempts": 1, "inflight": 0, "task_id": 500, "last_synth_n": None},  # under target → DRIVE
+        {"id": 62, "done": 3, "attempts": 3, "inflight": 0, "task_id": 501, "last_synth_n": None},  # at target → skip
+        {"id": 63, "done": 0, "attempts": 0, "inflight": 1, "task_id": 502, "last_synth_n": None},  # in flight → skip
+        {"id": 64, "done": 0, "attempts": 0, "inflight": 0, "task_id": None, "last_synth_n": None},  # no task → skip
+        {"id": 65, "done": 0, "attempts": 9, "inflight": 0, "task_id": 503, "last_synth_n": None},  # give-up cap → skip
     ]
     pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
     n = await ariadne_pace._maybe_drive_experiments(pool)
@@ -507,10 +507,34 @@ async def test_drive_experiments_drives_only_under_target_idle_directions(monkey
 @aio
 async def test_drive_experiments_none_when_all_covered(monkeypatch):
     monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
-    rows = [{"id": 61, "done": 3, "attempts": 3, "inflight": 0, "task_id": 1}]
+    rows = [{"id": 61, "done": 3, "attempts": 3, "inflight": 0, "task_id": 1, "last_synth_n": None}]
     pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
     assert await ariadne_pace._maybe_drive_experiments(pool) == 0
     assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_drive_experiments_marches_past_inconclusive_finding(monkeypatch):
+    """A direction synthesized at n=3 but NOT concluded (still active) gets driven toward the
+    NEXT synthesis bucket — evidence marches toward a decision instead of parking forever."""
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_RESYNTH_STEP", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_CAP", 9)
+    rows = [{"id": 61, "done": 3, "attempts": 3, "inflight": 0, "task_id": 500, "last_synth_n": 3}]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 1  # target now 6, done 3 → drive
+
+
+@aio
+async def test_drive_experiments_evidence_cap_parks_for_reflect(monkeypatch):
+    """Past the evidence cap the driver stops — the verdict belongs to Ariadne's reflect
+    (which now SEES the finding), not to infinite evidence accumulation."""
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_RESYNTH_STEP", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_CAP", 9)
+    rows = [{"id": 61, "done": 9, "attempts": 12, "inflight": 0, "task_id": 500, "last_synth_n": 9}]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 0
 
 
 # ── _emit ─────────────────────────────────────────────────────────────────────

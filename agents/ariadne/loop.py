@@ -168,14 +168,22 @@ def _lesson_when(v) -> str:
     return str(v)
 
 
+# The lesson ids the LAST recall injected — so the handler can record lesson_applications
+# for the run that consumed them (the Curator/Router path records its own; Ariadne bypasses
+# it, which left her lessons unjudgeable: 0 promotions ever). Single-flight is safe: the
+# pacemaker emits at most one deliberate/reflect at a time and never stacks pending ones.
+LAST_RECALLED_LESSON_IDS: list[int] = []
+
+
 async def recall_lessons(pool, *, limit: int = 10) -> str:
     """Ariadne's STANDING LESSONS — reflection's output fed back as deliberation input
     (the diagram's 'Past Lessons & Reflections'). Empty string if none / unavailable."""
+    LAST_RECALLED_LESSON_IDS.clear()
     if pool is None:
         return ""
     try:
         rows = await pool.fetch(
-            "SELECT l.lesson_text, l.applies_when, l.status "
+            "SELECT l.id, l.lesson_text, l.applies_when, l.status "
             "FROM lessons l LEFT JOIN LATERAL ("
             "  SELECT count(*) AS supp, max(created_at) AS last_app FROM lesson_applications la "
             "  WHERE la.lesson_id = l.id AND la.outcome = 'supportive'"
@@ -192,6 +200,7 @@ async def recall_lessons(pool, *, limit: int = 10) -> str:
         return ""
     if not rows:
         return ""
+    LAST_RECALLED_LESSON_IDS.extend(r["id"] for r in rows)
     items = []
     for r in rows:
         cond = _lesson_when(r["applies_when"])

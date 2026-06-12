@@ -60,6 +60,13 @@ GATE_REQUIRE_ADJUDICATION = os.environ.get("ARIADNE_GATE_REQUIRE_ADJUDICATION", 
 # Drive every approved direction to at least this many completed experiments so it can be synthesized
 # into a finding (matches SYNTHESIS_MIN_EXPERIMENTS). 0 disables the coverage driver.
 EXPERIMENT_COVERAGE_TARGET = int(os.environ.get("EXPERIMENT_COVERAGE_TARGET", "3"))
+# After a first finding that is NOT decisive enough to conclude (synthesis only concludes at
+# supported≠inconclusive AND confidence ≥ its bar), the driver raises the target to the NEXT
+# synthesis bucket (last finding's n + the resynth step) — evidence marches TOWARD a decision
+# instead of parking at exactly the first-synthesis line. Bounded by the evidence cap; past it
+# the direction parks and Ariadne's reflect (which now SEES the finding) owns retire/advance.
+EVIDENCE_RESYNTH_STEP = int(os.environ.get("SYNTHESIS_RESYNTH_STEP", os.environ.get("SYNTHESIS_MIN_EXPERIMENTS", "3")))
+EVIDENCE_CAP = int(os.environ.get("ARIADNE_EVIDENCE_CAP", "9"))
 
 _ACTIVE = "('proposed','tested','weakly_supported','replicated')"
 
@@ -180,7 +187,9 @@ async def _maybe_drive_experiments(pool) -> int:
                    (SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id
                       WHERE t.claim_id = c.id AND e.status NOT IN ('completed','failed','killed')) AS inflight,
                    (SELECT t.id FROM tasks t WHERE t.claim_id = c.id AND t.department = 'research'
-                      ORDER BY t.id DESC LIMIT 1) AS task_id
+                      ORDER BY t.id DESC LIMIT 1) AS task_id,
+                   (SELECT rf.n_experiments FROM research_findings rf
+                      WHERE rf.direction_claim_id = c.id ORDER BY rf.id DESC LIMIT 1) AS last_synth_n
             FROM claims c JOIN direction_gate dg ON dg.claim_id = c.id
             WHERE dg.status = 'approved' AND c.claim_kind = 'direction' AND c.status IN {_ACTIVE}
               AND NOT EXISTS (
@@ -189,11 +198,17 @@ async def _maybe_drive_experiments(pool) -> int:
             """
         )
         for r in rows:
+            # First march: to the synthesis minimum. After a non-concluding finding (the
+            # direction is still ACTIVE, so it didn't conclude): to the next synthesis
+            # bucket, capped — evidence accumulates TOWARD a decision, never forever.
+            target = EXPERIMENT_COVERAGE_TARGET
+            if r["last_synth_n"] is not None:
+                target = min(r["last_synth_n"] + EVIDENCE_RESYNTH_STEP, EVIDENCE_CAP)
             if (
-                r["done"] >= EXPERIMENT_COVERAGE_TARGET
+                r["done"] >= target
                 or r["inflight"] > 0
                 or r["task_id"] is None
-                or r["attempts"] >= EXPERIMENT_COVERAGE_TARGET * 3  # give-up cap: a direction that can't produce runs
+                or r["attempts"] >= target * 3  # give-up cap: a direction that can't produce runs
             ):
                 continue
             res = await conn.execute(

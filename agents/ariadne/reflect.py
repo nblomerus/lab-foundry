@@ -84,6 +84,30 @@ async def _standing_agenda(pool) -> tuple[str | None, list[int], str]:
                 goals_by_dir.setdefault(g["claim_id"], []).append(g)
 
     ids = [r["id"] for r in rows]
+    # The EVIDENCE each direction has actually produced — its latest synthesized finding and
+    # most recent experiment interpretations. Reflect's verdicts (retire/advance/pivot) were
+    # previously made BLIND to both: the one actor able to free a graduated direction's gate
+    # slot never saw the finding it graduated with.
+    finding_by_dir: dict[int, dict] = {}
+    interps_by_dir: dict[int, list[str]] = {}
+    if ids:
+        async with pool.acquire() as conn:
+            frows = await conn.fetch(
+                "SELECT DISTINCT ON (direction_claim_id) direction_claim_id, headline, supported, "
+                "confidence, n_experiments FROM research_findings "
+                "WHERE direction_claim_id = ANY($1) ORDER BY direction_claim_id, id DESC",
+                ids,
+            )
+            finding_by_dir = {f["direction_claim_id"]: dict(f) for f in frows}
+            erows = await conn.fetch(
+                "SELECT t.claim_id AS cid, left(e.interpretation, 160) AS interp "
+                "FROM experiment_runs e JOIN tasks t ON t.id = e.task_id "
+                "WHERE t.claim_id = ANY($1) AND e.interpretation IS NOT NULL "
+                "ORDER BY e.id DESC LIMIT 16",
+                ids,
+            )
+            for e in erows:
+                interps_by_dir.setdefault(e["cid"], []).append(e["interp"])
     lines = []
     for r in rows:
         pr = r["priority"] or "unscored"
@@ -95,6 +119,14 @@ async def _standing_agenda(pool) -> tuple[str | None, list[int], str]:
         )
         for g in goals_by_dir.get(r["id"], []):
             lines.append(f"     goal[{g['status']}]: expect={g['expectation'][:120]} || kill={g['kill_condition'][:120]}")
+        f = finding_by_dir.get(r["id"])
+        if f:
+            lines.append(
+                f"     FINDING[{f['supported']} · conf={float(f['confidence']):.2f} · n={f['n_experiments']} runs]: "
+                f"{(f['headline'] or '')[:200]}"
+            )
+        for interp in interps_by_dir.get(r["id"], [])[:2]:
+            lines.append(f"     evidence: {interp}")
     return mission, ids, "\n".join(lines) if lines else "(no standing directions)"
 
 
@@ -148,7 +180,12 @@ async def _deliberate_reflection(
         f"# Task\nReflect and steer the standing agenda, grounding your verdicts in MIMIR'S SYNTHESIS "
         f"above (how the landscape has shifted) and the field model. Any direction that needs training "
         f"large models or data-centre-scale compute (beyond the lab's constraints above) should be "
-        f"PIVOTED to a lighter angle or RETIRED. {_REFLECT_SCHEMA_HINT}"
+        f"PIVOTED to a lighter angle or RETIRED. Weigh each direction's FINDING and evidence lines "
+        f"above — they are what the lab actually measured. A direction whose finding answered its "
+        f"question (decisive, confident) has DONE ITS JOB: retire it so its gate slot funds a new "
+        f"question. An inconclusive finding means choose deliberately: ADVANCE if more evidence can "
+        f"settle it on this hardware, RETIRE if it cannot. Never advance on vibes against the "
+        f"measured evidence. {_REFLECT_SCHEMA_HINT}"
     )
     content = await _chain_complete(
         [{"role": "system", "content": _REFLECT_SYSTEM}, {"role": "user", "content": user}],
