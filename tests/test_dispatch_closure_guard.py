@@ -189,10 +189,10 @@ async def test_ladder_declares_gap_after_scouted_retry_still_thin(monkeypatch):
     disp = Dispatcher(pool=pool)
     disp.state = AsyncMock()
     await disp._advance_research_closure(pool.conn)
-    disp.state.invalidate_claim.assert_awaited_once()
-    _args, kwargs = disp.state.invalidate_claim.call_args
-    assert _args[0] == 43
-    assert kwargs["verdict_id"] is None
+    disp.state.advance_direction.assert_awaited_once()
+    _args, kwargs = disp.state.advance_direction.call_args
+    assert _args[0] == 43 and _args[1] == "invalidated"
+    assert kwargs["transition"] == "gap" and kwargs["verdict_id"] is None
     assert "gap" in kwargs["reason"].lower()
     assert _task_inserts(pool) == []  # gap declared, not re-queued
 
@@ -207,9 +207,10 @@ async def test_ladder_retires_corpus_exhausted_direction(monkeypatch):
     disp = Dispatcher(pool=pool)
     disp.state = AsyncMock()
     await disp._advance_research_closure(pool.conn)
-    disp.state.invalidate_claim.assert_awaited_once()
-    args, kwargs = disp.state.invalidate_claim.call_args
-    assert args[0] == 43 and kwargs["verdict_id"] is None and "exhausted" in kwargs["reason"]
+    disp.state.advance_direction.assert_awaited_once()
+    args, kwargs = disp.state.advance_direction.call_args
+    assert args[0] == 43 and kwargs["transition"] == "gap" and kwargs["verdict_id"] is None
+    assert "exhausted" in kwargs["reason"]
     # short-circuited before the acquire/scout queries
     assert not any("'status' = 'fulfilled'" in sql for _, sql, _ in pool.calls)
 
@@ -223,9 +224,9 @@ async def test_ladder_gap_swallows_invalidate_failure(monkeypatch):
     pool = _ladder_pool(latest, scout_at=_NOW - timedelta(hours=1), settle=settle)
     disp = Dispatcher(pool=pool)
     disp.state = AsyncMock()
-    disp.state.invalidate_claim.side_effect = RuntimeError("claim vanished")
+    disp.state.advance_direction.side_effect = RuntimeError("claim vanished")
     await disp._advance_research_closure(pool.conn)  # must not raise
-    disp.state.invalidate_claim.assert_awaited_once()
+    disp.state.advance_direction.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -274,7 +275,7 @@ async def test_ladder_unsettled_sweep_flags_and_refires_instead_of_advancing(mon
     assert flagged and flagged[0]["payload"]["kind"] == "sweep_unsettled"
     assert len(_sweep_inserts(pool)) == 1  # fresh day-bucketed attempt
     assert _task_inserts(pool) == []
-    disp.state.invalidate_claim.assert_not_awaited()
+    disp.state.advance_direction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -291,7 +292,7 @@ async def test_ladder_blind_sweep_flags_and_refires_instead_of_gap(monkeypatch):
     flagged = _indicator(pool, "loop.unclosed")
     assert flagged and flagged[0]["payload"]["kind"] == "sweep_blind"
     assert len(_sweep_inserts(pool)) == 1
-    disp.state.invalidate_claim.assert_not_awaited()  # the gap is NOT declared on a blind sweep
+    disp.state.advance_direction.assert_not_awaited()  # the gap is NOT declared on a blind sweep
 
 
 @pytest.mark.asyncio
@@ -344,7 +345,7 @@ async def test_emit_targeted_sweep_carries_claim_and_topics():
 # ===========================================================================
 
 
-def _reopen_pool(*, gapped=None, topics=None, matches=0, update="UPDATE 1"):
+def _reopen_pool(*, gapped=None, topics=None, matches=0):
     """Scripted DB for the reopen rung. `gapped` rows come from the invalidated-direction
     scan (keyed on its distinctive c.invalidated_at column list); `matches` is the count of
     new docs whose chunks FTS-match the direction's thin topics."""
@@ -360,7 +361,6 @@ def _reopen_pool(*, gapped=None, topics=None, matches=0, update="UPDATE 1"):
         ("c.invalidated_at FROM claims", gapped),
         ("DISTINCT payload->>'query'", topics or [{"q": "deep kernel GP"}]),
         ("count(DISTINCT ch.document_id)", matches),
-        ("UPDATE claims SET status = 'proposed'", update),
     ]
     return ScriptedPool(rules)
 
@@ -381,8 +381,11 @@ async def test_reopen_fires_on_new_matching_evidence(monkeypatch):
     monkeypatch.setattr(dispatch_mod, "CLOSURE_REOPEN_MATCH_MIN", 5)
     pool = _reopen_pool(matches=7)
     disp = Dispatcher(pool=pool)
+    disp.state = AsyncMock()  # the status flip is now state.advance_direction(transition='reopen')
     await disp._reopen_gapped_directions(pool.conn)
-    assert any(c[0] == "execute" and "UPDATE claims SET status = 'proposed'" in c[1] for c in pool.calls)
+    disp.state.advance_direction.assert_awaited_once()
+    _a, _k = disp.state.advance_direction.call_args
+    assert _a[0] == 43 and _a[1] == "proposed" and _k["transition"] == "reopen"
     ev = _reopen_events(pool)
     assert len(ev) == 1 and ev[0]["claim_id"] == 43
     assert ev[0]["payload"]["new_matching_docs"] == 7
@@ -417,6 +420,7 @@ async def test_reopen_trickles_one_per_tick(monkeypatch):
     ]
     pool = _reopen_pool(gapped=gapped, matches=9)
     disp = Dispatcher(pool=pool)
+    disp.state = AsyncMock()
     await disp._reopen_gapped_directions(pool.conn)
     ev = _reopen_events(pool)
     assert len(ev) == 1 and ev[0]["claim_id"] == 43
@@ -425,12 +429,14 @@ async def test_reopen_trickles_one_per_tick(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_reopen_raced_update_skips_followups(monkeypatch):
-    """If the UPDATE matched no row (claim moved concurrently), neither the breadcrumb event
-    nor the task re-queue may fire."""
+    """If advance_direction returns None (claim moved concurrently out of 'invalidated'),
+    neither the breadcrumb event nor the task re-queue may fire."""
     _researcher_active(monkeypatch)
     monkeypatch.setattr(dispatch_mod, "CLOSURE_REOPEN_MATCH_MIN", 1)
-    pool = _reopen_pool(matches=9, update="UPDATE 0")
+    pool = _reopen_pool(matches=9)
     disp = Dispatcher(pool=pool)
+    disp.state = AsyncMock()
+    disp.state.advance_direction.return_value = None  # raced — edge no longer legal
     await disp._reopen_gapped_directions(pool.conn)
     assert _reopen_events(pool) == []
     assert _task_inserts(pool) == []

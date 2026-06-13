@@ -19,6 +19,7 @@ from agents.ariadne.grade import _toks
 from agents.ariadne.scoring import DIMENSIONS, composite, is_wellformed, priority_label
 from agents.mimir.acquire import AcquireRequest as MimirAcquireRequest
 from agents.mimir.acquire import request_acquire
+from harness.loop_predicates import ACTIVE_SQL
 from library.corpus.tools import corpus_search
 from skills.client import LessonsClient
 
@@ -81,12 +82,28 @@ async def persist_directions(state, out, *, run_id: int | None = None) -> dict:
     don't pile up across the continuous loop — old rows are invalidated, not deleted, so
     history is preserved and the move stays reversible."""
     async with state.pool.acquire() as conn, conn.transaction():
+        # Capture the directions about to be superseded so each gets a transition audit row
+        # (transition='supersede') — the bulk flip below stays as-is (a wholesale agenda
+        # re-frame, NOT a per-claim invalidation: no per-direction claim.invalidated, no
+        # findings-stale sweep), but its outcome is now queryable in direction_transitions.
+        superseded_dirs = await conn.fetch(
+            f"SELECT id, status::text AS st FROM claims WHERE claim_kind='direction' AND status IN {ACTIVE_SQL}"
+        )
         superseded = await conn.execute(
             "UPDATE claims SET status='invalidated', invalidated_at=now(), "
             "invalidation_reason='superseded by a newer deliberation' "
             "WHERE claim_kind IN ('mission','direction') "
             "AND status IN ('proposed','tested','weakly_supported','replicated')"
         )
+        for r in superseded_dirs:
+            await conn.execute(
+                "INSERT INTO direction_transitions "
+                "(claim_id, from_status, to_status, transition, reason, decided_by, created_by_run_id) "
+                "VALUES ($1, $2, 'invalidated', 'supersede', 'superseded by a newer deliberation', 'deliberate', $3)",
+                r["id"],
+                r["st"],
+                run_id,
+            )
         mission_id = await conn.fetchval(
             "INSERT INTO claims (statement, claim_kind, status, confidence, created_by_run_id) "
             "VALUES ($1, 'mission', 'proposed', 0.5, $2) RETURNING id",
@@ -178,13 +195,19 @@ async def persist_reflection(state, out, valid_ids, *, run_id: int | None = None
             if v.claim_id not in vids:
                 continue
             if v.assessment == "retire":
-                await conn.execute(
-                    "UPDATE claims SET status='invalidated', invalidated_at=now(), invalidation_reason=$2 "
-                    "WHERE id=$1 AND claim_kind='direction'",
+                # Single guarded write path: legal-edge check + audit row stamped transition='retire'
+                # (queryable apart from a gap/supersede). Runs in this reflection transaction.
+                adv = await state.advance_direction(
                     v.claim_id,
-                    v.reason[:2000],
+                    "invalidated",
+                    transition="retire",
+                    decided_by="reflect",
+                    reason=v.reason,
+                    run_id=run_id,
+                    conn=conn,
                 )
-                counts["retired"] += 1
+                if adv is not None:
+                    counts["retired"] += 1
             elif v.assessment in ("reprioritize", "pivot") and v.new_priority:
                 await conn.execute(
                     "UPDATE direction_scores SET priority=$2 WHERE claim_id=$1", v.claim_id, v.new_priority

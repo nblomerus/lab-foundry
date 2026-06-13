@@ -48,6 +48,17 @@ _LLM_HELPER = os.path.join(os.path.dirname(__file__), "sandbox_llm.py")
 DATASETS_DIR = os.environ.get("EXPERIMENT_DATASETS_DIR", "/mnt/data/labfoundry-benchmarks")
 
 
+def read_manifest() -> list[dict]:
+    """The benchmark pack's manifest (ops.build_benchmark_pack), or [] if no pack is staged.
+    Shared by the experiment designer prompt and the PI's proposal prompt so both reason over
+    the SAME real-dataset catalog (name/modality/task_type/n/fields/license per entry)."""
+    try:
+        with open(os.path.join(DATASETS_DIR, "manifest.json")) as f:
+            return json.load(f) or []
+    except (OSError, ValueError):
+        return []
+
+
 def container_name(exp_id: int) -> str:
     return f"lf-exp-{exp_id}"
 

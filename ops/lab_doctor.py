@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import sys
+from collections import Counter
 
 import asyncpg
 from dotenv import load_dotenv
@@ -133,6 +134,74 @@ async def _stalls(conn, hours: int) -> None:
         _line(sev.get(r["event_type"], _WARN), f"{r['event_type']}: {r['n']}  (last {r['last']})")
 
 
+async def _loop(conn) -> None:
+    _h("Research loop — where every direction sits on the formal stage ladder (direction_stage_v)")
+    try:
+        rows = await conn.fetch(
+            "SELECT stage, count(*) AS n FROM direction_stage_v "
+            "WHERE claim_status IN ('proposed','tested','weakly_supported','replicated','concluded') "
+            "GROUP BY stage ORDER BY n DESC"
+        )
+    except asyncpg.UndefinedTableError:
+        _line(_DOT, "direction_stage_v not present (migration 019 not applied)")
+        return
+    if not rows:
+        _line(_DOT, "no live/concluded directions")
+    else:
+        _line(_DOT, "by stage: " + ", ".join(f"{r['stage']}={r['n']}" for r in rows))
+    # Active directions parked behind a named blocker — the loop's current friction, per direction.
+    blocked = await conn.fetch(
+        "SELECT claim_id, blocker FROM direction_stage_v "
+        "WHERE blocker IS NOT NULL AND claim_status IN ('proposed','tested','weakly_supported','replicated') "
+        "ORDER BY claim_id DESC LIMIT 10"
+    )
+    if blocked:
+        tally = Counter(b["blocker"] for b in blocked)
+        for blk, n in tally.most_common():
+            _line(_WARN, f"{n} direction(s) blocked: {blk}")
+    # Recent lifecycle transitions (the audit trail advance_direction now writes).
+    trans = await conn.fetch(
+        "SELECT transition, count(*) AS n FROM direction_transitions "
+        "WHERE created_at > now() - interval '24 hours' GROUP BY transition ORDER BY n DESC"
+    )
+    if trans:
+        _line(_DOT, "transitions (24h): " + ", ".join(f"{t['transition']}={t['n']}" for t in trans))
+
+
+async def _realism(conn, hours: int) -> None:
+    _h("Data realism — are experiments grounded in REAL data, or synthesizing it? (the real-research metric)")
+    try:
+        rows = await conn.fetch(
+            "SELECT COALESCE(data_realism, 'unclassified') AS r, count(*) AS n FROM experiment_runs "
+            "WHERE status = 'completed' AND completed_at > now() - ($1||' hours')::interval "
+            "GROUP BY 1 ORDER BY 2 DESC",
+            str(hours),
+        )
+    except asyncpg.UndefinedColumnError:
+        _line(_DOT, "data_realism not present (migration 020 not applied)")
+        return
+    total = sum(r["n"] for r in rows)
+    if not total:
+        _line(_DOT, "no completed experiments in window")
+        return
+    by = {r["r"]: r["n"] for r in rows}
+    real_pct = round(100 * by.get("real", 0) / total)
+    synth_pct = round(100 * (by.get("synthetic", 0) + by.get("unclassified", 0)) / total)
+    mark = _OK if real_pct >= 50 else (_WARN if real_pct > 0 else _BAD)
+    _line(
+        mark,
+        f"{real_pct}% real · {by.get('builtin', 0)} builtin · {synth_pct}% synthetic  (of {total} completed, {hours}h)",
+    )
+    mism = await conn.fetchval(
+        "SELECT count(*) FROM experiment_runs WHERE realism_mismatch AND completed_at > now() - ($1||' hours')::interval",
+        str(hours),
+    )
+    if mism:
+        _line(
+            _WARN, f"{mism} realism MISMATCH (plan named real data, run used synthetic) — designer not following the plan"
+        )
+
+
 async def _closure(conn, hours: int) -> None:
     _h("Closure — work produced but the loop never closed (guard auto-closes the research ladder)")
     rows = await conn.fetch(
@@ -229,9 +298,27 @@ async def run(hours: int) -> int:
     print("=" * 78 + f"\nLAB DOCTOR  (read-only; window={hours}h)\n" + "=" * 78)
     conn = await asyncpg.connect(dsn)
     try:
-        for check in (_pulse, _activity, _errors, _stuck, _stalls, _closure, _gates, _cost, _mimir, _modes, _agents):
+        for check in (
+            _pulse,
+            _activity,
+            _errors,
+            _stuck,
+            _stalls,
+            _loop,
+            _realism,
+            _closure,
+            _gates,
+            _cost,
+            _mimir,
+            _modes,
+            _agents,
+        ):
             try:
-                await (check(conn, hours) if check in (_activity, _stalls, _closure, _gates, _mimir) else check(conn))
+                await (
+                    check(conn, hours)
+                    if check in (_activity, _stalls, _realism, _closure, _gates, _mimir)
+                    else check(conn)
+                )
             except Exception as e:  # noqa: BLE001 — one check failing must not sink the report
                 _line(_BAD, f"{check.__name__} check errored: {str(e)[:120]}")
     finally:

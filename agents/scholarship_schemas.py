@@ -5,7 +5,7 @@ scholarship.py); Synthesis, the lab's writer of record, composes the article
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class LiteratureReview(BaseModel):
@@ -26,10 +26,21 @@ class LiteratureReview(BaseModel):
 
 
 class Hypothesis(BaseModel):
-    hid: str = Field(..., description="Short id, e.g. 'H1'.")
+    # The model sometimes renames these keys (id↔hid, decision↔threshold) or drops one; accept the
+    # common variants so a cosmetic key difference doesn't fail the whole proposal. populate_by_name
+    # keeps the canonical names usable too, and model_dump emits them — so stored meta stays 'hid'/
+    # 'threshold' regardless of what the model called them. A genuinely-missing field still fails
+    # validation and is recovered by the caller's corrective retry (agents.llm.complete_validated).
+    model_config = ConfigDict(populate_by_name=True)
+
+    hid: str = Field(..., validation_alias=AliasChoices("hid", "id"), description="Short id, e.g. 'H1'.")
     statement: str = Field(..., description="Falsifiable claim with a measurable threshold.")
     metric: str = Field(..., description="The metric that decides it (e.g. 'GSM8K exact-match accuracy').")
-    threshold: str = Field(..., description="The decision rule (e.g. '≥5 pp over greedy at n=5 samples').")
+    threshold: str = Field(
+        ...,
+        validation_alias=AliasChoices("threshold", "decision", "decision_rule"),
+        description="The decision rule (e.g. '≥5 pp over greedy at n=5 samples').",
+    )
     dataset_plan: str = Field(default="", description="Data: /data benchmark slice, builtin, or synthesized.")
 
 
@@ -43,6 +54,15 @@ class ResearchProposal(BaseModel):
         ..., min_length=300, description="How the experiment series will test the hypotheses on the lab's hardware."
     )
     success_criteria: str = Field(..., description="What outcome concludes the direction (and what kills it).")
+    body_md: str = Field(
+        ...,
+        min_length=800,
+        description=(
+            "The full proposal as markdown, FILLING OUT the lab's Research Proposal template — keep every "
+            "section heading; its Hypotheses section MUST match the structured `hypotheses` above (same hid, "
+            "metric, threshold). This is the human-readable document of record."
+        ),
+    )
 
 
 class Article(BaseModel):

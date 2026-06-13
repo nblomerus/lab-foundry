@@ -66,19 +66,23 @@ LAB_CONSTRAINTS = os.environ.get("ARIADNE_LAB_CONSTRAINTS") or (
     "This is a SMALL autonomous lab, NOT a data centre. Compute envelope:\n"
     "- LLM inference (DeepSeek cloud + local Ollama) serves the lab's AGENTS — reading, reasoning, "
     "writing. The experiment sandbox reaches models ONLY as stated below.\n"
-    "- EXPERIMENTS run in an OFFLINE sandbox: no network, no external datasets. Available stack: "
+    "- EXPERIMENTS run in an OFFLINE sandbox: no network. Available stack: "
     "numpy / scipy / pandas / scikit-learn / xgboost / statsmodels / torch "
-    "(CPU + a single modest GPU); classical models are built and trained FROM SCRATCH inside the run; "
-    "data is synthesized, comes from the stack's built-in toy datasets, or from the lab's small "
-    "OFFLINE benchmark pack mounted read-only at /data (GSM8K math, TruthfulQA, BoolQ, HumanEval) — "
-    "benchmark-grounded claims on THOSE sets are testable.\n"
+    "(CPU + a single modest GPU); classical models are built and trained FROM SCRATCH inside the run.\n"
+    "- DATA — REAL FIRST. The sandbox mounts a read-only OFFLINE pack of REAL, license-clean datasets "
+    "at /data: REAL TABULAR sets for classical ML (adult income, wine-quality, california-housing, "
+    "forest-covertype) AND text/LLM benchmarks (GSM8K, TruthfulQA, BoolQ, HumanEval, MMLU, ARC, "
+    "HellaSwag). PREFER grounding a direction's decisive test in one of these real datasets — name it "
+    "in each hypothesis's dataset_plan. Synthetic / built-in toy data is a JUSTIFIED FALLBACK for "
+    "controlled known-ground-truth or optimisation-dynamics studies, NOT the default. A direction "
+    "testable on a REAL dataset is far stronger than one that can only be probed synthetically.\n"
     f"{_SANDBOX_MODEL_CLAUSE}"
     "- Embeddings + hybrid retrieval over a certified corpus (for LITERATURE grounding, not experiments).\n"
-    "FAVOUR directions a sandbox experiment can SETTLE TODAY — a falsifiable claim with a measurable "
-    "threshold, decided by code that outputs a metric: classical ML (GPs, kernels, SVMs, XGBoost, "
-    "calibration, uncertainty), small FROM-SCRATCH torch models (optimization dynamics, architecture "
-    "ablations, generalization, loss-landscape questions on synthetic or built-in datasets), and "
-    "algorithmic / statistical claims (sampling, estimators, bandits, retrieval-scoring math).\n"
+    "FAVOUR directions a sandbox experiment can SETTLE TODAY on a REAL /data dataset — a falsifiable "
+    "claim with a measurable threshold, decided by code that outputs a metric: classical ML (GPs, "
+    "kernels, SVMs, XGBoost, calibration, uncertainty) on the real tabular sets, small FROM-SCRATCH "
+    "torch models (optimization dynamics, architecture ablations, generalization), and algorithmic / "
+    "statistical claims (sampling, estimators, bandits, retrieval-scoring math).\n"
     "DO NOT frame META directions about the lab's OWN machinery — hypothesis-generation, "
     "retrieval-augmented-LLM 'methodology', 'evidence packs', or literature surveys. The lab STUDIES "
     "ml/ai methods; it does NOT study how it does research. 'Analyse the literature on X' is NOT a "
@@ -392,6 +396,20 @@ async def run_shadow(
                 )
             )
     except Exception:  # noqa: BLE001 — findings context is best-effort
+        pass
+
+    # Directions the INDEPENDENT adjudicator recently HELD (prior-art overlap / re-tread) — so the
+    # re-frame steers AWAY from near-duplicates instead of re-proposing them. Without this edge the
+    # lab churns deliberate→hold→agenda-exhausted→deliberate, blind to why (observed live: all live
+    # directions held, the arc never starts). Best-effort; the adjudicator side already filters too.
+    try:
+        held = await state.get_held_directions_with_rationale(limit=8)
+        if held:
+            agenda += (
+                "\n\n## Directions the adjudicator just HELD (do NOT re-propose near-duplicates of these)\n"
+                + "\n".join(f"- [held — {(h.get('rationale') or '')[:160]}] {h['statement']}" for h in held)
+            )
+    except Exception:  # noqa: BLE001 — held-context is best-effort
         pass
 
     prior_art, _gaps = await recall_prior_art(  # gaps are embedded in prior_art

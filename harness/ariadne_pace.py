@@ -26,7 +26,9 @@ import logging
 import os
 import time
 
+from harness import loop_engine
 from harness.agent_modes import get_agent_mode
+from harness.loop_predicates import ACTIVE_SQL as _ACTIVE
 from library.graph.field_model import build_field_model
 from library.graph.tools import _get_driver
 
@@ -68,7 +70,7 @@ EXPERIMENT_COVERAGE_TARGET = int(os.environ.get("EXPERIMENT_COVERAGE_TARGET", "3
 EVIDENCE_RESYNTH_STEP = int(os.environ.get("SYNTHESIS_RESYNTH_STEP", os.environ.get("SYNTHESIS_MIN_EXPERIMENTS", "3")))
 EVIDENCE_CAP = int(os.environ.get("ARIADNE_EVIDENCE_CAP", "9"))
 
-_ACTIVE = "('proposed','tested','weakly_supported','replicated')"
+# _ACTIVE is imported from harness.loop_predicates (ACTIVE_SQL) — the canonical active-status set.
 
 
 async def _auto_approve(pool) -> int:
@@ -352,6 +354,57 @@ async def _flag_agenda_exhausted(pool, mission_id: int, corpus: int, retry_in_s:
         )
 
 
+async def _flag_deliberate_churn(pool, now, *, active: int) -> None:
+    """loop.unclosed [deliberate_churn] — the deliberate↔adjudicate loop is spinning: every
+    live direction is HELD and agenda_exhausted has fired repeatedly this hour, so re-framing
+    keeps producing agendas the independent adjudicator parks wholesale. The deliberation-side
+    fix (run_shadow now shows held rationales) should drain this; the indicator says whether it
+    has. Hourly dedup, sentinel target 0 (NULLs never conflict)."""
+    async with pool.acquire() as conn:
+        recent = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE event_type = 'loop.unclosed' "
+            "AND payload->>'kind' = 'agenda_exhausted' AND emitted_at > now() - interval '1 hour'"
+        )
+        if (recent or 0) < 2:
+            return
+        await conn.execute(
+            "INSERT INTO events (event_type, target_type, target_id, payload, dedup_key) "
+            "VALUES ('loop.unclosed', 'system', 0, $1::jsonb, $2) "
+            "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+            json.dumps({"kind": "deliberate_churn", "active_held": active, "exhaustions_this_hour": recent}),
+            f"deliberate-churn-{now:%Y-%m-%dT%H}",
+        )
+
+
+async def _readjudicate_held(pool, now) -> bool:
+    """One fresh adjudication sweep per day over HELD directions while the agenda is starving.
+    A hold is a verdict about context (nearest prior art + the lab's own outcomes), and that
+    context rots — observed 2026-06-12: a fresh agenda held wholesale as "redundant" with
+    prior work the lab had itself INVALIDATED. A pass on re-look is strictly cheaper than a
+    new deliberation (which tends to re-propose the same questions anyway). Returns True while
+    reconsideration is queued or in flight (the caller must hold off exhaustion), False once
+    today's look already happened — then exhaustion may proceed."""
+    day_key = f"pace-readjudicate-{now:%Y-%m-%d}"
+    async with pool.acquire() as conn:
+        if await conn.fetchval(
+            "SELECT count(*) FROM events WHERE event_type='direction.adjudicate' AND status='pending'"
+        ):
+            return True  # a sweep is already queued — let it land before judging exhaustion
+        if await conn.fetchval(
+            "SELECT count(*) FROM events WHERE event_type='direction.adjudicate' AND dedup_key=$1", day_key
+        ):
+            return False  # already reconsidered today and the agenda is still parked
+        await conn.execute(
+            "INSERT INTO events (event_type, target_type, target_id, payload, status, dedup_key) "
+            "VALUES ('direction.adjudicate', 'system', 0, $1::jsonb, 'pending', $2) "
+            "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+            json.dumps({"trigger": "pace", "reconsider_held": True}),
+            day_key,
+        )
+    log.warning("ariadne pace: agenda all-held — queued daily re-adjudication of held directions")
+    return True
+
+
 async def _emit(pool, event_type: str, corpus: int) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
@@ -437,12 +490,23 @@ async def _decide(pool) -> tuple[str | None, int]:
             if active_directions == 0
             else f"{active_directions} live, none actionable (all held/unapproved)"
         )
+        # All-HELD (directions exist, the adjudicator parked them): before re-framing the whole
+        # agenda, give the held directions one fresh adjudication per day — a hold whose context
+        # has rotted (e.g. its "prior work" was invalidated) becomes a pass without churning a
+        # near-identical new agenda. Exhaustion proceeds only once today's re-look is spent.
+        if active_directions > 0 and await _readjudicate_held(pool, now):
+            log.warning("ariadne pace: agenda all-held (%s) — re-adjudication in flight before re-framing", why)
+            return None, corpus
         # A barren last deliberate (nothing persisted after it fired) retries sooner — the
         # flake already cost the lab idle time; don't bill it the full re-frame cooldown.
         barren = last_delib is not None and (last_agenda_at is None or last_agenda_at < last_delib["emitted_at"])
         cooldown = DELIB_BARREN_RETRY_S if barren else DELIB_COOLDOWN_S
         retry_in = max(0.0, cooldown - age(last_delib))
         await _flag_agenda_exhausted(pool, mission, corpus, retry_in, now, active=active_directions)
+        # All-held AND exhaustion keeps recurring → the deliberate↔adjudicate loop is churning;
+        # surface it distinctly so the deliberation-side fix (held rationales) can be judged.
+        if active_directions > 0:
+            await _flag_deliberate_churn(pool, now, active=active_directions)
         if age(last_delib) >= cooldown:
             barren_note = ", last was barren" if barren else ""
             log.warning("ariadne pace: agenda EXHAUSTED (%s%s) — forcing deliberate", why, barren_note)
@@ -471,6 +535,13 @@ async def ariadne_pacemaker(pool, stop: asyncio.Event) -> None:
         DELIB_GROWTH,
         REFLECT_GROWTH,
     )
+    log.info(
+        "loop engine: %s (the transition registry %s the loop)",
+        "ENABLED" if loop_engine.LOOP_ENGINE else ("SHADOW" if loop_engine.LOOP_ENGINE_SHADOW else "off"),
+        "DRIVES"
+        if loop_engine.LOOP_ENGINE
+        else ("mirrors (logs only)" if loop_engine.LOOP_ENGINE_SHADOW else "is dormant; _maybe_* drive"),
+    )
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=PACE_INTERVAL_S)
@@ -480,14 +551,23 @@ async def ariadne_pacemaker(pool, stop: asyncio.Event) -> None:
         try:
             if await get_agent_mode(pool, "ariadne") not in {"advisory", "active"}:
                 continue  # the mode dial pauses her
-            await _maybe_adjudicate(pool)  # independent novelty/impact check before the gate
+            # The transition engine (LOOP_ENGINE) replaces the hand-written _maybe_* drivers +
+            # the watchdog's spine re-armer with one declarative registry. _auto_approve stays a
+            # discrete step (it writes the gate, not a stage transition). In SHADOW the legacy
+            # drivers still run and the engine only logs what it WOULD emit (cutover validation).
             await _auto_approve(pool)  # hands-off: approve her own top directions (adjudication-gated)
-            await _maybe_plan(pool)  # trigger the Planner for approved-but-unplanned directions
-            await _maybe_scholarship(pool)  # the written arc: review → proposal → (experiments) → article
-            # Drive every approved direction to the experiment-coverage target so it can reach a
-            # finding — but only when the experiments agent can actually run them.
-            if EXPERIMENT_COVERAGE_TARGET > 0 and await get_agent_mode(pool, "experiments") in {"advisory", "active"}:
-                await _maybe_drive_experiments(pool)
+            if loop_engine.LOOP_ENGINE:
+                await loop_engine.drive_all(pool)
+            else:
+                await _maybe_adjudicate(pool)  # independent novelty/impact check before the gate
+                await _maybe_plan(pool)  # trigger the Planner for approved-but-unplanned directions
+                await _maybe_scholarship(pool)  # the written arc: review → proposal → (experiments) → article
+                # Drive each approved direction to the experiment-coverage target — only when the
+                # experiments agent can actually run them.
+                if EXPERIMENT_COVERAGE_TARGET > 0 and await get_agent_mode(pool, "experiments") in {"advisory", "active"}:
+                    await _maybe_drive_experiments(pool)
+                if loop_engine.LOOP_ENGINE_SHADOW:
+                    await loop_engine.drive_all(pool, shadow=True)  # logs the engine's firing set vs the incumbent
             event_type, corpus = await _decide(pool)
             if event_type:
                 await _refresh_field_model(pool)  # she reads the CURRENT landscape

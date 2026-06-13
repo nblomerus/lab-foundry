@@ -15,8 +15,10 @@ import dataclasses
 import logging
 import os
 import re
+from typing import TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from harness.dispatch import _current_session
 from harness.router import CloudProvider, Provider
@@ -186,3 +188,58 @@ def _strip_fences(content: str) -> str:
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
     return content
+
+
+_M = TypeVar("_M", bound=BaseModel)
+
+
+async def complete_validated(
+    messages: list[dict],
+    model_cls: type[_M],
+    *,
+    invocation_type: str,
+    step_name: str,
+    primary_model: str | None = None,
+    temperature: float = 0.3,
+    retries: int = 1,
+) -> _M:
+    """Complete a chat and parse its JSON into `model_cls`. On a pydantic ValidationError, do up to
+    `retries` CORRECTIVE re-prompts that feed the exact errors + the offending output back, so a
+    schema-violating first attempt (a renamed key, a dropped required field) self-corrects in the
+    same handler run — instead of failing the step and (for the day-bucketed arc) parking it until
+    tomorrow. Mirrors Ariadne's deliberation-grading retry. Raises the last ValidationError if it
+    never validates, so the caller can decide whether to skip gracefully."""
+    last_exc: ValidationError | None = None
+    msgs = list(messages)
+    for attempt in range(retries + 1):
+        content = await _chain_complete(
+            msgs,
+            temperature=temperature,
+            invocation_type=invocation_type,
+            step_name=step_name if attempt == 0 else f"{step_name}.fix",
+            primary_model=primary_model,
+        )
+        try:
+            return model_cls.model_validate_json(_strip_fences(content))
+        except ValidationError as e:
+            last_exc = e
+            errs = "; ".join(
+                f"{'.'.join(str(p) for p in err.get('loc', ()))}: {err.get('msg', '')}" for err in e.errors()[:8]
+            )
+            log.warning(
+                "%s: output failed %s validation (attempt %d): %s", step_name, model_cls.__name__, attempt + 1, errs
+            )
+            msgs = [
+                *messages,
+                {"role": "assistant", "content": content[:6000]},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Your JSON failed schema validation:\n{errs}\n\n"
+                        "Re-emit the COMPLETE corrected JSON only. Use the EXACT field names from the schema "
+                        "(e.g. 'hid' not 'id', 'threshold' for the decision rule), and include EVERY required "
+                        "field for each item. Output ONLY the JSON object."
+                    ),
+                },
+            ]
+    raise last_exc if last_exc else RuntimeError(f"{step_name}: no output to validate")

@@ -29,6 +29,25 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
+const REALISM_TONE: Record<string, string> = {
+  real: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  builtin: "border-amber-200 bg-amber-50 text-amber-700",
+  synthetic: "border-rose-200 bg-rose-50 text-rose-600",
+};
+
+// Whether the run's data was REAL, a sklearn builtin, or synthesized — the real-research signal.
+function RealismPill({ realism, mismatch }: { realism?: string | null; mismatch?: boolean | null }) {
+  if (!realism) return null;
+  return (
+    <span
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${REALISM_TONE[realism] ?? "border-slate-200 bg-slate-50 text-slate-500"}`}
+      title={mismatch ? "plan named a real dataset but the run used synthetic — mismatch" : `data: ${realism}`}
+    >
+      {realism}{mismatch ? " ⚠" : ""}
+    </span>
+  );
+}
+
 function ago(iso: string | null | undefined): string {
   if (!iso) return "—";
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -134,6 +153,7 @@ export default function ExperimentsPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-[12px] font-semibold tabular-nums text-slate-700">#{r.id}</span>
                   <StatusPill status={r.status} />
+                  <RealismPill realism={r.data_realism} mismatch={r.realism_mismatch} />
                   {r.requires_gpu && <span className="rounded border border-violet-200 bg-violet-50 px-1 text-[9px] font-semibold text-violet-600">GPU</span>}
                   <span className="ml-auto text-[10px] text-slate-400">{ago(r.at)}</span>
                 </div>
@@ -157,6 +177,7 @@ export default function ExperimentsPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[15px] font-semibold text-slate-800">Experiment #{detail.id}</span>
                 <StatusPill status={detail.status} />
+                <RealismPill realism={detail.data_realism} mismatch={detail.realism_mismatch} />
                 {(detail.status === "running" || detail.status === "queued") && (
                   <button onClick={() => kill(detail.id)} className="rounded-md border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600 hover:bg-rose-100">
                     kill

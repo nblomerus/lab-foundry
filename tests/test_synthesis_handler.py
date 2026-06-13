@@ -234,3 +234,32 @@ async def test_graduate_to_mapping():
     assert _graduate_to("refuted", 0.5) == "tested"
     # Inconclusive NEVER concludes, regardless of confidence.
     assert _graduate_to("inconclusive", 0.9) == "tested"
+
+
+# ── data-realism: discount synthetic-only findings + the env-gated hard conclude gate ──
+async def test_worst_realism_and_has_real():
+    exps = [{"data_realism": "real"}, {"data_realism": "synthetic"}, {"data_realism": None}]
+    assert SH._worst_realism(exps) == "synthetic"  # weakest wins; None → synthetic
+    assert SH._has_real(exps) is True
+    assert SH._worst_realism([{"data_realism": "builtin"}]) == "builtin"
+    assert SH._has_real([{"data_realism": "builtin"}]) is False
+
+
+async def test_graduate_to_real_data_gate(monkeypatch):
+    # default (gate OFF): a decisive synthetic-only finding still concludes
+    monkeypatch.setattr(SH, "SYNTHESIS_REQUIRE_REAL", False)
+    assert SH._graduate_to("supported", 0.7, has_real=False) == "concluded"
+    # gate ON: synthetic-only cannot conclude → parks; real evidence still concludes
+    monkeypatch.setattr(SH, "SYNTHESIS_REQUIRE_REAL", True)
+    assert SH._graduate_to("supported", 0.7, has_real=False) == "weakly_supported"
+    assert SH._graduate_to("supported", 0.7, has_real=True) == "concluded"
+
+
+async def test_compose_prompt_discounts_synthetic_only():
+    ctx = {"direction_statement": "d", "experiments": [{"data_realism": "synthetic", "params": {}, "result": {}}]}
+    layer = await SH._build_compose(ctx, state=None, memory=None)
+    assert "DATA REALISM" in layer.content and "SYNTHETIC" in layer.content
+    # a run with real evidence gets no synthetic-only warning
+    ctx2 = {"direction_statement": "d", "experiments": [{"data_realism": "real", "params": {}, "result": {}}]}
+    layer2 = await SH._build_compose(ctx2, state=None, memory=None)
+    assert "every experiment above used SYNTHETIC" not in layer2.content

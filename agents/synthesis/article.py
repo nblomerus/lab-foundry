@@ -16,8 +16,10 @@ import json
 import logging
 import os
 
-from agents.ariadne.scholarship import _grade_citations, ingest_to_library, persist_document
-from agents.llm import _chain_complete, _strip_fences
+from pydantic import ValidationError
+
+from agents.ariadne.scholarship import _grade_citations, _template, ingest_to_library, persist_document
+from agents.llm import complete_validated
 from agents.scholarship_schemas import Article
 from harness.agent_modes import get_agent_mode
 
@@ -25,6 +27,7 @@ log = logging.getLogger(__name__)
 
 SYNTH_MODEL = os.environ.get("SYNTHESIS_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
 CITATION_RESOLVE_MIN = 0.8
+_ARTICLE_TEMPLATE = _template("article")  # the lab's house IMRaD template (agents/ariadne/templates/article.md)
 
 _SYSTEM = (
     "You are the synthesis writer of an autonomous AI research lab, composing the lab's "
@@ -102,20 +105,25 @@ async def handle_synthesis_article(event: dict, dispatcher) -> dict | None:
         f"{(dossier.get('lit_review_md') or '(none)')[:4000]}\n\n"
         f"# The finding(s) the lab established\n{dossier['findings_md']}\n\n"
         f"# The experiments actually run (REAL numbers — report THESE)\n{dossier.get('experiments_md') or '(none)'}\n\n"
-        "# Task\nWrite the ARTICLE. Decisive evidence → a full paper; mixed/inconclusive → an honest "
-        "RESEARCH NOTE saying exactly what was and wasn't settled. Sections: ## Introduction, "
-        "## Related work, ## Method, ## Results (real numbers, per hypothesis H1..), ## Discussion, "
-        "## Limitations, ## Reproducibility (seeds, code hashes, image digests from provenance). "
-        "`citations` = exact corpus titles used. Output JSON for: title, abstract, body_md, citations."
+        "# Task\nWrite the ARTICLE by FILLING OUT the lab's template below. `body_md` MUST follow the "
+        "template's section structure (keep every `##` heading); replace each [bracketed] placeholder "
+        "with real content. Decisive evidence → a full paper; mixed/inconclusive → an honest research "
+        "note that says exactly what was and wasn't settled. Report only REAL measured numbers (per "
+        "hypothesis H1..); `citations` = the exact corpus titles used. Output JSON for: title, abstract, "
+        "body_md (the filled template), citations.\n\n"
+        f"# TEMPLATE — fill this out\n{_ARTICLE_TEMPLATE}"
     )
-    content = await _chain_complete(
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-        temperature=0.3,
-        invocation_type="synthesis.article",
-        step_name="synthesis.article",
-        primary_model=SYNTH_MODEL,
-    )
-    article = Article.model_validate_json(_strip_fences(content))
+    try:
+        article = await complete_validated(
+            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+            Article,
+            invocation_type="synthesis.article",
+            step_name="synthesis.article",
+            primary_model=SYNTH_MODEL,
+        )
+    except ValidationError as e:
+        log.warning("synthesis article: #%s failed schema validation after retry: %s", claim_id, e)
+        return {"claim_id": claim_id, "persisted": False, "reason": "schema_invalid"}
 
     frac, unresolved = await _grade_citations(article.citations) if article.citations else (1.0, [])
     if article.citations and frac < CITATION_RESOLVE_MIN:

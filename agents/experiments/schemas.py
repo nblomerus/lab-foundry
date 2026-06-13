@@ -35,7 +35,17 @@ class ExperimentDesign(BaseModel):
     est_wall_clock_s: int = Field(default=600, ge=1, le=1800, description="Estimated wall-clock budget (cap 1800s).")
     est_mem_mb: int = Field(default=2048, ge=128, description="Estimated memory budget in MB.")
     seed: int = Field(default=0, description="RNG seed for reproducibility (set every library's seed in the code).")
-    dataset_plan: str = Field(default="", description="How the script obtains its data (synthesize / toy dataset).")
+    dataset_plan: str = Field(
+        default="",
+        description="How the script obtains its data — PREFER a real /data dataset (name file + slice + seed); "
+        "synthesize/toy only as a justified fallback.",
+    )
+    synthesis_justification: str = Field(
+        default="",
+        description="REQUIRED when the data is synthesized or a sklearn-builtin toy set rather than a real /data "
+        "dataset: WHY no listed real dataset fits the claim's regime (e.g. a controlled known-ground-truth or "
+        "optimisation-dynamics study). Leave empty when a real /data dataset was used.",
+    )
     infeasible: bool = Field(
         default=False,
         description=(

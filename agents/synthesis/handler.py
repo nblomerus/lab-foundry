@@ -29,6 +29,25 @@ SYNTHESIS_RESYNTH_STEP = int(os.environ.get("SYNTHESIS_RESYNTH_STEP", str(SYNTHE
 # A finding this confident AND decisive (supported / refuted / mixed — NOT inconclusive) CONCLUDES
 # its direction: a permanent result that frees the gate. Below this, the direction stays open.
 SYNTHESIS_CONCLUDE_CONFIDENCE = float(os.environ.get("SYNTHESIS_CONCLUDE_CONFIDENCE", "0.6"))
+# Hard real-data conclude gate (default OFF — the soft path + the A5 escalation do the steering):
+# when on, a direction cannot CONCLUDE unless ≥1 grounding experiment used REAL data.
+SYNTHESIS_REQUIRE_REAL = os.environ.get("SYNTHESIS_REQUIRE_REAL", "").lower() in {"on", "1", "true"}
+
+_REALISM_RANK = {"real": 2, "builtin": 1, "synthetic": 0}
+
+
+def _worst_realism(experiments: list[dict]) -> str:
+    """The weakest data realism across a direction's grounding experiments — the finding can be no
+    more real-world than its least-real evidence. NULL (pre-020 / unclassified) counts as synthetic."""
+    return min(
+        (e.get("data_realism") or "synthetic" for e in experiments),
+        key=lambda r: _REALISM_RANK.get(r, 0),
+        default="synthetic",
+    )
+
+
+def _has_real(experiments: list[dict]) -> bool:
+    return any((e.get("data_realism") or "synthetic") == "real" for e in experiments)
 
 
 # -------------------------------------------------------------------------
@@ -44,8 +63,9 @@ def _format_experiments(experiments: list[dict]) -> str:
         params = e.get("params") or {}
         result = e.get("result") or {}
         note = e.get("researcher_notes") or e.get("interpretation") or ""
+        realism = e.get("data_realism") or "synthetic"
         blocks.append(
-            f"### Experiment {e.get('experiment_id') or e.get('id')}\n"
+            f"### Experiment {e.get('experiment_id') or e.get('id')}  [data: {realism.upper()}]\n"
             f"**Hypothesis:** {params.get('hypothesis') or '(none recorded)'}\n"
             f"**Result:** {json.dumps(result)[:1400]}\n"
             f"**Read:** {note[:700]}\n"
@@ -57,6 +77,15 @@ async def _build_compose(ctx: dict, state, memory) -> PromptLayer:
     direction = ctx.get("direction_statement") or "(no direction statement)"
     goals = ctx.get("goals") or ""
     experiments = ctx.get("experiments") or []
+    realism_clause = ""
+    if not _has_real(experiments):
+        realism_clause = (
+            "\n## ⚠ DATA REALISM: every experiment above used SYNTHETIC or BUILTIN-toy data — NONE used a "
+            "real dataset.\nSynthetic evidence CANNOT settle a real-world claim. Unless this direction's claim "
+            "is explicitly about controlled / known-ground-truth behaviour, `supported` MUST be `inconclusive` "
+            "and `confidence` LOW — and `next_step` should call for confirmation on a real /data dataset. Say "
+            "plainly in `limitations` that the result rests on synthetic data only.\n"
+        )
 
     content = f"""## Direction
 {direction}
@@ -66,7 +95,7 @@ async def _build_compose(ctx: dict, state, memory) -> PromptLayer:
 
 ## Completed experiments on this direction (the evidence)
 {_format_experiments(experiments)}
-
+{realism_clause}
 ---
 
 You are writing the lab's TERMINAL result for this direction — the paper-shaped finding the
@@ -123,13 +152,19 @@ if "synthesis.compose" not in RECIPES:
 ROUTE.setdefault("synthesis.compose", Tier.WORKHORSE)
 
 
-def _graduate_to(supported: str, confidence: float) -> str:
+def _graduate_to(supported: str, confidence: float, has_real: bool = True) -> str:
     """Map a finding to the direction's new lifecycle status. A confident, DECISIVE finding
     (supported / refuted / mixed — a real result either way) CONCLUDES the direction: terminal,
     a permanent result that leaves the active set and frees the gate. A weaker or inconclusive
     finding keeps it open (more experiments might settle it). Internal experiments never earn
-    'replicated' (that implies independent replication) — the ceiling is honest."""
-    if supported != "inconclusive" and confidence >= SYNTHESIS_CONCLUDE_CONFIDENCE:
+    'replicated' (that implies independent replication) — the ceiling is honest.
+
+    Hard real-data gate (SYNTHESIS_REQUIRE_REAL, default OFF): a direction grounded ONLY in
+    synthetic/builtin evidence cannot CONCLUDE — it parks as weakly_supported/tested until a
+    real-data confirmation lands (the A5 escalation requests one). Default off: the soft prompt
+    discount + the escalation steer toward real data without hard-blocking the loop."""
+    decisive = supported != "inconclusive" and confidence >= SYNTHESIS_CONCLUDE_CONFIDENCE
+    if decisive and (has_real or not SYNTHESIS_REQUIRE_REAL):
         return "concluded"
     if supported == "supported":
         return "weakly_supported"
@@ -187,7 +222,8 @@ async def handle_finding_synthesize(event: dict, dispatcher) -> dict | None:
     valid_ids = {int(e.get("experiment_id") or e.get("id")) for e in experiments}
     used = [i for i in (finding.grounded_in_experiments or []) if i in valid_ids] or sorted(valid_ids)
 
-    graduate_to = _graduate_to(finding.supported, finding.confidence)
+    realism = _worst_realism(experiments)  # the finding is no more real-world than its weakest evidence
+    graduate_to = _graduate_to(finding.supported, finding.confidence, has_real=_has_real(experiments))
     persisted = await state.persist_research_finding(
         direction_claim_id=claim_id,
         headline=finding.headline,
@@ -203,6 +239,7 @@ async def handle_finding_synthesize(event: dict, dispatcher) -> dict | None:
         grounded_in=[f"exp:{i}" for i in used],
         graduate_to=graduate_to,
         run_id=run_id,
+        data_realism=realism,
     )
 
     # Ingest the finding into the Library so it becomes first-class, queryable knowledge that

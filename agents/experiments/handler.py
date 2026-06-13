@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 
 from agents.experiments import sandbox
 from agents.experiments.schemas import ExperimentDesign, ExperimentReport
@@ -89,25 +90,25 @@ answers are fine); model OUTPUTS must come from llm.* calls, never be fabricated
 
 def _datasets_block() -> str:
     """The design prompt's /data section, rendered from the benchmark pack's manifest
-    (ops.build_benchmark_pack) at call time — absent pack, absent section."""
-    manifest_path = os.path.join(sandbox.DATASETS_DIR, "manifest.json")
-    try:
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-    except OSError:
-        return ""
+    (ops.build_benchmark_pack) at call time — absent pack, absent section. Tags each dataset
+    with modality/task_type so the designer can match a REAL dataset to the hypothesis."""
+    manifest = sandbox.read_manifest()
     if not manifest:
         return ""
     lines = "\n".join(
-        f"- /data/{d['file']} — {d['n']} rows; {d['task']}; fields: {d['fields']} ({d['license']})" for d in manifest
+        f"- /data/{d['file']} — [{d.get('modality', '?')}/{d.get('task_type', '?')}] {d['n']} rows; "
+        f"{d['task']}; fields: {d['fields']} ({d['license']})"
+        for d in manifest
     )
     return f"""
-## Benchmark datasets mounted READ-ONLY at /data (offline, license-clean)
+## REAL datasets mounted READ-ONLY at /data (offline, license-clean) — PREFER THESE
 {lines}
-Load with:  import json;  rows = [json.loads(line) for line in open("/data/gsm8k_test.jsonl")]
-When the hypothesis concerns benchmark-type behaviour, PREFER a real benchmark slice over
-in-code generated probes — sample a SEEDED subset sized to your wall-clock budget (e.g.
-50-200 rows), and report which dataset, slice size, and seed in the result's `dataset`.
+Load (tabular):  import json; rows = [json.loads(l) for l in open("/data/adult.jsonl")]  # each row: features + "label"
+Load (text):     import json; rows = [json.loads(l) for l in open("/data/gsm8k_test.jsonl")]
+PREFER a real dataset above whose [modality/task_type] matches the hypothesis (classical-ML
+claims → a tabular set; LLM-behaviour claims → a text set). If the PI's proposal named a
+dataset_plan, use it. Sample a SEEDED subset sized to your wall-clock budget and report which
+dataset, slice size, seed + sha256 in the result's `dataset`.
 """
 
 
@@ -118,12 +119,24 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
     lab_constraints = ctx.get("lab_constraints") or _LAB_CONSTRAINTS
     prior_hypotheses = ctx.get("prior_hypotheses") or []
     proposal_hypotheses = ctx.get("proposal_hypotheses") or []
+    require_real_data = ctx.get("require_real_data") or False
     llm_block, llm_import, cannot = _llm_endpoint_blocks()
+    real_required_block = (
+        "\n## ⚠ REAL-DATA CONFIRMATION REQUIRED\n"
+        "Prior runs on this direction used synthetic/toy data — this run must CONFIRM the claim on a "
+        "REAL dataset. You MUST load a real /data dataset (see the catalog below) whose modality/task "
+        "matches the claim; synthesizing or using a sklearn-builtin toy set is NOT acceptable here. If "
+        "NO listed real dataset fits the claim, set `infeasible` true with the reason naming the kind of "
+        "dataset that's missing — do NOT fall back to synthetic data.\n"
+        if require_real_data
+        else ""
+    )
     proposal_block = ""
     if proposal_hypotheses:
         hyp_lines = "\n".join(
             f"- {h.get('hid', 'H?')}: {h.get('statement', '')} "
-            f"(metric: {h.get('metric', '')}; decision: {h.get('threshold', '')})"
+            f"(metric: {h.get('metric', '')}; decision: {h.get('threshold', '')}; "
+            f"data plan: {h.get('dataset_plan') or '(unspecified)'})"
             for h in proposal_hypotheses
         )
         proposal_block = (
@@ -134,7 +147,7 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
             "experiment that decides it by ITS metric and threshold.\n\n"
         )
     data_block = _datasets_block()
-    data_hint = " or a /data benchmark slice (see above)" if data_block else ""
+    data_hint = " (pick from the /data catalog above)" if data_block else ""
     prior_block = (
         "## Experiments ALREADY run on this direction — test a DISTINCT facet, do NOT repeat these\n"
         + "\n".join(f"- {h}" for h in prior_hypotheses)
@@ -190,13 +203,16 @@ HARD RULES — reject these and derive a real claim from the direction instead:
   An honest infeasible beats fake support.
 If the stated hypothesis is meta/degenerate, DERIVE the most load-bearing testable claim about the
 direction's method and test that — name it explicitly in `hypothesis`.
-{llm_block}{data_block}
+{real_required_block}{llm_block}{data_block}
 Write `code` as a COMPLETE, self-contained Python script:
 - Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch{llm_import}.
-- NO network; file reads only from the cwd and the read-only /data mount. Synthesize your data, use
-  a sklearn/torch toy dataset (e.g. make_classification, load_digits, a small random tensor){data_hint}.
-  State your data source in `dataset_plan` (be specific: the loader/generator, its parameters, the
-  slice + seed — this is the dataset's reproducibility record).
+- DATA — real first. NO network; file reads only from the cwd and the read-only /data mount.
+  PREFER a REAL /data dataset whose [modality/task_type] matches the claim{data_hint}; if the PI's
+  proposal named a `dataset_plan`, use that dataset. Synthesize / use a sklearn-builtin toy set
+  (make_classification, load_digits, a random tensor) ONLY when no listed real dataset fits the
+  claim's regime (e.g. a controlled known-ground-truth or optimisation-dynamics study) — and then
+  you MUST say WHY in `synthesis_justification`. A real dataset that exercises the claim beats a
+  synthetic proxy every time. State the exact source in `dataset_plan` (loader/path, slice, seed).
 - Seed every RNG you touch (numpy, torch, python `random`) from `seed` so the run reproduces.
 - Keep it within the wall-clock and memory budgets you estimate. Modest is better than ambitious —
   a clean signal on a toy problem beats a run that times out.
@@ -212,18 +228,76 @@ Return JSON conforming to ExperimentDesign.
     return PromptLayer(name="task_data", content=content, priority=1)
 
 
+# ── data-realism classification (static, no LLM) ──────────────────────────────────
+# A run is REAL only if it loads a real dataset (a /data file or a real loader); BUILTIN if it
+# uses a sklearn toy loader; SYNTHETIC if it fabricates inputs (make_*/np.random/torch.randn) or
+# we can't tell (conservative default — never claim 'real' without evidence). Checked in priority
+# order so a real-data run that also seeds an RNG still classifies as real.
+_REAL_RE = re.compile(
+    r"/data/|open\(\s*['\"]/data|read_csv\(\s*['\"]/data|read_json\(\s*['\"]/data|np\.loadtxt\(\s*['\"]/data"
+    r"|fetch_california|fetch_covtype|fetch_openml|load_dataset\(",
+    re.I,
+)
+_BUILTIN_RE = re.compile(
+    r"load_digits|load_wine|load_iris|load_breast_cancer|load_diabetes|load_linnerud"
+    r"|fetch_20newsgroups|fetch_olivetti|fetch_lfw|fetch_kddcup",
+    re.I,
+)
+_SYNTH_RE = re.compile(
+    r"make_classification|make_regression|make_blobs|make_moons|make_circles|make_friedman"
+    r"|np\.random|numpy\.random|default_rng|torch\.randn|torch\.rand\b|random\.(uniform|normal|gauss|choice|randint)",
+    re.I,
+)
+
+
+def _classify_realism(code: str, dataset_source: str = "") -> str:
+    """Classify an experiment's data as 'real' | 'builtin' | 'synthetic' from its code + the
+    script's self-reported dataset source. Real (a /data file or real loader) wins, then builtin
+    (sklearn toy set), then synthetic; unknown provenance is treated as synthetic, not real."""
+    blob = f"{code or ''}\n{dataset_source or ''}"
+    if _REAL_RE.search(blob):
+        return "real"
+    if _BUILTIN_RE.search(blob):
+        return "builtin"
+    if _SYNTH_RE.search(blob):
+        return "synthetic"
+    return "synthetic"
+
+
+def _plan_wanted_real(dataset_plan: str, manifest_names: list[str]) -> bool:
+    """Did the PI/designer's stated plan intend a REAL dataset? True if it references /data or names
+    a real dataset from the catalog — used to flag a plan-vs-actual realism MISMATCH."""
+    p = (dataset_plan or "").lower()
+    if "/data/" in p:
+        return True
+    return any(n.lower() in p for n in manifest_names if n)
+
+
 async def _build_interpret(ctx: dict, state, memory) -> PromptLayer:
     kind = ctx.get("kind") or "code"
     params = ctx.get("params") or {}
     result = ctx.get("result")
     hypothesis = ctx.get("hypothesis") or ""
     claim_statement = ctx.get("claim_statement") or ""
+    realism = ctx.get("data_realism") or "synthetic"
+    realism_mismatch = ctx.get("realism_mismatch") or False
+    realism_note = {
+        "real": "This run used a REAL dataset — its numbers can bear on a real-world claim.",
+        "builtin": "This run used a sklearn BUILTIN toy dataset — suggestive, not a real-world result; calibrate down.",
+        "synthetic": "This run used SYNTHETIC data — it CANNOT settle a real-world claim. Treat as a pilot: "
+        "lean inconclusive unless the claim is explicitly about controlled/known-ground-truth behaviour.",
+    }[realism]
+    if realism_mismatch:
+        realism_note += " ⚠ The plan named a REAL dataset but the run did NOT use one — flag this in the summary."
 
     content = f"""## Direction under test
 {claim_statement or "(no direction statement)"}
 
 ## Hypothesis the experiment tested
 {hypothesis or "(none recorded)"}
+
+## Data realism of this run: {realism.upper()}
+{realism_note}
 
 ## Experiment ({kind})
 **Params:** {json.dumps(params)[:1000]}
@@ -405,6 +479,7 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
         except Exception:  # noqa: BLE001 — the proposal is best-effort context
             log.exception("experiments: failed to load proposal for claim %s", claim_id)
 
+    require_real_data = bool(payload.get("require_real_data"))  # A5 escalation: confirm a synthetic pilot on REAL data
     prompt = await dispatcher.curator.build(
         invocation_type="experiments.design",
         context={
@@ -414,6 +489,7 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
             "lab_constraints": _LAB_CONSTRAINTS,
             "prior_hypotheses": prior_hypotheses,
             "proposal_hypotheses": proposal_hypotheses,
+            "require_real_data": require_real_data,
         },
     )
     design, run_id = await dispatcher.router.invoke(
@@ -455,6 +531,17 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
             "simulation instead would not bear on the claim.",
         )
         log.info("experiments: design INFEASIBLE for claim %s (task %s): %s", claim_id, task_id, reason[:120])
+        # A5: an infeasible REAL-DATA confirmation = the lab wants a real dataset it doesn't have.
+        # Surface it as a concrete signal to curate one (feeds the dataset-pack), not a silent dead end.
+        if require_real_data and claim_id is not None:
+            day = await state.pool.fetchval("SELECT to_char(now(), 'YYYY-MM-DD')")
+            await state.emit_corpus_event(
+                "loop.unclosed",
+                target_type="system",
+                target_id=0,
+                payload={"kind": "needs_real_dataset", "claim_id": claim_id, "reason": reason[:300]},
+                dedup_key=f"needs-real-dataset-{claim_id}-{day}",
+            )
         return {"infeasible": True, "experiment_id": exp_id, "claim_id": claim_id, "reason": reason}
 
     code_hash = hashlib.sha256(design.code.encode()).hexdigest()[:16]
@@ -467,12 +554,18 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
         "seed": design.seed,
         "code_hash": code_hash,
         "dataset_plan": design.dataset_plan,
+        "synthesis_justification": design.synthesis_justification,
     }
     exp_id = await state.queue_experiment(
         task_id=task_id,
         inquiry_id=payload.get("inquiry_id"),
         kind="code",
-        params={"hypothesis": design.hypothesis, "claim_id": claim_id, "dataset_plan": design.dataset_plan},
+        params={
+            "hypothesis": design.hypothesis,
+            "claim_id": claim_id,
+            "dataset_plan": design.dataset_plan,
+            "synthesis_justification": design.synthesis_justification,
+        },
         code=design.code,
         # Floor at 120s: designs have estimated 10-60s and the session budget killed runs
         # before a single attempt finished ("session budget 10s exhausted after 0 attempt(s)").
@@ -510,6 +603,21 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
         except ValueError:
             claim_statement = ""
 
+    # Classify the run's data realism (static, no LLM) from its code + self-reported source, and
+    # flag a plan-vs-actual mismatch — fed to the interpreter (discount synthetic) and persisted so
+    # synthesis can discount synthetic-only findings and the A5 escalation can drive a real-data run.
+    result_obj = exp["result"]
+    if isinstance(result_obj, str):
+        try:
+            result_obj = json.loads(result_obj)
+        except ValueError:
+            result_obj = {}
+    ds_obj = (result_obj.get("dataset") or result_obj.get("datasets") or {}) if isinstance(result_obj, dict) else {}
+    ds_source = ds_obj.get("source", "") if isinstance(ds_obj, dict) else ""
+    plan = (exp.get("provenance") or {}).get("dataset_plan") or params.get("dataset_plan") or ""
+    realism = _classify_realism(exp.get("code") or "", ds_source)
+    realism_mismatch = realism != "real" and _plan_wanted_real(plan, [d["name"] for d in sandbox.read_manifest()])
+
     prompt = await dispatcher.curator.build(
         invocation_type="experiments.interpret",
         context={
@@ -518,6 +626,8 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
             "result": exp["result"],
             "hypothesis": hypothesis,
             "claim_statement": claim_statement,
+            "data_realism": realism,
+            "realism_mismatch": realism_mismatch,
         },
     )
     report, run_id = await dispatcher.router.invoke(
@@ -529,6 +639,9 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
     )
 
     await state.set_experiment_interpretation(experiment_id, report.summary, run_id, report.narrative_note)
+    await state.set_experiment_realism(experiment_id, realism, realism_mismatch)
+    if realism_mismatch:
+        log.warning("experiments: exp %s REALISM MISMATCH — plan wanted real data, run was %s", experiment_id, realism)
 
     # Move the direction's confidence — best-effort: an inactive claim can't be steered.
     conf_applied = None

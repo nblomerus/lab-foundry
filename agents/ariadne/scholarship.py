@@ -29,9 +29,12 @@ import json
 import logging
 import os
 
+from pydantic import ValidationError
+
 from agents.ariadne.grade import _resolves
 from agents.ariadne.loop import LAB_CONSTRAINTS
-from agents.llm import _chain_complete, _strip_fences
+from agents.experiments import sandbox
+from agents.llm import complete_validated
 from agents.mimir.ask import answer_question
 from agents.scholarship_schemas import LiteratureReview, ResearchProposal
 from harness.agent_modes import get_agent_mode
@@ -41,6 +44,24 @@ log = logging.getLogger(__name__)
 
 ARIADNE_MODEL = os.environ.get("ARIADNE_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
 CITATION_RESOLVE_MIN = 0.8  # the deliberation bar
+
+# The lab's house templates for the written arc (agents/ariadne/templates/*.md) — the PI fills
+# these section-by-section so every literature review / proposal has the same rigorous shape.
+# Editable markdown: change the template, change the document structure. Cached at import.
+_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+
+def _template(name: str) -> str:
+    try:
+        with open(os.path.join(_TEMPLATE_DIR, f"{name}.md")) as f:
+            return f.read()
+    except OSError:
+        log.warning("ariadne scholarship: template %s missing — proceeding without it", name)
+        return ""
+
+
+_LIT_REVIEW_TEMPLATE = _template("literature_review")
+_PROPOSAL_TEMPLATE = _template("research_proposal")
 
 _SYSTEM = (
     "You are Ariadne, the Principal Investigator of an autonomous AI research lab, writing "
@@ -98,6 +119,24 @@ async def _mimir_brief(statement: str, state) -> str:
     if a.gaps:
         block += "\nGaps Mimir flags:\n" + "\n".join(f"- {g}" for g in a.gaps)
     return block
+
+
+def _catalog_block() -> str:
+    """The REAL-dataset catalog (the offline /data pack) rendered for the PI's proposal prompt, so
+    each hypothesis's dataset_plan can name a real dataset that actually exists. Empty if no pack."""
+    manifest = sandbox.read_manifest()
+    if not manifest:
+        return ""
+    lines = "\n".join(
+        f"- {d['name']} [{d.get('modality', '?')}/{d.get('task_type', '?')}] — {d['n']} rows; {d['task']}"
+        for d in manifest
+    )
+    return (
+        "# REAL datasets available offline at /data (the lab's experiment sandbox mounts these)\n"
+        f"{lines}\n"
+        "Each hypothesis's dataset_plan should, WHERE one of these fits the claim, NAME it "
+        "(classical-ML/tabular claims → a tabular set; LLM-behaviour claims → a text set).\n\n"
+    )
 
 
 async def _grade_citations(citations: list[str]) -> tuple[float, list[str]]:
@@ -175,19 +214,25 @@ async def handle_ariadne_review(event: dict, dispatcher) -> dict | None:
         f"# Why it matters (stakes)\n{d.get('stakes') or '(not recorded)'}\n\n"
         f"# Prior art from the lab's corpus (cite by EXACT title; never invent)\n{prior}\n\n"
         f"{mimir}\n\n"
-        "# Task\nWrite the LITERATURE REVIEW for this direction: ## Background, ## Key prior work "
-        "(each claim citing an exact title above), ## What is established, ## Open gaps, "
-        "## Positioning (the specific gap this direction fills and why prior work leaves it open). "
-        "Populate `citations` with the exact titles used. Output JSON for: title, body_md, citations."
+        "# Task\nWrite the LITERATURE REVIEW for this direction by FILLING OUT the lab's template "
+        "below. `body_md` MUST follow the template's section structure (keep every `##` heading and "
+        "the markdown tables); replace each [bracketed] placeholder with real content grounded in the "
+        "prior art above — every prior-work claim cites an EXACT corpus title (never invent one). Use "
+        "'none identified' where a section genuinely has nothing. Populate `citations` with the exact "
+        "titles used. Output JSON for: title, body_md (the filled template), citations.\n\n"
+        f"# TEMPLATE — fill this out\n{_LIT_REVIEW_TEMPLATE}"
     )
-    content = await _chain_complete(
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-        temperature=0.3,
-        invocation_type="ariadne.review",
-        step_name="ariadne.review",
-        primary_model=ARIADNE_MODEL,
-    )
-    review = LiteratureReview.model_validate_json(_strip_fences(content))
+    try:
+        review = await complete_validated(
+            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+            LiteratureReview,
+            invocation_type="ariadne.review",
+            step_name="ariadne.review",
+            primary_model=ARIADNE_MODEL,
+        )
+    except ValidationError as e:
+        log.warning("ariadne scholarship: review for #%s failed schema validation after retry: %s", claim_id, e)
+        return {"claim_id": claim_id, "persisted": False, "reason": "schema_invalid"}
 
     frac, unresolved = await _grade_citations(review.citations)
     if frac < CITATION_RESOLVE_MIN:
@@ -237,23 +282,37 @@ async def handle_ariadne_propose(event: dict, dispatcher) -> dict | None:
         f"# Your existing claim goals (fold these in — refine, don't contradict)\n{d.get('goals') or '(none)'}\n\n"
         f"# Your literature review (ground the questions in ITS gaps)\n{review['body_md'][:4000]}\n\n"
         f"# Lab capabilities & constraints (every hypothesis MUST be testable inside this)\n{LAB_CONSTRAINTS}\n\n"
-        "# Task\nWrite the RESEARCH PROPOSAL: 1-4 research questions (from the review's gaps), "
-        "2-6 falsifiable hypotheses (each: hid H1.., statement, deciding metric, threshold decision "
-        "rule, dataset plan naming a /data benchmark slice, builtin, or synthesized data), a "
-        "method_plan describing the experiment series on THIS lab's hardware, and success_criteria "
-        "(what concludes the direction; what kills it). Output JSON for: title, research_questions, "
-        "hypotheses, method_plan, success_criteria."
+        f"{_catalog_block()}"
+        "# Task\nWrite the RESEARCH PROPOSAL by FILLING OUT the lab's template below.\n"
+        "- `research_questions`: 1-4, from the review's gaps.\n"
+        "- `hypotheses`: 2-6 falsifiable (each: hid H1.., statement, deciding metric, threshold decision "
+        "rule, and a dataset_plan that — WHERE a listed REAL /data dataset fits — NAMES it (dataset + "
+        "slice); synthesised/built-in only with a one-line justification when no real set fits). Prefer "
+        "hypotheses the lab can settle on REAL data.\n"
+        "- `method_plan`: the experiment series on THIS lab's hardware. `success_criteria`: what "
+        "concludes the direction; what kills it.\n"
+        "- `body_md`: the FULL proposal following the template — keep every `##` heading and the tables; "
+        "replace each [bracketed] placeholder with real content; its Hypotheses section MUST match the "
+        "structured `hypotheses` (same hid/metric/threshold). Use 'none identified' where empty.\n"
+        "Output JSON for: title, research_questions, hypotheses, method_plan, success_criteria, body_md.\n\n"
+        f"# TEMPLATE — fill this out\n{_PROPOSAL_TEMPLATE}"
     )
-    content = await _chain_complete(
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-        temperature=0.3,
-        invocation_type="ariadne.propose",
-        step_name="ariadne.propose",
-        primary_model=ARIADNE_MODEL,
-    )
-    proposal = ResearchProposal.model_validate_json(_strip_fences(content))
+    try:
+        proposal = await complete_validated(
+            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+            ResearchProposal,
+            invocation_type="ariadne.propose",
+            step_name="ariadne.propose",
+            primary_model=ARIADNE_MODEL,
+        )
+    except ValidationError as e:
+        log.warning("ariadne scholarship: proposal for #%s failed schema validation after retry: %s", claim_id, e)
+        return {"claim_id": claim_id, "persisted": False, "reason": "schema_invalid"}
 
-    body = (
+    # The document of record is the PI's template-filled body_md; the structured fields ride in meta
+    # (the experiment designer consumes meta.hypotheses). Fall back to a derived body only if the
+    # model somehow returned an empty body_md.
+    body = proposal.body_md.strip() or (
         "## Research questions\n"
         + "\n".join(f"- {q}" for q in proposal.research_questions)
         + "\n\n## Hypotheses\n"

@@ -462,3 +462,44 @@ async def test_requested_floors_tiny_wall_clock_budget():
     await EH.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
     _, kw = disp.state.queue_experiment.await_args
     assert kw["wall_clock_budget_s"] == 120
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# data realism — real-first wiring (the "use real data, not synthetic" intervention)
+# ══════════════════════════════════════════════════════════════════════════════
+async def test_classify_realism_table():
+    assert EH._classify_realism('rows=[json.loads(l) for l in open("/data/adult.jsonl")]') == "real"
+    assert EH._classify_realism("from sklearn.datasets import load_wine; X,y=load_wine(return_X_y=True)") == "builtin"
+    assert EH._classify_realism("X,y=make_classification(n_samples=500)") == "synthetic"
+    assert EH._classify_realism("X=np.random.randn(100,5)") == "synthetic"
+    assert EH._classify_realism("") == "synthetic"  # unknown provenance → conservative
+    # /data wins even when the script also seeds an RNG for the split
+    assert EH._classify_realism('open("/data/covtype_sample.jsonl"); idx=np.random.choice(n,50)') == "real"
+    # the script's self-reported source disambiguates ambiguous code
+    assert EH._classify_realism("rows=load(path)", "/data/wine_quality_red.jsonl") == "real"
+
+
+async def test_plan_wanted_real():
+    assert EH._plan_wanted_real("use /data/adult.jsonl, 5k seeded slice", ["adult"]) is True
+    assert EH._plan_wanted_real("the adult income dataset", ["adult", "wine_quality_red"]) is True
+    assert EH._plan_wanted_real("synthesize make_classification(n=1000)", ["adult"]) is False
+
+
+async def test_build_design_forwards_proposal_dataset_plan():
+    ctx = {
+        "hypothesis": "h",
+        "claim_statement": "c",
+        "proposal_hypotheses": [
+            {"hid": "H1", "statement": "s", "metric": "acc", "threshold": ">=.8", "dataset_plan": "adult 5k slice"}
+        ],
+    }
+    layer = await EH._build_design(ctx, state=None, memory=None)
+    assert "data plan: adult 5k slice" in layer.content  # the PI's dataset_plan reaches the designer
+
+
+async def test_build_design_require_real_data_block():
+    layer = await EH._build_design({"hypothesis": "h", "require_real_data": True}, state=None, memory=None)
+    assert "REAL-DATA CONFIRMATION REQUIRED" in layer.content
+    # and absent when not a confirmation run
+    plain = await EH._build_design({"hypothesis": "h"}, state=None, memory=None)
+    assert "REAL-DATA CONFIRMATION REQUIRED" not in plain.content

@@ -186,8 +186,11 @@ async def test_persist_reflection_all_assessment_branches():
     out = _reflection_out(verdicts=verdicts, lessons=[_lesson()])
     res = await persist.persist_reflection(state, out, [1, 2, 3, 4], run_id=5)
     assert res == {"retired": 1, "reprioritized": 2, "advanced": 1, "lessons": 1, "reinforced": 0}
+    # retire now routes through the single guarded write path (legal-edge check + audit row)
+    state.advance_direction.assert_awaited_once()
+    _a, _k = state.advance_direction.call_args
+    assert _a[0] == 1 and _a[1] == "invalidated" and _k["transition"] == "retire" and _k["decided_by"] == "reflect"
     sqls = " || ".join(c[1] for c in pool.calls)
-    assert "UPDATE claims SET status='invalidated'" in sqls
     assert "UPDATE direction_scores SET priority" in sqls
     assert "INSERT INTO lessons" in sqls
 

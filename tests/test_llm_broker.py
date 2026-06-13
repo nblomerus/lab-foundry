@@ -158,6 +158,8 @@ async def test_design_prompt_renders_dataset_manifest(tmp_path, monkeypatch):
                 {
                     "name": "gsm8k_test",
                     "file": "gsm8k_test.jsonl",
+                    "modality": "text",
+                    "task_type": "qa",
                     "task": "math",
                     "n": 1319,
                     "fields": "question, answer, final_answer",
@@ -169,7 +171,7 @@ async def test_design_prompt_renders_dataset_manifest(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(sandbox_mod, "DATASETS_DIR", str(tmp_path))
     block = EH._datasets_block()
-    assert "/data/gsm8k_test.jsonl — 1319 rows" in block
-    assert "SEEDED subset" in block
+    assert "/data/gsm8k_test.jsonl — [text/qa] 1319 rows" in block  # real-first rendering w/ modality/task_type
+    assert "PREFER THESE" in block  # real data is the default
     monkeypatch.setattr(sandbox_mod, "DATASETS_DIR", str(tmp_path / "missing"))
     assert EH._datasets_block() == ""

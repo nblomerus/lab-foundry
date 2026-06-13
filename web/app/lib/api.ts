@@ -629,6 +629,8 @@ export interface QmExperiment {
   id: number;
   kind: string;
   status: string;
+  data_realism?: "real" | "builtin" | "synthetic" | null;
+  realism_mismatch?: boolean | null;
   claim_id?: number | null;
   claim_statement?: string | null;
   claim_confidence?: number | null;
@@ -659,6 +661,8 @@ export interface QmExperimentDetail {
   id: number;
   kind: string;
   status: string;
+  data_realism?: "real" | "builtin" | "synthetic" | null;
+  realism_mismatch?: boolean | null;
   claim_id?: number | null;
   claim_statement?: string | null;
   claim_confidence?: number | null;

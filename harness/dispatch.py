@@ -28,7 +28,9 @@ from datetime import UTC, datetime
 
 import asyncpg
 
+from harness import loop_engine
 from harness.agent_modes import agent_of, get_agent_mode, should_run
+from harness.loop_predicates import ACTIVE_STATUSES
 from harness.session import Session
 
 log = logging.getLogger(__name__)
@@ -153,6 +155,7 @@ CLOSURE_EXEMPT_EVENTS = frozenset(
         "lessons.reconciled",
         "quartermaster.snapshot",  # QM per-tick compute telemetry — streamed, never handled
         "direction.reopened",  # closure-reopen breadcrumb (gap → fresh evidence → re-opened)
+        "direction.concluded",  # lifecycle breadcrumb from state.advance_direction (a direction reached a decision)
         "library.sweep_settled",  # sweep result artifact — poll-read by the closure ladder
         "lab.pulse",  # the lab's heartbeat — what's happening + waiting_on, per watchdog tick
         # the guard's own indicators (must never recurse into themselves)
@@ -182,7 +185,7 @@ UNCLOSED_EVENT_MIN = int(os.environ.get("CLOSURE_UNCLOSED_EVENT_MIN", "3"))
 # Auto-close ladder (research directions): thin_corpus → acquire → ONE targeted
 # scout sweep → re-attempt → still-thin ⇒ genuine gap (invalidate). All bounds are
 # generous and env-tunable; the ladder is idempotent (one step per eligible tick).
-ACTIVE_CLAIM = ("proposed", "tested", "weakly_supported", "replicated")
+ACTIVE_CLAIM = ACTIVE_STATUSES  # canonical source: harness.loop_predicates (re-exported for planner)
 SCOUT_SETTLE_MIN = float(os.environ.get("CLOSURE_SCOUT_SETTLE_MIN", "20"))  # let a scout sweep ingest
 # How long a requested targeted sweep may go without a `library.sweep_settled` artifact
 # before the ladder flags it (handler crashed/suppressed) and re-fires it.
@@ -904,7 +907,12 @@ class Dispatcher:
             )
             return
         try:
-            await state.invalidate_claim(claim_id, reason=reason, verdict_id=None)
+            # The single guarded write path stamps transition='gap' on the audit row, so a gap
+            # is queryable apart from a retire/supersede (the free-text invalidation_reason no
+            # longer has to be parsed). No conn passed → its own transaction, like before.
+            await state.advance_direction(
+                claim_id, "invalidated", transition="gap", decided_by="closure", reason=reason, verdict_id=None
+            )
             log.info("closure: direction %s retired as a research gap — %s", claim_id, reason)
         except Exception:  # noqa: BLE001 — a gap-declaration failure must not kill the watchdog
             log.exception("closure: failed to retire direction %s", claim_id)
@@ -1080,13 +1088,18 @@ class Dispatcher:
             )
             if (matches or 0) < CLOSURE_REOPEN_MATCH_MIN:
                 continue
-            res = await conn.execute(
-                "UPDATE claims SET status = 'proposed', invalidated_at = NULL, "
-                "invalidated_by_verdict_id = NULL, invalidation_reason = NULL, updated_at = now() "
-                "WHERE id = $1 AND status = 'invalidated'",
+            # The status flip goes through the single guarded write path (legal-edge check +
+            # audit row); returns None if the row raced out of 'invalidated' meanwhile.
+            adv = await self.state.advance_direction(
                 cid,
+                "proposed",
+                transition="reopen",
+                decided_by="closure",
+                reason=f"reopened: {matches} new on-topic docs",
+                payload={"new_matching_docs": matches},
+                conn=conn,
             )
-            if not str(res).endswith(" 1"):
+            if adv is None:
                 continue  # raced — someone else already moved it
             await conn.execute(
                 "INSERT INTO events (event_type, target_type, target_id, payload, dedup_key) "
@@ -1099,6 +1112,56 @@ class Dispatcher:
             await self._requeue_direction(conn, cid, g["statement"], "reopened")
             reopened += 1
             log.info("closure: REOPENED direction %s — %d new on-topic document(s) since its gap", cid, matches)
+
+    async def _reconcile_scholarship_ingest(self, conn) -> None:
+        """Make SURE Mimir carries every research artifact. Each lit_review / proposal / article
+        is ingested first-party at write time (agents/ariadne/scholarship.ingest_to_library), but
+        that emit is best-effort — a crash or suppression there would leave the document row with
+        no queryable corpus doc, and nothing re-tried it. This rung closes that gap: any FINAL
+        research_document with no corpus doc at its canonical_key (past a short grace, so the
+        normal ingest gets first crack) is re-emitted as source.discovered with a day-bucketed key
+        so a failed ingest self-heals. Mimir-gated; the payload mirrors ingest_to_library exactly."""
+        if await get_agent_mode(self.pool, "mimir") not in {"advisory", "active"}:
+            return
+        state = getattr(self, "state", None)
+        if state is None:
+            return
+        day = await conn.fetchval("SELECT to_char(now(), 'YYYY-MM-DD')")
+        rows = await conn.fetch(
+            "SELECT rd.id, rd.claim_id, rd.kind, rd.title, rd.body_md FROM research_documents rd "
+            "LEFT JOIN documents d ON d.canonical_key = "
+            "  'scholarship:' || rd.kind || ':claim:' || rd.claim_id || ':doc:' || rd.id "
+            "WHERE rd.status = 'final' AND d.id IS NULL "
+            "AND rd.created_at < now() - make_interval(mins => $1::int) "
+            "ORDER BY rd.id DESC LIMIT $2",
+            int(REARM_GRACE_MIN),
+            REARM_CAP_PER_TICK,
+        )
+        for r in rows:
+            await state.emit_corpus_event(
+                "source.discovered",
+                target_type="source",
+                target_id=r["id"],
+                payload={
+                    "source": {
+                        "kind": "note",
+                        "source_kind": "lab_scholarship",
+                        "canonical_key": f"scholarship:{r['kind']}:claim:{r['claim_id']}:doc:{r['id']}",
+                        "title": r["title"],
+                        "why": f"first-party {r['kind'].replace('_', ' ')} for direction #{r['claim_id']}",
+                    },
+                    "content": r["body_md"],
+                    "provenance": {"claim_id": r["claim_id"], "research_document_id": r["id"], "kind": r["kind"]},
+                },
+                dedup_key=f"scholar-reingest-{r['id']}-{day}",
+            )
+        if rows:
+            await self._emit_indicator(
+                "loop.unclosed",
+                {"kind": "scholarship_uningested", "count": len(rows), "doc_ids": [r["id"] for r in rows][:10]},
+                dedup=f"scholarship-uningested-{day}",
+            )
+            log.info("reconcile: re-ingested %d research document(s) Mimir was missing", len(rows))
 
     async def _rearm_research_spines(self, conn) -> None:
         """Re-arm the one-shot spines from CURRENT STATE — the audit's #1 silent-flatline
@@ -1381,7 +1444,11 @@ class Dispatcher:
                     await self._detect_unclosed_events(conn)
                     await self._advance_research_closure(conn)  # auto-close the research ladder
                     await self._reopen_gapped_directions(conn)  # gap ≠ dead end: new evidence re-opens
-                    await self._rearm_research_spines(conn)  # one-shot spine events re-derive from state
+                    await self._reconcile_scholarship_ingest(conn)  # every research artifact lands in Mimir
+                    if not loop_engine.LOOP_ENGINE:
+                        # The transition engine (driven from the pacemaker) owns spine re-arm when on;
+                        # the watchdog rung stays only as the legacy path / shadow-phase incumbent.
+                        await self._rearm_research_spines(conn)  # one-shot spine events re-derive from state
                     await self._detect_stuck_directions(conn)  # flag any residual the ladder didn't clear
                     await self._detect_eaten_events(conn)  # failed / gate-suppressed loop events, visibly
                     await self._emit_lab_pulse(conn)  # heartbeat: doing + waiting_on, every tick
