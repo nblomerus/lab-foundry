@@ -347,13 +347,24 @@ async def test_watchdog_runs_stall_and_broken_detectors(monkeypatch):
         seen["stalls"] += 1
         disp._running = False  # end the loop after the first full sweep
 
-    # let the other sweeps be cheap no-ops
+    # Every OTHER rung the watchdog loop calls must be a cheap no-op. If an un-mocked rung
+    # raises against the ScriptedPool, the loop's `except` swallows it, `_detect_stalls` (which
+    # ends the loop) is skipped, and with asyncio.sleep mocked the loop SPINS FOREVER. Keep this
+    # list in sync with _watchdog_loop's body (harness/dispatch.py).
     for name in (
         "_sweep_stale_tasks",
         "_revive_stranded_tasks",
         "_sweep_pending_events",
         "_check_phase_budget",
         "_refresh_slop_view",
+        "_detect_unclosed_events",
+        "_advance_research_closure",
+        "_reopen_gapped_directions",
+        "_reconcile_scholarship_ingest",
+        "_rearm_research_spines",
+        "_detect_stuck_directions",
+        "_detect_eaten_events",
+        "_emit_lab_pulse",
         "_reconcile_lessons_if_due",
         "_sweep_library_if_due",
     ):
