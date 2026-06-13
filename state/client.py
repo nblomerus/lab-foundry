@@ -1745,6 +1745,26 @@ class PostgresClient:
         doi = doi or None
         arxiv_id = arxiv_id or None
         async with self.pool.acquire() as conn:
+            # Cross-source / version dedup (Tier 3): the same paper arrives as arxiv (key=id), ar5iv
+            # (source_kind=web, url key), or a versioned id (…v3). uq_documents_arxiv is on the RAW
+            # column, so version variants slip past it as separate rows. Probe FIRST — exact (indexed)
+            # then version-suffixed variants of the same base — and return the existing id instead of
+            # inserting a duplicate (also avoids the unique-index conflict normalization would trigger).
+            # Existing duplicate ROWS need a one-off backfill to merge; this only stops NEW ones.
+            if arxiv_id is not None:
+                existing = await conn.fetchval("SELECT id FROM documents WHERE arxiv_id = $1 LIMIT 1", arxiv_id)
+                if existing is None:
+                    existing = await conn.fetchval(
+                        "SELECT id FROM documents WHERE arxiv_id LIKE $1 || 'v%' "
+                        "AND regexp_replace(arxiv_id, 'v[0-9]+$', '') = $1 LIMIT 1",
+                        arxiv_id,
+                    )
+                if existing is not None:
+                    return existing, False
+            if doi is not None:
+                existing = await conn.fetchval("SELECT id FROM documents WHERE doi = $1 LIMIT 1", doi)
+                if existing is not None:
+                    return existing, False
             new_id = await conn.fetchval(
                 """
                 INSERT INTO documents (
@@ -1778,6 +1798,52 @@ class PostgresClient:
                 canonical_key,
             )
             return existing_id, False
+
+    async def register_dataset(
+        self,
+        *,
+        document_id: int,
+        name: str,
+        url: str | None = None,
+        modality: str | None = None,
+        task: str | None = None,
+        size: str | None = None,
+        license: str | None = None,
+        notes: str | None = None,
+    ) -> int:
+        """Register a dataset in the catalog (idempotent on document_id). The dataset scouts ingest
+        HF/OpenML datasets as documents; this also surfaces them as a queryable CATALOG (the `datasets`
+        table was empty, so the lab had no structured view of which datasets exist) and an id-keyed
+        :Dataset graph node. Returns the catalog row id (existing or new)."""
+        async with self.pool.acquire() as conn:
+            existing = await conn.fetchval("SELECT id FROM datasets WHERE document_id = $1 LIMIT 1", document_id)
+            if existing is not None:
+                return existing
+            return await conn.fetchval(
+                """
+                INSERT INTO datasets (name, url, modality, task, size, license, notes, document_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id
+                """,
+                name,
+                url,
+                modality,
+                task,
+                size,
+                license,
+                notes,
+                document_id,
+            )
+
+    async def list_datasets(self, limit: int = 50) -> list[dict]:
+        """The dataset catalog (most-recent first) — name + url + modality/task + the doc it came from."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, url, modality, task, size, license, document_id "
+                "FROM datasets ORDER BY id DESC LIMIT $1",
+                limit,
+            )
+        return [dict(r) for r in rows]
 
     async def stage_chunk_plan(self, document_id: int, items: list) -> int:
         """

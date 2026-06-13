@@ -32,7 +32,7 @@ import os
 from pydantic import ValidationError
 
 from agents.ariadne.grade import _resolves
-from agents.ariadne.loop import LAB_CONSTRAINTS
+from agents.ariadne.loop import LAB_CONSTRAINTS, _annotate_gaps
 from agents.experiments import sandbox
 from agents.llm import complete_validated
 from agents.mimir.ask import answer_question
@@ -92,7 +92,7 @@ async def _direction(state, claim_id: int) -> dict | None:
 
 async def _prior_art(statement: str, k: int = 12) -> str:
     try:
-        chunks = await corpus_search(statement, k=k)
+        chunks = await corpus_search(statement, k=k, exclude_lab=True)
     except Exception:  # noqa: BLE001 — grounding is best-effort; the grader catches emptiness
         log.exception("ariadne scholarship: corpus_search failed")
         return "(corpus search unavailable)"
@@ -111,13 +111,15 @@ async def _mimir_brief(statement: str, state) -> str:
             k=8,
             state=state,
             asker="ariadne",
+            exclude_lab=True,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("ariadne scholarship: Mimir brief failed: %s", e)
         return ""
     block = f"## Mimir's synthesis (multi-hop GraphRAG over the Library)\n{a.answer}"
     if a.gaps:
-        block += "\nGaps Mimir flags:\n" + "\n".join(f"- {g}" for g in a.gaps)
+        gaps = await _annotate_gaps(a.gaps)
+        block += "\nGaps Mimir flags:\n" + "\n".join(f"- {g}" for g in gaps)
     return block
 
 

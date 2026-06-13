@@ -31,7 +31,7 @@ import os
 
 import httpx
 
-from library.graph.tools import merge_paper
+from library.graph.tools import merge_dataset, merge_paper
 from library.ingest.chunker import PaperChunker
 from library.ingest.fetcher import USER_AGENT, search_arxiv, web_fetch
 from library.ingest.parser import parse_paper
@@ -571,6 +571,20 @@ async def embed_and_finalize(document_id: int, state) -> dict:
         )
     except Exception:  # noqa: BLE001 — KG is best-effort, never blocks ingest
         log.exception("ingest finalize: merge_paper failed for doc %s — continuing", document_id)
+
+    # Dataset docs ALSO become a catalog row + id-keyed :Dataset graph node, so the lab has a
+    # structured, discoverable view of which datasets exist (the `datasets` table was empty and
+    # graph.datasets==0). Best-effort — never blocks ingest.
+    if doc.get("kind") == "dataset":
+        try:
+            ds_id = await state.register_dataset(
+                document_id=document_id,
+                name=doc.get("title") or f"dataset:{document_id}",
+                url=doc.get("source_url"),
+            )
+            await merge_dataset(ds_id, name=doc.get("title"))
+        except Exception:  # noqa: BLE001 — catalog/KG is best-effort, never blocks ingest
+            log.exception("ingest finalize: dataset catalog/KG failed for doc %s — continuing", document_id)
 
     await state.set_document_queryable(document_id, True)
 

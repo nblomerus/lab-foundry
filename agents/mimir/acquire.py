@@ -28,6 +28,7 @@ import os
 from pydantic import BaseModel, Field
 
 from agents.mimir.handler import _loop_enabled, ingest_source
+from library.ingest.fetcher import normalize_arxiv_id
 from library.ingest.scouts import SourceDescriptor, scout_arxiv
 
 log = logging.getLogger(__name__)
@@ -133,13 +134,14 @@ async def _resolve_candidates(req: AcquireRequest, *, n: int = 8) -> list[Source
     caller can skip ones already in the corpus and fetch a genuinely-new paper — the difference
     between a gap request returning `fulfilled` vs falsely `already_have`."""
     if req.arxiv_id:
+        aid = normalize_arxiv_id(req.arxiv_id) or req.arxiv_id
         return [
             SourceDescriptor(
                 kind="paper",
                 source_kind="arxiv",
-                canonical_key=req.arxiv_id,
-                url=f"https://arxiv.org/abs/{req.arxiv_id}",
-                arxiv_id=req.arxiv_id,
+                canonical_key=aid,
+                url=f"https://arxiv.org/abs/{aid}",
+                arxiv_id=aid,
                 why=req.why,
             )
         ]

@@ -74,6 +74,22 @@ MAX_PARALLEL_EXTRACTS = 4
 # -------------------------------------------------------------------------
 
 
+async def _research_findings_block(state, claim_id: int) -> str:
+    """The lab's OWN synthesis findings on a research direction, so an adversarial review of a
+    direction is GROUNDED in what the lab actually concluded — not only web counter-evidence. The
+    market `findings` table is empty for research directions (they flow through research_findings),
+    which left the critic reviewing a direction's statement blind to the lab's supporting evidence."""
+    try:
+        rfs = await state.get_recent_findings_for_claims([claim_id], limit=8)
+    except Exception:  # noqa: BLE001 — supplementary context; never block the review
+        return ""
+    return "\n".join(
+        f"- [synthesis, supported={r.get('supported')}, conf {float(r.get('confidence') or 0):.2f}, "
+        f"{r.get('n_experiments', 0)} exps]: {(r.get('headline') or '')[:90]}\n    {(r.get('so_what') or '')[:200]}"
+        for r in rfs
+    )
+
+
 async def _build_plan_attack(ctx: dict, state, memory) -> PromptLayer:
     import asyncio as _asyncio
 
@@ -93,7 +109,7 @@ async def _build_plan_attack(ctx: dict, state, memory) -> PromptLayer:
             for f in recent_findings
         )
     else:
-        findings_block = "(no findings yet — early in research)"
+        findings_block = await _research_findings_block(state, thesis_id) or "(no findings yet — early in research)"
 
     trigger_line = (
         f"\nThis review was triggered by finding F{triggering_finding_id} reaching high signal."
@@ -258,7 +274,7 @@ async def _build_judge_verdict(ctx: dict, state, memory) -> PromptLayer:
             for f in recent_findings
         )
     else:
-        findings_block = "(no findings yet)"
+        findings_block = await _research_findings_block(state, thesis_id) or "(no findings yet)"
 
     wp_lines = "\n".join(f"  - {wp['hypothesis']}" for wp in weak_points)
 

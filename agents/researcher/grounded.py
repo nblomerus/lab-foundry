@@ -168,7 +168,7 @@ async def investigate_task(state, task_id: int, *, model: str = ARIADNE_MODEL, e
     seen: set[int] = set()
     refs = []
     for q in queries:
-        for r in await retrieve(q, k=6):
+        for r in await retrieve(q, k=6, exclude_lab=True):
             if r.document_id not in seen:
                 seen.add(r.document_id)
                 refs.append(r)
@@ -185,7 +185,7 @@ async def investigate_task(state, task_id: int, *, model: str = ARIADNE_MODEL, e
         f"(expectation: {ctx['expectation'][:160]}): what does the corpus show, which methods/"
         "results are well-established versus thin, and is there evidence for or against?"
     )
-    mimir = await answer_question(question, k=8, state=(state if emit else None), asker="researcher")
+    mimir = await answer_question(question, k=8, state=(state if emit else None), asker="researcher", exclude_lab=True)
 
     # (3) judge the evidence against the goal → a grounded finding.
     user = (

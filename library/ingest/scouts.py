@@ -195,6 +195,29 @@ async def scout_web(topics: list[str], per_topic: int = 5, *, start: int = 0) ->
 # -------------------------------------------------------------------------
 
 
+# GitHub's search API rejects an overlong / sentence-shaped `q` with HTTP 422. Direction-tied
+# sweeps pass a whole hypothesis paragraph as the topic, so EVERY such sweep 422'd (live). Condense
+# to a short keyword query: the concise lead (text before the first ':' — usually the title) capped
+# to a safe length. Short generic topics ('large language models') pass through unchanged.
+_GITHUB_Q_MAX = 200
+# Drop github noise that isn't original research code: ARCHIVED repos are dead (no downside to
+# skipping), and an optional star floor (default 0 = off) lets an operator filter low-traction repos
+# without code changes. Forks are NOT filtered — some legit research code lives in substantive forks.
+_GITHUB_MIN_STARS = int(os.environ.get("GITHUB_MIN_STARS", "0"))
+# Forks are mostly noise (copies of an upstream repo), but a SUBSTANTIVE research fork earns its own
+# stars — so skip a fork only when it's below this floor, keeping the rare high-traction one.
+_GITHUB_FORK_KEEP_STARS = int(os.environ.get("GITHUB_FORK_KEEP_STARS", "25"))
+
+
+def _github_query(topic: str) -> str:
+    """Condense a (possibly paragraph-length) topic into a GitHub-search-safe `q`."""
+    raw = (topic or "").strip()
+    q = re.sub(r"\s+", " ", raw.split(":", 1)[0].strip()) or raw
+    if len(q) > _GITHUB_Q_MAX:
+        q = q[:_GITHUB_Q_MAX].rsplit(" ", 1)[0]
+    return q
+
+
 async def scout_github(topics: list[str], per_topic: int = 5, *, start: int = 0) -> list[SourceDescriptor]:
     """Scout GitHub for repos matching `topics` (sorted by stars). canonical_key
     is 'owner/repo'. `start` pages deeper (GitHub `page`). PURE: returns
@@ -213,7 +236,7 @@ async def scout_github(topics: list[str], per_topic: int = 5, *, start: int = 0)
             try:
                 resp = await client.get(
                     f"{_GITHUB_API}/search/repositories",
-                    params={"q": topic, "sort": "stars", "per_page": per_topic, "page": page},
+                    params={"q": _github_query(topic), "sort": "stars", "per_page": per_topic, "page": page},
                 )
                 if resp.status_code != 200:
                     # Never swallow a non-200 silently: a rate-limited/blocked scout that
@@ -228,6 +251,11 @@ async def scout_github(topics: list[str], per_topic: int = 5, *, start: int = 0)
                 full = it.get("full_name")
                 if not full or full in seen:
                     continue
+                stars = it.get("stargazers_count") or 0
+                if it.get("archived") or stars < _GITHUB_MIN_STARS:
+                    continue  # dead repo, or below the (default-off) star floor
+                if it.get("fork") and stars < _GITHUB_FORK_KEEP_STARS:
+                    continue  # trivial fork — a substantive research fork keeps its own stars
                 seen[full] = SourceDescriptor(
                     kind="code",
                     source_kind="github",

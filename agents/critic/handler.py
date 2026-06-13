@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 # Without this, a weaken verdict with no delta was silently dropped and the
 # claim confidence never moved — a primary cause of the exploration flatline.
 DEFAULT_WEAKEN_DELTA = -0.1
+# A kill verdict on a research DIRECTION is downgraded to this (stronger-than-default) weaken: the
+# critic wanted to kill, but a direction's invalidation/closure belongs to the research loop.
+_RESEARCH_KILL_WEAKEN_DELTA = -0.25
 
 
 # -------------------------------------------------------------------------
@@ -186,6 +189,16 @@ async def handle_finding_high_signal(event: dict, dispatcher) -> dict | None:
             output_schema_class=AdversaryVerdictOut,
             triggered_by_event_id=event["id"],
         )
+
+    # Research DIRECTIONS are WEAKEN-ONLY: the research loop owns their invalidation/closure, so the
+    # critic adds independent adversarial PRESSURE (confidence) without double-killing. Downgrade a kill
+    # on a direction to a strong weaken; the recorded verdict + graph then accurately show 'weaken'.
+    claim_kind = await dispatcher.state.pool.fetchval("SELECT claim_kind::text FROM claims WHERE id = $1", claim_id)
+    if claim_kind == "direction" and verdict.action == "kill":
+        log.info("critic: kill→weaken on research direction T%s (research loop owns closure)", claim_id)
+        verdict.action = "weaken"
+        if not verdict.proposed_confidence_delta:
+            verdict.proposed_confidence_delta = _RESEARCH_KILL_WEAKEN_DELTA
 
     verdict_id = await dispatcher.state.create_critic_verdict(
         claim_id=claim_id,

@@ -97,6 +97,14 @@ async def merge_claim(id: int, statement: str, status: str, confidence: float) -
         )
 
 
+# :Finding id namespaces. The market-era `findings` table, the research-era grounded researcher
+# (one finding per research task), and synthesis (one per research_findings row) all project
+# :Finding nodes, and their table-id ranges overlap at small integers — so offset the research-era
+# ids to keep f.id globally unique in the graph. Market-era findings.id stays in [0, 1e9).
+FINDING_ID_SYNTHESIS = 1_000_000_000  # + research_findings.id
+FINDING_ID_RESEARCHER = 2_000_000_000  # + research task id
+
+
 async def merge_finding_grounds_claim(
     finding_id: int,
     claim_id: int,

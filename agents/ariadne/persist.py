@@ -41,7 +41,7 @@ async def _coverage_score(text: str) -> int | None:
     if len(topic) < 2:
         return None
     try:
-        chunks = await corpus_search(text, k=12)
+        chunks = await corpus_search(text, k=12, exclude_lab=True)
     except Exception:  # noqa: BLE001
         return None
     docs = {c.document_id for c in chunks if len(topic & _toks(c.title or "")) >= 2}

@@ -61,6 +61,7 @@ ADULT_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adu
 WINE_RED_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv"
 CALIFORNIA_URL = "https://raw.githubusercontent.com/ageron/handson-ml2/master/datasets/housing/housing.csv"
 COVTYPE_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/covtype/covtype.data.gz"
+WDBC_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/wdbc.data"
 
 SUBSAMPLE_SEED = 0  # fixed → a subsampled slice is deterministic, so its sha256 is stable across builds
 
@@ -262,6 +263,54 @@ def _map_hellaswag(d: dict) -> dict:
     return {"context": d["ctx"], "endings": d["endings"], "answer": int(d["label"]) if d.get("label", "") != "" else None}
 
 
+def _map_openbookqa(d: dict) -> dict:
+    ch = d.get("choices") or {}
+    return {
+        "question": d.get("question_stem"),
+        "choices": ch.get("text"),
+        "labels": ch.get("label"),
+        "answer": d.get("answerKey"),
+    }
+
+
+def _map_commonsenseqa(d: dict) -> dict:
+    ch = d.get("choices") or {}
+    return {
+        "question": d.get("question"),
+        "choices": ch.get("text"),
+        "labels": ch.get("label"),
+        "answer": d.get("answerKey"),
+    }
+
+
+def _map_mbpp(d: dict) -> dict:
+    return {"task_id": d.get("task_id"), "prompt": d.get("text"), "code": d.get("code"), "test_list": d.get("test_list")}
+
+
+def _map_winogrande(d: dict) -> dict:
+    return {
+        "sentence": d.get("sentence"),
+        "option1": d.get("option1"),
+        "option2": d.get("option2"),
+        "answer": d.get("answer"),
+    }
+
+
+def _wdbc(raw: bytes) -> list[dict]:
+    """UCI Breast Cancer Wisconsin (Diagnostic): id, diagnosis (M/B), then 30 numeric features."""
+    rows = []
+    for line in raw.decode().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 32:
+            continue
+        try:
+            feats = [float(x) for x in parts[2:32]]
+        except ValueError:
+            continue
+        rows.append({"features": feats, "label": 1 if parts[1] == "M" else 0})
+    return rows
+
+
 DATASETS = [
     {
         "name": "gsm8k_test",
@@ -382,6 +431,57 @@ DATASETS = [
         "fields": "context, endings[4], answer (index)",
         "license": "MIT",
         "source": "huggingface.co/datasets/Rowan/hellaswag",
+    },
+    {
+        "name": "openbookqa",
+        "loader": _hf_loader("allenai/openbookqa", "main", "test", cap=500, mapper=_map_openbookqa),
+        "modality": "text",
+        "task_type": "multiple_choice",
+        "task": "elementary-science multiple-choice with open-book facts (4-way)",
+        "fields": "question, choices[4], labels[], answer (label)",
+        "license": "Apache-2.0",
+        "source": "huggingface.co/datasets/allenai/openbookqa",
+    },
+    {
+        "name": "commonsense_qa",
+        "loader": _hf_loader("tau/commonsense_qa", "default", "validation", cap=1221, mapper=_map_commonsenseqa),
+        "modality": "text",
+        "task_type": "multiple_choice",
+        "task": "commonsense multiple-choice QA (5-way)",
+        "fields": "question, choices[5], labels[], answer (label)",
+        "license": "MIT",
+        "source": "huggingface.co/datasets/tau/commonsense_qa",
+    },
+    {
+        "name": "mbpp",
+        "loader": _hf_loader("google-research-datasets/mbpp", "full", "test", cap=500, mapper=_map_mbpp),
+        "modality": "text",
+        "task_type": "code",
+        "task": "basic Python programming problems (unit-test graded) — complements HumanEval",
+        "fields": "task_id, prompt (text), code, test_list[]",
+        "license": "CC BY-4.0",
+        "source": "huggingface.co/datasets/google-research-datasets/mbpp",
+    },
+    {
+        "name": "winogrande",
+        "loader": _hf_loader("allenai/winogrande", "winogrande_xl", "validation", cap=1267, mapper=_map_winogrande),
+        "modality": "text",
+        "task_type": "multiple_choice",
+        "task": "Winograd-schema commonsense coreference (binary option choice)",
+        "fields": "sentence, option1, option2, answer (1|2)",
+        "license": "CC BY (Apache-2.0 code)",
+        "source": "huggingface.co/datasets/allenai/winogrande",
+    },
+    {
+        "name": "breast_cancer_wdbc",
+        "url": WDBC_URL,
+        "normalize": _wdbc,
+        "modality": "tabular",
+        "task_type": "classification",
+        "task": "binary tumor diagnosis (malignant/benign) from 30 numeric cell-nucleus features",
+        "fields": "features[30] (mean/se/worst of radius, texture, …) + label (1=malignant)",
+        "license": "CC BY 4.0",
+        "source": "archive.ics.uci.edu (UCI Breast Cancer Wisconsin Diagnostic)",
     },
 ]
 
