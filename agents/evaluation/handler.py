@@ -259,9 +259,10 @@ async def handle_task_completed(event: dict, dispatcher) -> dict | None:
         # modules define AuditBatch in their own namespace.)
         audit_batch = AuditBatch(scores=[s.model_dump() for s in audit_batch_v2.scores])
         if run_id == 0:
-            # All cross-checks failed — skip the rest of the handler. The
-            # event will be marked consumed but findings remain unaudited;
-            # the watchdog re-emits task.completed if nothing audits them.
+            # All cross-checks failed — skip the rest of the handler. The event is
+            # marked consumed but the findings remain unaudited; the watchdog's spine
+            # re-armer (dispatch._rearm_research_spines) re-emits task.completed for
+            # them after the grace window, so the audit is deferred, not lost.
             return {"skipped": True, "reason": "v2 audit: all cross_check steps failed"}
     else:
         prompt = await dispatcher.curator.build(
@@ -291,16 +292,17 @@ async def handle_task_completed(event: dict, dispatcher) -> dict | None:
             run_id=run_id,
         )
 
-        # Write high-signal findings to graph (non-fatal if Neo4j unavailable)
-        if verdict == "pass" and score.relevance_score >= 8:
+        # Write high-signal findings to graph (non-fatal if Neo4j unavailable).
+        # relevance_score lives on the Finding, not the AuditScore — resolve the
+        # finding first, then gate on it.
+        if verdict == "pass":
             try:
                 from library.graph.tools import merge_finding_grounds_claim
 
-                finding = by_id_for_graph.get(score.finding_id) if "by_id_for_graph" in locals() else None
+                finding = by_id_for_graph.get(score.finding_id)
                 if finding is None:
                     finding = await dispatcher.state.get_finding(score.finding_id)
-                if finding and finding.claim_id:
-                    claim = await dispatcher.state.get_claim(finding.claim_id)
+                if finding and finding.relevance_score >= 8 and finding.claim_id:
                     await merge_finding_grounds_claim(
                         finding_id=finding.id,
                         claim_id=finding.claim_id,

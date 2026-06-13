@@ -5,10 +5,12 @@
 
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { AlertTriangle, CheckCircle2, Cpu, Gauge, Library, ShieldCheck, Zap } from "lucide-react";
-import { Sparkline, StatusPill, MiniBar, cx } from "../ui";
+import { MiniBar, cx } from "../ui";
 import { compact } from "../../lib/format";
+import { useNodeMeter, type ActivityState } from "./useNodeActivity";
 import type { AriadneOverview, DebugCosts, HostStats, KnowledgeStats, MimirPanel, ScoutPanel } from "../../lib/api";
 import type { NodeDef } from "./topology";
+import { useNodeBubble, type Bubble } from "./narration";
 
 export type Selected =
   | { kind: "scout"; sourceKind: string; title: string }
@@ -32,6 +34,9 @@ export interface FloorNodeData {
   costs?: DebugCosts | null;
   ariadne?: AriadneOverview | null;
   priority?: string | null;
+  activeAt?: number | null; // node's last-active epoch ms (live event stream)
+  now?: number; // re-eval tick from useNodeActivity
+  activitySeries?: number[]; // bucketed event-rate over the window (live meter)
   onOpen?: (sel: Selected) => void;
   // React Flow v12 requires node data to extend Record<string, unknown>.
   [key: string]: unknown;
@@ -63,26 +68,79 @@ function IconTile({ icon: Icon, tone = "live" }: { icon?: NodeDef["icon"]; tone?
   );
 }
 
+// --- Activity badge (shared) -------------------------------------------
+// One consistent real-time status across every agent node: who's working RIGHT
+// NOW (busy, pulsing) vs on-but-quiet (live/idle) vs paused (offline). Replaces
+// the old per-node mode/24h labels that never told you who was actually active.
+const ACT_META: Record<ActivityState, { dot: string; ring: string; text: string; label: string }> = {
+  busy: { dot: "bg-emerald-500 pulse-dot", ring: "border-emerald-200 bg-emerald-50", text: "text-emerald-700", label: "Busy" },
+  live: { dot: "bg-emerald-500", ring: "border-emerald-200 bg-emerald-50/70", text: "text-emerald-700", label: "Live" },
+  idle: { dot: "bg-slate-300", ring: "border-slate-200 bg-slate-50", text: "text-slate-500", label: "Idle" },
+  offline: { dot: "bg-transparent ring-1 ring-inset ring-slate-300", ring: "border-slate-200 bg-white", text: "text-slate-400", label: "Offline" },
+};
+
+function ActivityBadge({ state, ago }: { state: ActivityState; ago?: string | null }) {
+  const m = ACT_META[state];
+  return (
+    <span
+      title={state === "busy" ? "Working now" : state === "live" ? `Active ${ago ?? "recently"} ago` : state === "idle" ? `Quiet${ago ? ` · ${ago} ago` : ""}` : "Paused"}
+      className={cx("inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold leading-none", m.ring, m.text)}
+    >
+      <span className={cx("h-1.5 w-1.5 rounded-full", m.dot)} />
+      {m.label}
+      {ago && (state === "idle" || state === "live") ? <span className="font-medium text-slate-400">{ago}</span> : null}
+    </span>
+  );
+}
+
+// Busy cards gain a breathing emerald halo so active agents pop on the floorplan.
+function busyRing(state: ActivityState): string {
+  return state === "busy" ? "busy-halo" : "";
+}
+
+// Live activity meter — a lightweight bar-sparkline of an agent's recent event
+// rate (newest bar on the right). Fills + brightens during bursts, flat when
+// quiet. Pure CSS bars (no chart lib) so ~30 of them can refresh every 2s cheaply.
+export function ActivityMeter({ series, state, className = "" }: { series?: number[]; state: ActivityState; className?: string }) {
+  const data = series && series.length ? series : new Array(15).fill(0);
+  const max = Math.max(1, ...data);
+  const on = state === "busy" || state === "live";
+  return (
+    <div className={cx("flex h-4 items-end gap-[1.5px]", className)} title="recent activity (last ~90s)">
+      {data.map((v, i) => (
+        <span
+          key={i}
+          className={cx(
+            "flex-1 rounded-[1px] transition-all duration-700 ease-out",
+            v > 0 ? (state === "busy" ? "bg-emerald-500" : on ? "bg-emerald-400/70" : "bg-slate-300") : "bg-slate-200/70",
+          )}
+          style={{ height: `${v > 0 ? Math.max(14, (v / max) * 100) : 8}%` }}
+        />
+      ))}
+    </div>
+  );
+}
+
 // --- Scout -------------------------------------------------------------
 export function ScoutNode({ data }: NodeProps<FN>) {
-  const { def, panel, series } = data;
+  const { def, panel } = data;
   const added = panel?.added_today ?? null;
   const inCorpus = panel?.in_corpus ?? null;
-  const collecting = (added ?? 0) > 0;
   const topics = panel?.last_searched?.topics ?? [];
+  const { state, ago, series } = useNodeMeter(data.def.id, true); // scouts are always-on collectors
   return (
-    <div className="group flex h-full w-full cursor-pointer flex-col rounded-node border border-emerald-200/70 bg-white/90 p-3 shadow-card backdrop-blur transition hover:border-emerald-300 hover:shadow-panel">
+    <div className={cx("group flex h-full w-full cursor-pointer flex-col rounded-node border border-emerald-200/70 bg-white/90 p-3 shadow-card backdrop-blur transition hover:border-emerald-300 hover:shadow-panel", busyRing(state))}>
       <NodeHandles />
-      <div className="flex items-start justify-between">
+        <NodeBubble nodeId={data.def.id} />
+      <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <IconTile icon={def.icon} />
           <div className="min-w-0">
             <div className="truncate text-[13px] font-semibold leading-tight text-slate-900">{def.title}</div>
-            <div className={cx("text-[10px] font-medium", collecting ? "text-emerald-600" : "text-slate-400")}>
-              {panel ? (collecting ? "Collecting" : "Idle") : "—"}
-            </div>
+            <div className="truncate text-[10px] text-slate-400">{def.sub}</div>
           </div>
         </div>
+        <ActivityBadge state={state} ago={ago} />
       </div>
       <div className="mt-2 flex items-end justify-between">
         <div>
@@ -94,7 +152,7 @@ export function ScoutNode({ data }: NodeProps<FN>) {
         </div>
       </div>
       <div className="mt-1">
-        <Sparkline data={series ?? []} tone="live" height={26} />
+        <ActivityMeter series={series} state={state} className="h-[26px]" />
       </div>
       {topics.length > 0 && (
         <div className="mt-auto truncate pt-1 text-[9px] text-slate-400" title={topics.join(" · ")}>
@@ -121,9 +179,11 @@ export function MimirNode({ data }: NodeProps<FN>) {
   const g = mimir?.at_a_glance;
   const nodes = stats?.graph?.status === "ok" ? stats.graph.nodes ?? 0 : null;
   const mix = (mimir?.source_mix ?? []).filter((m) => m.count > 0);
+  const { state, ago, series } = useNodeMeter(data.def.id, mimir?.status === "ok");
   return (
-    <div className="flex h-full w-full cursor-pointer flex-col rounded-wing border border-emerald-300 bg-white/92 p-3.5 shadow-panel backdrop-blur transition hover:shadow-float">
+    <div className={cx("flex h-full w-full cursor-pointer flex-col rounded-wing border border-emerald-300 bg-white/92 p-3.5 shadow-panel backdrop-blur transition hover:shadow-float", busyRing(state))}>
       <NodeHandles />
+        <NodeBubble nodeId={data.def.id} />
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2.5">
           <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
@@ -134,7 +194,10 @@ export function MimirNode({ data }: NodeProps<FN>) {
             <div className="text-[11px] text-slate-400">{def.sub}</div>
           </div>
         </div>
-        <StatusPill status={mimir?.status === "ok" ? "healthy" : "idle"} label={mimir?.status === "ok" ? "Healthy" : "—"} />
+        <div className="flex flex-col items-end gap-1">
+          <ActivityBadge state={state} ago={ago} />
+          <ActivityMeter series={series} state={state} className="h-3 w-16" />
+        </div>
       </div>
 
       <div className="mt-3 grid grid-cols-5 gap-1.5">
@@ -310,33 +373,85 @@ export function OpsNode({ data }: NodeProps<FN>) {
   );
 }
 
-// --- Dormant -----------------------------------------------------------
-const MODE_DOT: Record<string, string> = {
-  active: "bg-emerald-500", advisory: "bg-blue-500", shadow: "bg-amber-500", off: "bg-slate-400",
+// --- Narration bubble ----------------------------------------------------
+// A small speech bubble pinned above a node: present-tense, human-readable, and
+// state-driven (it persists exactly as long as the state it describes). kind tints:
+// running = emerald + pulse, waiting = amber, reading = violet.
+const BUBBLE_TONE: Record<string, string> = {
+  running: "border-emerald-200 bg-emerald-50/95 text-emerald-800",
+  waiting: "border-amber-200 bg-amber-50/95 text-amber-800",
+  reading: "border-violet-200 bg-violet-50/95 text-violet-800",
 };
 
-// Ariadne + the request queue are BUILT, so they show live status (not "Planned").
+export function NodeBubble({ nodeId }: { nodeId: string }) {
+  // Read from NarrationContext (event-driven) — NOT node data: the React-Flow nodes
+  // array must stay structurally stable or every event re-diffs the whole canvas.
+  const bubble: Bubble | null = useNodeBubble(nodeId);
+  if (!bubble) return null;
+  return (
+    <div className="pointer-events-none absolute -top-2 left-2 right-2 z-20 -translate-y-full">
+      <div className={cx("rounded-lg border px-2 py-1 text-[10px] leading-snug shadow-sm backdrop-blur", BUBBLE_TONE[bubble.kind])} title={bubble.text}>
+        <span className="flex items-start gap-1">
+          {bubble.kind === "running" && <span className="mt-0.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500 pulse-dot" />}
+          <span className="line-clamp-2">{bubble.text}</span>
+        </span>
+      </div>
+      <div className={cx("ml-4 h-2 w-2 -translate-y-1 rotate-45 border-b border-r", BUBBLE_TONE[bubble.kind])} />
+    </div>
+  );
+}
+
+// --- Dormant -----------------------------------------------------------
+// BUILT agents (Ariadne, Planner, Researchers, Request Queue) render a live card
+// with a real-time activity badge + their mode as secondary microcopy. `enabled`
+// = the agent's mode is advisory|active (else it shows Offline, not "Planned" —
+// it's a built agent that's paused, distinct from the never-built dashed rooms).
+const BUILT_DORMANT_IDS = new Set(["ariadne", "request-queue", "planner", "researchers", "experiments", "critic", "gate-promotion"]);
+
 function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
-  { dot: string; status: string; value: string; sub: string } | null {
-  if (!ariadne) return null;
+  { value: string; sub: string; enabled: boolean; mode: string | null } | null {
+  // No overview payload yet (loading / one failed poll) must NOT relabel BUILT agents
+  // as "Planned" — that chip is reserved for never-built rooms.
+  if (!ariadne) return BUILT_DORMANT_IDS.has(def.id) ? { value: "—", sub: "connecting…", enabled: false, mode: null } : null;
   const ag = ariadne.at_a_glance;
+  const on = (m: string | null | undefined) => m === "advisory" || m === "active";
   if (def.id === "ariadne") {
-    return { dot: MODE_DOT[ariadne.mode] ?? "bg-slate-400", status: ariadne.mode,
-             value: `${ag.active_directions} directions`, sub: ag.status };
+    return { value: `${ag.active_directions} directions`, sub: ag.status, enabled: on(ariadne.mode), mode: ariadne.mode };
   }
   if (def.id === "request-queue") {
-    const n = ag.acquire_requests_24h ?? 0;
-    return { dot: n > 0 ? "bg-emerald-500" : "bg-slate-400", status: n > 0 ? "Live" : "Idle",
-             value: `${n} asks`, sub: "acquire · 24h" };
+    // Headline is the live QUEUE DEPTH (pending) — the real "backed up?" signal,
+    // bounded by acquire backpressure — with 24h volume as context.
+    const pending = ag.acquire_pending ?? 0;
+    const n24 = ag.acquire_requests_24h ?? 0;
+    return { value: `${pending} queued`, sub: `${n24} asks · 24h`, enabled: true, mode: null };
   }
-  if (def.id === "planner" && (ag.planner_mode === "advisory" || ag.planner_mode === "active")) {
-    return { dot: MODE_DOT[ag.planner_mode] ?? "bg-slate-400", status: ag.planner_mode,
-             value: `${ag.research_tasks ?? 0} tasks`, sub: `${ag.research_tasks_pending ?? 0} pending` };
+  if (def.id === "planner") {
+    // CURRENT open work (pending + running), not the all-time total.
+    const m = ag.planner_mode ?? "off";
+    const open = (ag.research_tasks_pending ?? 0) + (ag.research_tasks_running ?? 0);
+    return { value: `${open} tasks`, sub: on(m) ? (open > 0 ? "in queue" : "queue clear") : "paused", enabled: on(m), mode: m };
   }
-  if (def.id === "researchers" && (ag.researcher_mode === "advisory" || ag.researcher_mode === "active")) {
-    const pending = ag.research_tasks_pending ?? 0;
-    return { dot: MODE_DOT[ag.researcher_mode] ?? "bg-slate-400", status: ag.researcher_mode,
-             value: `${ag.research_tasks ?? 0} tasks`, sub: pending > 0 ? `${pending} investigating` : "findings ready" };
+  if (def.id === "researchers") {
+    // CURRENT open tasks (pending + running) — running is what they're actively working.
+    const m = ag.researcher_mode ?? "off";
+    const running = ag.research_tasks_running ?? 0;
+    const open = (ag.research_tasks_pending ?? 0) + running;
+    const sub = running > 0 ? `${running} investigating` : open > 0 ? `${open} queued` : "idle — queue clear";
+    return { value: `${open} tasks`, sub: on(m) ? sub : "paused", enabled: on(m), mode: m };
+  }
+  if (def.id === "experiments") {
+    const m = ag.experiments_mode ?? "off";
+    const running = ag.experiments_running ?? 0;
+    return { value: `${ag.experiments_total ?? 0} runs`, sub: on(m) ? (running > 0 ? `${running} in flight` : "idle — awaiting a request") : "paused", enabled: on(m), mode: m };
+  }
+  if (def.id === "critic") {
+    const m = ag.critic_mode ?? "off";
+    return { value: `${ag.critic_verdicts ?? 0} verdicts`, sub: on(m) ? "challenging high-signal findings" : "paused", enabled: on(m), mode: m };
+  }
+  if (def.id === "gate-promotion") {
+    // The direction gate is LIVE: approved in-flight vs budget; the novelty adjudicator feeds it.
+    const m = ag.novelty_mode ?? "off";
+    return { value: `${ag.approved ?? 0}/${ag.gate_budget ?? 0} approved`, sub: on(m) ? "adjudicate → approve · hold" : "adjudicator paused", enabled: true, mode: m };
   }
   return null;
 }
@@ -344,29 +459,31 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
 export function DormantNode({ data }: NodeProps<FN>) {
   const { def, ariadne } = data;
   const lv = dormantLive(def, ariadne);
+  const { state, ago, series } = useNodeMeter(data.def.id, lv?.enabled ?? false);
   if (lv) {
     return (
-      <div className="flex h-full w-full cursor-pointer flex-col rounded-node border border-slate-200 bg-white/90 p-3 shadow-card backdrop-blur transition hover:shadow-panel">
+      <div className={cx("flex h-full w-full cursor-pointer flex-col rounded-node border border-slate-200 bg-white/90 p-3 shadow-card backdrop-blur transition hover:shadow-panel", busyRing(state))}>
+        <NodeBubble nodeId={def.id} />
         <NodeHandles />
-        <div className="flex items-center justify-between">
+        <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
-            <IconTile icon={def.icon} tone="violet" />
+            <IconTile icon={def.icon} tone={lv.enabled ? "violet" : "slate"} />
             <div className="min-w-0">
               <div className="truncate text-[12px] font-semibold leading-tight text-slate-800">{def.title}</div>
-              <div className="truncate text-[10px] text-slate-400">{def.sub}</div>
+              <div className="truncate text-[10px] text-slate-400">{def.sub}{lv.mode ? ` · ${lv.mode}` : ""}</div>
             </div>
           </div>
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500">
-            <span className={cx("h-1.5 w-1.5 rounded-full", lv.dot)} /> {lv.status}
-          </span>
+          <ActivityBadge state={state} ago={ago} />
         </div>
         <div className="mt-2 text-xl font-semibold tabular-nums text-slate-900">{lv.value}</div>
         <div className="text-[10px] text-slate-400">{lv.sub}</div>
+        <ActivityMeter series={series} state={state} className="mt-auto h-3 pt-1.5" />
       </div>
     );
   }
   return (
     <div className="flex h-full w-full cursor-pointer flex-col rounded-node border border-dashed border-slate-200 bg-white/45 p-3 transition hover:bg-white/70">
+      <NodeBubble nodeId={def.id} />
       <NodeHandles />
       <div className="flex items-center justify-between">
         <div className="flex min-w-0 items-center gap-2">

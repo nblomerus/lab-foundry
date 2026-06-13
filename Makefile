@@ -190,10 +190,17 @@ mimir-firstlight:
 seed-corpus:
 	python -m ops.seed_corpus $(ARGS)
 
+# Build the pinned, reproducible image the Quartermaster runs experiments in
+# (CUDA + the scientific stack). One-time before the first experiment; re-run to
+# refresh. Tag matches EXPERIMENT_IMAGE (default labfoundry-experiment:py311).
+EXPERIMENT_IMAGE ?= labfoundry-experiment:py311
+experiment-image:
+	docker build -f docker/experiment.Dockerfile -t $(EXPERIMENT_IMAGE) .
+
 api:
 	$(VENV_PYTHON) -m uvicorn api.main:app --host 0.0.0.0 --port $(API_PORT) --reload
 
-.PHONY: web web-install dev api harness bootstrap mimir-firstlight seed-corpus
+.PHONY: web web-install dev api harness bootstrap mimir-firstlight seed-corpus experiment-image
 
 web-install:
 	cd web && $(WEB_ENV) npm install

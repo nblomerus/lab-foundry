@@ -40,30 +40,42 @@ from state.client import PostgresClient
 # =========================================================================
 
 SEED_PROBLEM = """\
-Discover and rigorously investigate a promising, under-explored direction in
-machine learning / AI research, using the Library (a large corpus of arXiv
-papers) as the evidence base. There is no predetermined topic and no deadline:
-self-discover where the leverage is, frame falsifiable claims, and establish
-novel, well-supported findings — not a survey. The output is defensible
-knowledge, earned against adversarial scrutiny.
+Establish decision-grade, reproducible knowledge for building AI systems on
+ACCESSIBLE hardware — the compute most teams actually have: a single consumer
+GPU, small open models (≤~32B), and cloud LLM APIs, NOT a data centre. For the
+methods practitioners actually deploy — quantization, fine-tuning / LoRA,
+retrieval-augmented generation, prompting and agentic scaffolding, sampling and
+inference-time techniques, classical ML on tabular data — discover what ACTUALLY
+works: which claimed gains hold, on which tasks, at what cost in accuracy /
+latency / memory, and where the literature's claims fail to transfer to this
+regime. Each direction is a PAPER-SHAPED CONTRIBUTION — a novel, falsifiable
+finding settled by a small controlled experiment on the lab's own hardware — NOT
+a survey. The lab's edge is not scale; it is tireless, controlled, reproducible
+experimentation that practitioners can re-run.
 """
 
 SEED_STANCE = """\
-Demanding about rigour and evidence. Allergic to hype, hand-wavy claims,
-p-hacking, cherry-picked benchmarks, and incremental deltas dressed as
-breakthroughs. Pursue questions where a clear, falsifiable answer would
-actually change how practitioners build systems. Quality of evidence over
-volume of output; one well-supported finding is worth more than ten shallow
-ones. A claim that cannot be tested is not worth making.
+Demanding about rigour, significance, and reproducibility. Every direction must
+clear a SIGNIFICANCE bar: a clear, falsifiable answer must change a REAL decision
+a NAMED practitioner faces — which technique to ship, which config to deploy,
+which published claim to trust. Novelty and "it's an under-explored gap" are
+NECESSARY, not sufficient: a gap nobody would act on the answer to is not worth
+the compute. Allergic to hype, hand-wavy claims, p-hacking, cherry-picked
+benchmarks, and incremental deltas dressed as breakthroughs. One reproduced,
+decision-changing finding is worth more than ten novel-but-inconsequential ones.
+A claim that cannot be tested — or that no one would act on — is not worth making.
 """
 
 SEED_SUCCESS = """\
-A claim that survives adversarial scrutiny: reproducible evidence, a quantified
-effect, honestly-stated limitations, and citations into the Library. Success is
-a defensible finding — not a deadline met. There is no timeline; the lab is
-judged on the rigour and novelty of what it establishes. The watcher provides
-only infrastructure (compute, corpus, services) and does NOT make research
-decisions, judge quality, or participate in the work.
+A claim that survives adversarial scrutiny AND would change how a practitioner
+builds systems: reproducible on the lab's own hardware, a quantified effect with
+honestly-stated limitations, citations into the Library, and a one-line "so what"
+naming WHO acts on the answer and what they do differently. Success is a
+defensible, publishable, decision-changing finding — not a deadline met, and not
+a survey of a gap. There is no timeline; the lab is judged on the significance,
+novelty, and reproducibility of what it establishes. The watcher provides only
+infrastructure (compute, corpus, services) and does NOT make research decisions,
+judge quality, or participate in the work.
 """
 
 

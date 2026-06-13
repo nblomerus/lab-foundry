@@ -12,6 +12,7 @@ from __future__ import annotations
 
 DIMENSIONS = [
     "novelty",
+    "impact",
     "feasibility",
     "evidence_availability",
     "paper_potential",
@@ -23,14 +24,15 @@ DIMENSIONS = [
 ]
 
 WEIGHTS = {
-    "novelty": 0.20,
-    "paper_potential": 0.18,
-    "differentiation": 0.14,
+    "impact": 0.20,  # significance — does a clear answer change a real decision (co-leads with novelty)
+    "novelty": 0.18,
     "feasibility": 0.12,
-    "evidence_availability": 0.10,
-    "reviewer_interest": 0.10,
+    "evidence_availability": 0.12,
+    "differentiation": 0.10,
+    "paper_potential": 0.08,
     "technical_depth": 0.08,
     "lab_alignment": 0.05,
+    "reviewer_interest": 0.04,  # was 0.10 — publishability shouldn't outrank real-world impact
     "cost_efficiency": 0.03,
 }  # sums to 1.0
 

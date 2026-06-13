@@ -250,3 +250,194 @@ async def test_concurrent_revive_passes_do_not_double_emit():
         disp._revive_stranded_tasks(conn),
     )
     assert conn.insert_count == 10, f"double-emit: expected 10 triggers, got {conn.insert_count}"
+
+
+# --------------------------------------------------------------------------
+# Per-ingest-agent slot reservation (Mimir can't starve the other lanes)
+# --------------------------------------------------------------------------
+
+
+class _MultiConn:
+    """Fake conn returning a per-id event so different ids dispatch different handlers."""
+
+    def __init__(self, events: dict[int, dict], executed: list[str]):
+        self._events = events
+        self._executed = executed
+
+    async def fetchrow(self, query: str, *args):
+        if "FROM events" in query:
+            ev = self._events.get(args[0])
+            return dict(ev) if ev else None
+        return None
+
+    async def fetchval(self, query: str, *args):
+        return None
+
+    async def execute(self, query: str, *args):
+        self._executed.append(query)
+        return "UPDATE 1"
+
+
+class _MultiPool:
+    def __init__(self, events: dict[int, dict]):
+        self._events = events
+        self.executed: list[str] = []
+
+    def acquire(self):
+        return _AcquireCtx(_MultiConn(self._events, self.executed))
+
+
+async def _always_active(pool, agent):  # patches get_agent_mode so the mode dial never gates
+    return "active"
+
+
+@pytest.mark.asyncio
+async def test_per_agent_cap_prevents_one_lane_starving_others(monkeypatch):
+    # AGENT_CONCURRENCY caps the BULK library-intake lane at 2 of the 3 global slots, so >=1
+    # always stays free for the experiment lane even while bulk intake floods the queue. (Scout
+    # source.discovered with no lab_* source_kind routes to the 'bulk' lane via _lane_for.)
+    monkeypatch.setattr("harness.dispatch.get_agent_mode", _always_active)
+    monkeypatch.setenv("AGENT_CONCURRENCY", "bulk=2")
+
+    events: dict[int, dict] = {}
+    for i in range(1, 9):  # 8 mimir ingest events, all firing at once
+        events[i] = {
+            "id": i,
+            "event_type": "source.discovered",
+            "target_type": "source",
+            "target_id": i,
+            "payload": {},
+            "status": "pending",
+        }
+    for i in range(101, 104):  # 3 experiment-lane events
+        events[i] = {
+            "id": i,
+            "event_type": "experiment.completed",
+            "target_type": "experiment",
+            "target_id": i,
+            "payload": {},
+            "status": "pending",
+        }
+
+    disp = Dispatcher(pool=_MultiPool(events), max_concurrent_handlers=3)
+    assert disp._agent_caps.get("bulk") == 2
+
+    mimir_live = mimir_peak = 0
+    exp_ran_while_mimir_saturated = False
+
+    async def mimir_h(ev, d):
+        nonlocal mimir_live, mimir_peak
+        mimir_live += 1
+        mimir_peak = max(mimir_peak, mimir_live)
+        await asyncio.sleep(0.05)  # hold the slot so the pool stays under pressure
+        mimir_live -= 1
+        return None
+
+    mimir_h.__module__ = "agents.mimir.handler"  # agent_of -> "mimir"; lane -> "bulk" (capped at 2)
+
+    async def exp_h(ev, d):
+        nonlocal exp_ran_while_mimir_saturated
+        if mimir_live >= 2:  # mimir is at its cap, yet we still got a slot
+            exp_ran_while_mimir_saturated = True
+        return None
+
+    exp_h.__module__ = "agents.experiments.handler"  # agent_of -> "experiments" (uncapped)
+
+    disp.register("source.discovered", mimir_h)
+    disp.register("experiment.completed", exp_h)
+
+    await asyncio.gather(*[disp._process_event(i) for i in list(range(1, 9)) + list(range(101, 104))])
+
+    assert mimir_peak <= 2, f"bulk exceeded its cap: peaked at {mimir_peak}"
+    assert mimir_peak == 2, "bulk never reached its cap; test wouldn't catch a regression"
+    assert exp_ran_while_mimir_saturated, "experiment lane was starved while bulk saturated the pool"
+
+
+@pytest.mark.asyncio
+async def test_first_party_ingest_not_starved_by_bulk_backlog(monkeypatch):
+    # The whole point of the lane split: a flood of BULK source.discovered (scout pushes) must not
+    # starve a FIRST-PARTY source.discovered (a lab_finding) — they ride different semaphores.
+    monkeypatch.setattr("harness.dispatch.get_agent_mode", _always_active)
+    monkeypatch.setenv("AGENT_CONCURRENCY", "bulk=2,mimir=2")
+
+    events: dict[int, dict] = {}
+    for i in range(1, 7):  # 6 bulk scout pushes flooding the bulk lane
+        events[i] = {
+            "id": i,
+            "event_type": "source.discovered",
+            "target_type": "source",
+            "target_id": i,
+            "payload": {"source": {"source_kind": "arxiv"}},
+            "status": "pending",
+        }
+    events[200] = {  # one first-party finding ingest
+        "id": 200,
+        "event_type": "source.discovered",
+        "target_type": "source",
+        "target_id": 200,
+        "payload": {"source": {"source_kind": "lab_finding"}},
+        "status": "pending",
+    }
+
+    disp = Dispatcher(pool=_MultiPool(events), max_concurrent_handlers=3)
+    bulk_live = 0
+    first_party_ran_while_bulk_saturated = False
+
+    async def ingest_h(ev, d):
+        nonlocal bulk_live, first_party_ran_while_bulk_saturated
+        sk = (ev.get("payload") or {}).get("source", {}).get("source_kind", "")
+        if sk.startswith("lab_"):
+            if bulk_live >= 2:  # the bulk lane is at its cap, yet the lab ingest still got a slot
+                first_party_ran_while_bulk_saturated = True
+            return None
+        bulk_live += 1
+        await asyncio.sleep(0.05)  # hold the bulk slot so the lane stays saturated
+        bulk_live -= 1
+        return None
+
+    ingest_h.__module__ = "agents.mimir.handler"  # agent 'mimir'; lane = bulk or mimir per source_kind
+    disp.register("source.discovered", ingest_h)
+
+    await asyncio.gather(*[disp._process_event(i) for i in list(range(1, 7)) + [200]])
+
+    assert first_party_ran_while_bulk_saturated, "first-party lab ingest was starved behind the bulk backlog"
+
+
+@pytest.mark.asyncio
+async def test_researcher_pool_caps_at_its_configured_size(monkeypatch):
+    # AGENT_CONCURRENCY="researcher=4" gives researchers a dedicated pool of 4: up
+    # to 4 run in parallel (each on its own task), never more, even with 10 queued.
+    monkeypatch.setattr("harness.dispatch.get_agent_mode", _always_active)
+    monkeypatch.setenv("AGENT_CONCURRENCY", "researcher=4")
+
+    events = {
+        i: {
+            "id": i,
+            "event_type": "task.created",
+            "target_type": "task",
+            "target_id": i,
+            "payload": {},
+            "status": "pending",
+        }
+        for i in range(1, 11)  # 10 research tasks fire at once
+    }
+    disp = Dispatcher(pool=_MultiPool(events), max_concurrent_handlers=8)
+    assert disp._agent_caps.get("researcher") == 4
+
+    live = peak = 0
+
+    async def res_h(ev, d):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.03)
+        live -= 1
+        return None
+
+    res_h.__module__ = "agents.researcher.grounded_handler"  # agent_of -> "researcher"
+    disp.register("task.created", res_h)
+
+    await asyncio.gather(*[disp._process_event(i) for i in range(1, 11)])
+
+    assert peak <= 4, f"researcher pool exceeded its cap of 4: peaked at {peak}"
+    assert peak == 4, "researcher pool never reached 4; test wouldn't catch a regression"

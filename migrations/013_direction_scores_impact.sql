@@ -1,0 +1,12 @@
+-- 013_direction_scores_impact.sql — add the IMPACT (significance) dimension.
+--
+-- Ariadne now scores whether a CLEAR, falsifiable answer would change how
+-- practitioners build ML/AI systems (the decision value), weighted in
+-- agents/ariadne/scoring.py to co-lead with novelty, and the gate
+-- (harness/ariadne_pace.py) enforces an impact floor so the lab spends compute on
+-- research that MATTERS, not merely on under-explored gaps.
+--
+-- Additive + idempotent + nullable: legacy rows keep impact = NULL and are
+-- excluded by the gate's `impact >= floor` until they're re-deliberated (the
+-- desired fail-safe — old gap-driven directions don't auto-approve under the new bar).
+ALTER TABLE public.direction_scores ADD COLUMN IF NOT EXISTS impact smallint;

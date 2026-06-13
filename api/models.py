@@ -125,6 +125,7 @@ class CostTrackingOut(BaseModel):
     workhorse_calls: int
     fast_calls: int
     code_calls: int
+    experiment_calls: int
     total_cost_usd: float
     cap_reached: bool
 

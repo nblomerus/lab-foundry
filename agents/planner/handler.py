@@ -1,8 +1,11 @@
 """
 Planner handler — triggered by 'queue.empty' events for the research department.
 
-When the research queue drains, the Planner generates 4-16 new tasks across
-the active claims to keep the swarm fed.
+When the research queue drains, the Planner generates 4-16 new tasks to keep
+the swarm fed — but ONLY against gate-approved, live direction claims. The
+market-era behaviour (refill against ANY active claim) bypassed the approval
+gate: observed live as pre-adjudication research on brand-new directions and
+orphan task floods on mission/finding claims no closure ladder owns.
 
 Installs a 10-minute cooldown so multiple queue.empty events in rapid
 succession (e.g., from concurrent task transitions) don't re-fire the Planner.
@@ -20,8 +23,26 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from harness.curator import RECIPES, PromptLayer, Recipe
+from harness.dispatch import ACTIVE_CLAIM
 
 log = logging.getLogger(__name__)
+
+
+async def _gate_approved_direction_ids(pool, claim_ids: list[int]) -> set[int]:
+    """The refill lane's GATE filter: of the claim ids the planner proposed tasks for,
+    return only those that are gate-approved, live DIRECTION claims. Whatever the LLM
+    proposes, ungated work never reaches the queue through this lane."""
+    ids = sorted({int(c) for c in claim_ids})
+    if not ids:
+        return set()
+    rows = await pool.fetch(
+        "SELECT c.id FROM claims c "
+        "JOIN direction_gate dg ON dg.claim_id = c.id AND dg.status = 'approved' "
+        "WHERE c.id = ANY($1::bigint[]) AND c.claim_kind = 'direction' AND c.status = ANY($2)",
+        ids,
+        list(ACTIVE_CLAIM),
+    )
+    return {r["id"] for r in rows}
 
 
 # -------------------------------------------------------------------------
@@ -83,7 +104,7 @@ created. The PI needs to spawn new claims before research can resume.
             )
         else:
             f_lines = "  (no findings yet)"
-        blocks.append(f"### T{claim.id} (conf {claim.confidence:.2f}): {claim.claim}\n{f_lines}")
+        blocks.append(f"### T{claim.id} (conf {claim.confidence:.2f}): {claim.statement}\n{f_lines}")
 
     content = f"""## Queue refill — research queue is empty
 
@@ -177,8 +198,21 @@ async def handle_queue_empty(event: dict, dispatcher) -> dict | None:
                 "critique_confidence": confidence,
             }
 
+        allowed = await _gate_approved_direction_ids(dispatcher.pool, [t.claim_id for t in tasks])
+        created = stuck_skipped = gate_skipped = 0
+        stuck_cache: dict[int, bool] = {}
         async with dispatcher.pool.acquire() as conn, conn.transaction():
             for t in tasks:
+                if t.claim_id not in allowed:
+                    gate_skipped += 1
+                    continue
+                # Don't refill a thin_corpus-STUCK direction — let the closure ladder / experiment
+                # lane handle it (the v2 path bypasses persist_plan, so apply the same gate here).
+                if t.claim_id not in stuck_cache:
+                    stuck_cache[t.claim_id] = await dispatcher.state.direction_is_thin_stuck(t.claim_id)
+                if stuck_cache[t.claim_id]:
+                    stuck_skipped += 1
+                    continue
                 await conn.execute(
                     """
                         INSERT INTO tasks (
@@ -193,12 +227,18 @@ async def handle_queue_empty(event: dict, dispatcher) -> dict | None:
                     json.dumps({"query": t.query, "sources": t.sources}),
                     t.priority,
                 )
+                created += 1
 
+        if gate_skipped:
+            log.info("Planner v2: skipped %d task(s) for ungated / non-direction claim(s)", gate_skipped)
+        if stuck_skipped:
+            log.info("Planner v2: skipped %d task(s) for thin_corpus-stuck direction(s)", stuck_skipped)
         return {
-            "tasks_created": len(tasks),
+            "tasks_created": created,
             "run_id": run_id,
             "reasoning": summary,
             "critique_confidence": confidence,
+            "gate_skipped": gate_skipped,
         }
 
     # Legacy single-shot path.
@@ -221,8 +261,13 @@ async def handle_queue_empty(event: dict, dispatcher) -> dict | None:
             "reasoning": planned.reasoning,
         }
 
+    allowed = await _gate_approved_direction_ids(dispatcher.pool, [t.claim_id for t in planned.tasks])
+    created = gate_skipped = 0
     async with dispatcher.pool.acquire() as conn, conn.transaction():
         for t in planned.tasks:
+            if t.claim_id not in allowed:
+                gate_skipped += 1
+                continue
             await conn.execute(
                 """
                     INSERT INTO tasks (
@@ -237,9 +282,13 @@ async def handle_queue_empty(event: dict, dispatcher) -> dict | None:
                 json.dumps({"query": t.query, "sources": t.sources}),
                 t.priority,
             )
+            created += 1
 
+    if gate_skipped:
+        log.info("Planner: skipped %d task(s) for ungated / non-direction claim(s)", gate_skipped)
     return {
-        "tasks_created": len(planned.tasks),
+        "tasks_created": created,
         "run_id": run_id,
         "reasoning": planned.reasoning,
+        "gate_skipped": gate_skipped,
     }

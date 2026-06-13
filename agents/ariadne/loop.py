@@ -36,27 +36,75 @@ ARIADNE_MODEL = os.environ.get("ARIADNE_MODEL", os.environ.get("DEEPSEEK_MODEL",
 
 # The lab's compute envelope — so Ariadne frames directions that actually FIT the hardware
 # instead of chasing data-centre problems. Overridable by env (ARIADNE_LAB_CONSTRAINTS).
+# The sandbox's model access is CONDITIONAL: with the inference broker up
+# (EXPERIMENT_LLM_BROKER), local-model behaviour is genuinely testable; without it, any
+# pretrained-model direction would force the designer to simulate — so it's forbidden.
+_SANDBOX_LLM_ON = os.environ.get("EXPERIMENT_LLM_BROKER", "").lower() in {"on", "1", "true"}
+_SANDBOX_LLM_MODELS = os.environ.get(
+    "EXPERIMENT_LLM_MODELS",
+    "mistral:7b-instruct-q4_K_M, qwen2.5:14b-instruct-q4_K_M, qwen2.5-coder:7b, nomic-embed-text",
+)
+_SANDBOX_MODEL_CLAUSE = (
+    (
+        "- The sandbox HAS a brokered LOCAL-MODEL endpoint: inference-time behaviour of these local "
+        f"models IS testable — {_SANDBOX_LLM_MODELS} (≤7B fast, 14B moderate, 27B+ slow). Directions "
+        "about sampling/decoding, self-consistency, calibration, prompt-format effects, or embedding "
+        "geometry OF THESE MODELS are fair game; probe inputs come from the mounted benchmark pack "
+        "or are generated in-code. Still NOT testable: fine-tuning or training pretrained weights, "
+        "models beyond the local zoo, web-scale benchmarks or internet-fetched datasets.\n"
+    )
+    if _SANDBOX_LLM_ON
+    else (
+        "DO NOT propose directions whose decisive test needs a PRETRAINED model's behaviour — sampling/"
+        "decoding strategies on 7B+ LLMs, quantization of pretrained nets, prompting or agentic "
+        "scaffolding, LoRA fine-tunes, web-scale retrieval benchmarks. The sandbox cannot run them; "
+        "the lab would be forced to simulate the outcome, which is fabricated evidence. If such a "
+        "direction is irresistible, score feasibility 1 and expect it to be held.\n"
+    )
+)
 LAB_CONSTRAINTS = os.environ.get("ARIADNE_LAB_CONSTRAINTS") or (
     "This is a SMALL autonomous lab, NOT a data centre. Compute envelope:\n"
-    "- LLM inference via DeepSeek (cloud API) + local Ollama models up to ~32B (a single modest GPU; >14B is slow).\n"
-    "- Embeddings + hybrid retrieval over a ~46k-document certified corpus.\n"
-    "- Light CPU / single-GPU analysis and small, reproducible experiments.\n"
-    "NOT available: large-scale training or fine-tuning, multi-GPU / data-centre compute, "
-    "pretraining foundation models, or huge proprietary datasets.\n"
-    "So FAVOUR: inference-time methods, prompting / agentic techniques, evaluation & benchmarking, "
-    "analysis of existing literature and released models, methodology, and small reproducible studies. "
+    "- LLM inference (DeepSeek cloud + local Ollama) serves the lab's AGENTS — reading, reasoning, "
+    "writing. The experiment sandbox reaches models ONLY as stated below.\n"
+    "- EXPERIMENTS run in an OFFLINE sandbox: no network. Available stack: "
+    "numpy / scipy / pandas / scikit-learn / xgboost / statsmodels / torch "
+    "(CPU + a single modest GPU); classical models are built and trained FROM SCRATCH inside the run.\n"
+    "- DATA — REAL FIRST. The sandbox mounts a read-only OFFLINE pack of REAL, license-clean datasets "
+    "at /data: REAL TABULAR sets for classical ML (adult income, wine-quality, california-housing, "
+    "forest-covertype) AND text/LLM benchmarks (GSM8K, TruthfulQA, BoolQ, HumanEval, MMLU, ARC, "
+    "HellaSwag). PREFER grounding a direction's decisive test in one of these real datasets — name it "
+    "in each hypothesis's dataset_plan. Synthetic / built-in toy data is a JUSTIFIED FALLBACK for "
+    "controlled known-ground-truth or optimisation-dynamics studies, NOT the default. A direction "
+    "testable on a REAL dataset is far stronger than one that can only be probed synthetically.\n"
+    f"{_SANDBOX_MODEL_CLAUSE}"
+    "- Embeddings + hybrid retrieval over a certified corpus (for LITERATURE grounding, not experiments).\n"
+    "FAVOUR directions a sandbox experiment can SETTLE TODAY on a REAL /data dataset — a falsifiable "
+    "claim with a measurable threshold, decided by code that outputs a metric: classical ML (GPs, "
+    "kernels, SVMs, XGBoost, calibration, uncertainty) on the real tabular sets, small FROM-SCRATCH "
+    "torch models (optimization dynamics, architecture ablations, generalization), and algorithmic / "
+    "statistical claims (sampling, estimators, bandits, retrieval-scoring math).\n"
+    "DO NOT frame META directions about the lab's OWN machinery — hypothesis-generation, "
+    "retrieval-augmented-LLM 'methodology', 'evidence packs', or literature surveys. The lab STUDIES "
+    "ml/ai methods; it does NOT study how it does research. 'Analyse the literature on X' is NOT a "
+    "direction; 'method X beats baseline Y on metric Z by >=delta under setting S' IS.\n"
     "AVOID directions that REQUIRE training large models or data-centre-scale resources — score their "
     "feasibility and cost_efficiency LOW, or re-aim at a lighter, differentiated angle that fits this hardware."
 )
 
 _SYSTEM = """You are Ariadne, the Principal Investigator of an autonomous AI research lab.
-You set strategy — you do NOT execute. Your job:
-1. Frame the research MISSION from the seed problem.
-2. Propose 3-5 candidate DIRECTIONS, each a falsifiable bet ("attack X via approach Y").
+You set strategy — you do NOT execute. Each direction must be a PAPER-SHAPED CONTRIBUTION
+that clears THREE bars together: it MATTERS (a clear answer changes a real decision), it is
+NOVEL (a new finding/method, not a confirmation), and it is PUBLISHABLE. Your job:
+1. Frame the research MISSION from the seed problem and its stance.
+2. For EACH direction, LEAD WITH THE STAKES: in one sentence, the real build/deploy DECISION a
+   clear answer changes, WHO acts on it (a named practitioner / system-builder), and what it
+   settles or saves — put this in `stakes`. A direction no one would change behaviour on, however
+   novel, is NOT worth running. Then state it as a falsifiable bet ("attack X via approach Y").
 3. Ground each direction's NOVELTY in the PRIOR ART provided — name the SPECIFIC gap
-   (what existing work misses, or where it's weak). Do not assert novelty; cite the gap.
-   Populate grounded_in with the EXACT paper titles from the PRIOR ART shown that
-   justify the gap. Use only titles that actually appear above; never invent one.
+   (what existing work misses, or where it's weak). A gap is NECESSARY but NOT SUFFICIENT:
+   pursue it ONLY when filling it would also change how practitioners build systems. Do not
+   assert novelty; cite the gap. Populate grounded_in with EXACT paper titles from the PRIOR ART
+   shown that justify the gap. Use only titles that actually appear above; never invent one.
 4. For each direction give claim_goals (expectation, kill_condition, novelty_target,
    next_milestone, priority_hint), kill_conditions, and reviewer_risks (weak evaluation,
    weak baselines, LLM-judge bias, reproducibility, novelty concerns).
@@ -72,9 +120,11 @@ Be sharp, concrete, and honest about uncertainty. Output ONLY JSON."""
 _SCHEMA_HINT = """Output JSON with exactly these keys:
 {
  "mission_frame": str,
- "directions": [ { "title": str, "statement": str, "novelty_rationale": str,
+ "directions": [ { "title": str, "statement": str,
+   "stakes": "the real DECISION a clear answer changes + WHO acts on it (named actor) + what it settles",
+   "novelty_rationale": str,
    "grounded_in": [str],
-   "scores": { "novelty": 1-5, "feasibility": 1-5, "evidence_availability": 1-5,
+   "scores": { "novelty": 1-5, "impact": 1-5, "feasibility": 1-5, "evidence_availability": 1-5,
      "paper_potential": 1-5, "reviewer_interest": 1-5, "technical_depth": 1-5,
      "differentiation": 1-5, "cost_efficiency": 1-5, "lab_alignment": 1-5, "rationale": str },
    "claim_goals": [ { "expectation": str, "kill_condition": str,
@@ -122,23 +172,39 @@ def _lesson_when(v) -> str:
     return str(v)
 
 
+# The lesson ids the LAST recall injected — so the handler can record lesson_applications
+# for the run that consumed them (the Curator/Router path records its own; Ariadne bypasses
+# it, which left her lessons unjudgeable: 0 promotions ever). Single-flight is safe: the
+# pacemaker emits at most one deliberate/reflect at a time and never stacks pending ones.
+LAST_RECALLED_LESSON_IDS: list[int] = []
+
+
 async def recall_lessons(pool, *, limit: int = 10) -> str:
     """Ariadne's STANDING LESSONS — reflection's output fed back as deliberation input
     (the diagram's 'Past Lessons & Reflections'). Empty string if none / unavailable."""
+    LAST_RECALLED_LESSON_IDS.clear()
     if pool is None:
         return ""
     try:
         rows = await pool.fetch(
-            "SELECT lesson_text, applies_when, status FROM lessons "
-            "WHERE applies_to_invocation IN ('ariadne.deliberate', 'ariadne.reflect') "
-            "AND status IN ('active', 'probationary') "
-            "ORDER BY (status = 'active') DESC, confidence DESC LIMIT $1",
+            "SELECT l.id, l.lesson_text, l.applies_when, l.status "
+            "FROM lessons l LEFT JOIN LATERAL ("
+            "  SELECT count(*) AS supp, max(created_at) AS last_app FROM lesson_applications la "
+            "  WHERE la.lesson_id = l.id AND la.outcome = 'supportive'"
+            ") s ON true "
+            "WHERE l.applies_to_invocation IN ('ariadne.deliberate', 'ariadne.reflect') "
+            "AND l.status IN ('active', 'probationary') "
+            # active first, then most- / most-recently-reinforced, then confidence — so promoted and
+            # re-derived lessons win the limited recall window over one-off probationary noise.
+            "ORDER BY (l.status = 'active') DESC, COALESCE(s.supp, 0) DESC, "
+            "s.last_app DESC NULLS LAST, l.confidence DESC LIMIT $1",
             limit,
         )
     except Exception:  # noqa: BLE001 — lessons are best-effort context
         return ""
     if not rows:
         return ""
+    LAST_RECALLED_LESSON_IDS.extend(r["id"] for r in rows)
     items = []
     for r in rows:
         cond = _lesson_when(r["applies_when"])
@@ -232,20 +298,32 @@ async def recall_prior_art(seed: str, *, k: int = 8, pool=None, state=None) -> t
     return "\n\n".join(parts), gaps
 
 
-async def _deliberate(seed: str, agenda: str, prior_art: str, *, model: str) -> AriadneOutput:
+async def _deliberate(
+    seed: str, agenda: str, prior_art: str, *, model: str, stance: str = "", success: str = ""
+) -> AriadneOutput:
+    bars = ""
+    if stance:
+        bars += f"# Research stance — the bar EVERY direction must clear\n{stance}\n\n"
+    if success:
+        bars += f"# What success looks like\n{success}\n\n"
     user = (
         f"# Seed problem\n{seed}\n\n"
+        f"{bars}"
         f"# Current agenda (the existing claims tree)\n{agenda}\n\n"
         f"# Grounding\n{prior_art}\n\n"
         f"# Lab capabilities & constraints (every direction MUST fit this hardware)\n{LAB_CONSTRAINTS}\n\n"
-        f"# Task\nFrame the mission and propose the direction tree. Ground your strategy in MIMIR'S "
-        f"SYNTHESIS above (the multi-hop GraphRAG read of the Library) and the FIELD MODEL: aim "
-        f"directions at the UNDER-EXPLORED GAPS Mimir flags and EMERGING areas — do not restate "
-        f"well-trodden work; treat SATURATED/DECLINING areas as saturation risks. Turn the gaps into "
-        f"DIRECTIONS (they are research opportunities, not papers to fetch); use `requests` ONLY for a "
-        f"specific paper (exact title or arxiv id) you think is genuinely missing — not for topics. "
-        f"Every direction MUST be executable within the lab's constraints above — score "
-        f"feasibility and cost_efficiency against them and do NOT propose data-centre-scale work. {_SCHEMA_HINT}"
+        f"# Task\nFrame the mission and propose the direction tree. Each direction is a PAPER-SHAPED "
+        f"CONTRIBUTION: 'We show that [novel finding] on [task], which means [a named practitioner should "
+        f"do X differently].' It must clear THREE bars together — (1) IMPACT: a clear answer changes a real "
+        f"build/deploy DECISION someone faces (state the `stakes`: the decision + WHO acts on it); (2) NOVELTY: "
+        f"a new finding/method, NOT a confirmation or survey; (3) PUBLISHABLE: a contribution worth a paper. "
+        f"Use Mimir's SYNTHESIS + the FIELD MODEL to find where this is possible, but treat 'it's an "
+        f"under-explored GAP' as NECESSARY, NOT SUFFICIENT — a gap nobody would act on the answer to is NOT "
+        f"worth running, however novel. Each direction MUST be a SUBSTANTIVE, falsifiable ML/AI claim settled "
+        f"by a REAL experiment that outputs a metric on this hardware — NOT meta-methodology about the lab's "
+        f"own pipeline and NOT a literature survey. Use `requests` ONLY for a specific missing paper (exact "
+        f"title or arxiv id), not topics. Score feasibility/cost_efficiency against the hardware; do NOT "
+        f"propose data-centre-scale work. {_SCHEMA_HINT}"
     )
     content = await _chain_complete(
         [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
@@ -258,10 +336,17 @@ async def _deliberate(seed: str, agenda: str, prior_art: str, *, model: str) -> 
 
 
 async def run_shadow(
-    state, *, model: str = ARIADNE_MODEL, focus: str | None = None, emit_conversation: bool = False
+    state,
+    *,
+    model: str = ARIADNE_MODEL,
+    focus: str | None = None,
+    feedback: str | None = None,
+    emit_conversation: bool = False,
 ) -> AriadneOutput:
     """Read seed problem + agenda, recall prior art, deliberate. WRITES NOTHING to the corpus.
-    `focus` (e.g. an injected debug request) narrows the deliberation to a topic. When
+    `focus` (e.g. an injected debug request) narrows the deliberation to a topic. `feedback`
+    carries the grader's corrective notes from a FAILED previous attempt (the handler's
+    one-shot retry) so the model fixes the actual defects instead of re-rolling blind. When
     `emit_conversation` is True (the LIVE pacemaker path), the Ariadne↔Mimir GraphRAG exchange
     is emitted (mimir.ask/mimir.answered) so the floorplan shows it; the read-only firstlight
     dry-run leaves it False so nothing is written."""
@@ -269,9 +354,12 @@ async def run_shadow(
     seed = cs.problem_statement
     if focus:
         seed = f"{seed}\n\nFOCUS THIS DELIBERATION ON: {focus}"
+    if feedback:
+        seed = f"{seed}\n\n## VALIDATION FEEDBACK — your previous agenda FAILED these checks; fix ALL of them\n{feedback}"
 
     # The agenda tree (claim_kind='mission'/'direction'/'hypothesis'). Empty on a fresh
     # lab — shadow Ariadne frames from scratch. Kept defensive: any read failure → empty.
+    claims = []
     try:
         claims = await state.get_active_claims()
         agenda = (
@@ -281,7 +369,52 @@ async def run_shadow(
     except Exception:  # noqa: BLE001
         agenda = "(empty — frame from scratch)"
 
+    # First-party experiment results on the active directions — so Ariadne re-frames over what the
+    # lab actually RAN (numbers + the researcher's narrative note), not just confidence deltas.
+    try:
+        notes = await state.get_recent_experiment_notes_for_claims([c.id for c in claims], limit=8)
+        if notes:
+            agenda += "\n\n## Experiment results so far (first-party — what the lab ran)\n" + "\n".join(
+                f"- T{n['claim_id']}: {(n.get('researcher_notes') or n.get('interpretation') or '')[:240]}" for n in notes
+            )
+    except Exception:  # noqa: BLE001 — experiment context is best-effort
+        pass
+
+    # Paper-shaped FINDINGS the lab has ESTABLISHED — its terminal conclusions (supported/refuted +
+    # so-what). Read GLOBALLY, not per-active-claim: a finding survives a re-frame but its direction
+    # bond goes inactive, so a per-claim read would show nothing right after she re-frames. This is the
+    # durable memory channel — round N+1 builds BEYOND what the lab concluded instead of re-rolling.
+    try:
+        findings = await state.get_recent_findings(limit=8)
+        if findings:
+            agenda += (
+                "\n\n## Findings the lab has ESTABLISHED (first-party — build BEYOND these, do not repeat)\n"
+                + "\n".join(
+                    f"- [{f['supported']} @{float(f['confidence'] or 0):.2f}] {f['headline']} "
+                    f"— so what: {(f.get('so_what') or '')[:160]}"
+                    for f in findings
+                )
+            )
+    except Exception:  # noqa: BLE001 — findings context is best-effort
+        pass
+
+    # Directions the INDEPENDENT adjudicator recently HELD (prior-art overlap / re-tread) — so the
+    # re-frame steers AWAY from near-duplicates instead of re-proposing them. Without this edge the
+    # lab churns deliberate→hold→agenda-exhausted→deliberate, blind to why (observed live: all live
+    # directions held, the arc never starts). Best-effort; the adjudicator side already filters too.
+    try:
+        held = await state.get_held_directions_with_rationale(limit=8)
+        if held:
+            agenda += (
+                "\n\n## Directions the adjudicator just HELD (do NOT re-propose near-duplicates of these)\n"
+                + "\n".join(f"- [held — {(h.get('rationale') or '')[:160]}] {h['statement']}" for h in held)
+            )
+    except Exception:  # noqa: BLE001 — held-context is best-effort
+        pass
+
     prior_art, _gaps = await recall_prior_art(  # gaps are embedded in prior_art
         seed, pool=state.pool, state=(state if emit_conversation else None)
     )
-    return await _deliberate(seed, agenda, prior_art, model=model)
+    return await _deliberate(
+        seed, agenda, prior_art, model=model, stance=cs.stance or "", success=cs.success_criterion or ""
+    )

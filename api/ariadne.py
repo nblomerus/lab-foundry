@@ -101,17 +101,41 @@ async def overview(request: Request) -> dict:
             "SELECT count(*) FROM events WHERE event_type = 'acquire.requested' "
             "AND emitted_at > now() - interval '24 hours'"
         )
+        # Live queue DEPTH (pending), distinct from the 24h volume above — this is the
+        # real "is Mimir backed up?" signal (bounded by acquire backpressure).
+        acquire_pending = await conn.fetchval(
+            "SELECT count(*) FROM events WHERE event_type = 'acquire.requested' AND status = 'pending'"
+        )
         # Execution-agent modes + research-task counts (floorplan Planner / Researchers nodes).
         modes = {
             r["agent_name"]: r["mode"]
             for r in await conn.fetch(
-                "SELECT agent_name, mode FROM agent_modes WHERE agent_name IN ('planner','researcher')"
+                "SELECT agent_name, mode FROM agent_modes "
+                "WHERE agent_name IN ('planner','researcher','experiments','quartermaster',"
+                "'critic','evaluation','synthesis','novelty')"
             )
         }
-        research_tasks = await conn.fetchval("SELECT count(*) FROM tasks WHERE department = 'research'")
+        critic_verdicts = await conn.fetchval("SELECT count(*) FROM critic_verdicts")
+        # Total reflects the LIVE agenda — exclude tasks belonging to retired (invalidated)
+        # directions; those are dead history (a few are kept only for experiment/finding lineage).
+        research_tasks = await conn.fetchval(
+            "SELECT count(*) FROM tasks t LEFT JOIN claims c ON c.id = t.claim_id "
+            "WHERE t.department = 'research' AND (c.status IS NULL OR c.status <> 'invalidated')"
+        )
         research_pending = await conn.fetchval(
             "SELECT count(*) FROM tasks WHERE department = 'research' AND status = 'pending'"
         )
+        research_running = await conn.fetchval(
+            "SELECT count(*) FROM tasks WHERE department = 'research' AND status = 'running'"
+        )
+        exp_running = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE status IN ('running','queued')")
+        exp_total = await conn.fetchval("SELECT count(*) FROM experiment_runs WHERE code IS NOT NULL")
+        # Convergence: directions the lab has CONCLUDED (a decisive finding → terminal result) + the
+        # total paper-shaped findings established. These accumulate permanently across re-frames.
+        concluded_directions = await conn.fetchval(
+            "SELECT count(*) FROM claims WHERE claim_kind = 'direction' AND status = 'concluded'"
+        )
+        findings_total = await conn.fetchval("SELECT count(*) FROM research_findings")
         focus = [
             r["concept_name"]
             for r in await conn.fetch(
@@ -143,10 +167,23 @@ async def overview(request: Request) -> dict:
             "gate_budget": GATE_BUDGET,
             "claims_total": claims_total,
             "acquire_requests_24h": acquire_24h,
+            "acquire_pending": acquire_pending,
             "planner_mode": modes.get("planner", "off"),
             "researcher_mode": modes.get("researcher", "off"),
             "research_tasks": research_tasks,
             "research_tasks_pending": research_pending,
+            "research_tasks_running": research_running,
+            "experiments_mode": modes.get("experiments", "off"),
+            "quartermaster_mode": modes.get("quartermaster", "off"),
+            "critic_mode": modes.get("critic", "off"),
+            "evaluation_mode": modes.get("evaluation", "off"),
+            "synthesis_mode": modes.get("synthesis", "off"),
+            "novelty_mode": modes.get("novelty", "off"),
+            "critic_verdicts": critic_verdicts,
+            "experiments_running": exp_running,
+            "experiments_total": exp_total,
+            "concluded_directions": concluded_directions,
+            "findings": findings_total,
         },
         "mission": {
             "id": mission["id"],
@@ -251,8 +288,13 @@ async def _queue_health(pool) -> dict:
         row = await conn.fetchrow(
             """
             WITH req AS (
+                -- Genuine queue only: a SUPPRESSED request (mimir paused, cooldown,
+                -- or a manual backlog clear) was SKIPPED and will never get a reply,
+                -- so it must not count as "in queue" / inflate the oldest-wait lag.
                 SELECT target_id, emitted_at FROM events
-                WHERE event_type = 'acquire.requested' AND emitted_at > now() - interval '24 hours'
+                WHERE event_type = 'acquire.requested'
+                  AND status NOT IN ('suppressed', 'failed')
+                  AND emitted_at > now() - interval '24 hours'
             ),
             pend AS (
                 SELECT r.emitted_at FROM req r
@@ -262,6 +304,7 @@ async def _queue_health(pool) -> dict:
                 (SELECT count(*) FROM pend) AS pending,
                 (SELECT EXTRACT(EPOCH FROM (now() - min(emitted_at)))::int FROM pend) AS oldest_pending_age,
                 (SELECT count(*) FROM events WHERE event_type = 'acquire.requested'
+                    AND status NOT IN ('suppressed', 'failed')
                     AND emitted_at > now() - interval '1 hour') AS requested_1h,
                 (SELECT count(*) FROM events WHERE event_type IN ('acquire.fulfilled', 'acquire.rejected')
                     AND emitted_at > now() - interval '1 hour') AS resolved_1h

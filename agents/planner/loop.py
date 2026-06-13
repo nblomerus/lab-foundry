@@ -65,7 +65,7 @@ async def _build_assess_state(ctx: dict, state, memory) -> PromptLayer:
             )
         else:
             f_lines = "  (no findings yet)"
-        blocks.append(f"### T{thesis.id} (conf {thesis.confidence:.2f}): {thesis.claim}\n{f_lines}")
+        blocks.append(f"### T{thesis.id} (conf {thesis.confidence:.2f}): {thesis.statement}\n{f_lines}")
 
     content = f"""## Assess the research portfolio
 
@@ -112,7 +112,7 @@ async def _build_propose_tasks(ctx: dict, state, memory) -> PromptLayer:
     gap_lines: list[str] = []
     for g in assessment.thesis_gaps:
         thesis = theses_by_id.get(g.thesis_id)
-        claim = thesis.claim if thesis is not None else "(unknown)"
+        claim = thesis.statement if thesis is not None else "(unknown)"
         gap_lines.append(
             f"### T{g.thesis_id} (priority {g.priority_score:.2f}, "
             f"suggested {g.suggested_task_type})\n"
@@ -165,10 +165,10 @@ async def _build_critique(ctx: dict, state, memory) -> PromptLayer:
 
     proposal_lines: list[str] = []
     for i, t in enumerate(proposal.tasks):
-        thesis = theses_by_id.get(t.thesis_id)
-        claim_snip = (thesis.claim if thesis else "(unknown)")[:80]
+        thesis = theses_by_id.get(t.claim_id)
+        claim_snip = (thesis.statement if thesis else "(unknown)")[:80]
         proposal_lines.append(
-            f"[{i}] T{t.thesis_id} ({t.task_type}, pri {t.priority}): {t.description}\n"
+            f"[{i}] T{t.claim_id} ({t.task_type}, pri {t.priority}): {t.description}\n"
             f"    query:   {t.query}\n"
             f"    sources: {t.sources}\n"
             f"    thesis:  {claim_snip}"
@@ -354,7 +354,7 @@ async def run_planner_loop(
 
     # Guard against critique returning tasks for theses that aren't active
     # (or other edge cases): filter to known thesis ids.
-    final = [t for t in critiqued.final_tasks if t.thesis_id in theses_by_id]
+    final = [t for t in critiqued.final_tasks if t.claim_id in theses_by_id]
     if len(final) < len(critiqued.final_tasks):
         log.warning(
             "planner critique returned %d tasks against unknown theses; filtered to %d",

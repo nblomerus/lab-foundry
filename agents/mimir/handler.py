@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from agents.mimir.collectors import run_discovery_sweep
 from library.ingest.fetcher import search_arxiv
+from library.ingest.first_party import ingest_first_party
 from library.ingest.pipeline import embed_and_finalize, stage_source
 from library.trust import DocMeta, classify_trust
 
@@ -337,14 +338,42 @@ async def handle_source_discovered(event: dict, dispatcher) -> dict | None:
     if not _loop_enabled():
         return None
 
-    source = (event.get("payload") or {}).get("source")
+    payload = event.get("payload") or {}
+    source = payload.get("source")
     if not source:
         log.warning("mimir: source.discovered event %s has no payload.source", event.get("id"))
         return {"skipped": True, "reason": "no source in payload"}
 
+    state = dispatcher.state
+
+    # First-party lab outputs (experiment results / datasets) carry their content
+    # in-hand on the event payload — they're never fetched or origin-vetted. Route
+    # them to the content-in-hand path (reproducibility-gated certification) BEFORE
+    # the external trust gate, which doesn't apply to the lab's own work.
+    if source.get("source_kind") in ("lab_experiment", "lab_dataset", "lab_finding", "lab_scholarship"):
+        canonical_key = source["canonical_key"]
+        doc_id = await ingest_first_party(
+            state,
+            kind=source["kind"],
+            source_kind=source["source_kind"],
+            canonical_key=canonical_key,
+            title=source.get("title") or canonical_key,
+            content=payload.get("content") or "",
+            provenance=payload.get("provenance"),
+        )
+        # Backlink the resulting doc onto the experiment row (canonical_key 'exp:<id>')
+        # so the run knows its result is in the Library. Best-effort: a missing method
+        # or malformed key never sinks the ingest.
+        if doc_id is not None and canonical_key.startswith("exp:") and hasattr(state, "set_experiment_ingested_doc"):
+            try:
+                await state.set_experiment_ingested_doc(int(canonical_key.split(":")[1]), doc_id)
+            except Exception:  # noqa: BLE001 — backlink is best-effort telemetry
+                log.exception("mimir: failed to backlink doc %s onto %s", doc_id, canonical_key)
+        return {"document_id": doc_id, "first_party": True}
+
     return await ingest_source(
         source,
-        dispatcher.state,
+        state,
         router=getattr(dispatcher, "router", None),
         curator=getattr(dispatcher, "curator", None),
         session=getattr(dispatcher, "session", None),
@@ -358,5 +387,11 @@ async def handle_sweep_requested(event: dict, dispatcher) -> dict | None:
     if not _loop_enabled():
         return None
 
-    topics = (event.get("payload") or {}).get("topics")
-    return await run_discovery_sweep(topics, dispatcher.state)
+    payload = event.get("payload") or {}
+    topics = payload.get("topics")
+    # A targeted closure scout (library.sweep_requested carrying a claim_id) asks for relevance
+    # ranking so a niche direction's sweep finds on-topic papers; the standing sweep stays newest.
+    # The claim_id rides through to the sweep's settle artifact so the closure ladder can tell
+    # "this direction's scout ran and saw N" apart from "the scout never ran".
+    sort = payload.get("sort", "submittedDate")
+    return await run_discovery_sweep(topics, dispatcher.state, sort=sort, claim_id=payload.get("claim_id"))

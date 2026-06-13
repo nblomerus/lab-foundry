@@ -131,12 +131,28 @@ async def test_refine_disposition_returns_base_when_claim_id_none():
 
 
 @pytest.mark.asyncio
-async def test_refine_disposition_escalates_when_all_already_have():
-    # >=2 ledger rows, all 'already_have' → the Library can't be enriched → corpus_exhausted
-    pool = ScriptedPool(rules=[("acquire.fulfilled", [{"status": "already_have"}, {"status": "already_have"}])])
+async def test_refine_disposition_escalates_only_after_acquire_AND_scout_exhausted():
+    # >=2 'already_have' AND a targeted scout sweep already ran for this direction → genuine gap
+    pool = ScriptedPool(
+        rules=[
+            ("acquire.fulfilled", [{"status": "already_have"}, {"status": "already_have"}]),
+            ("library.sweep_requested", 1),  # a closure scout sweep fired for this claim
+        ]
+    )
     state = make_state(pool=pool)
     assert await refine_disposition(state, 7, "thin_corpus") == "corpus_exhausted"
     assert pool.calls[0][2] == (7,)  # claim_id bound to the query
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_holds_thin_when_acquire_exhausted_but_not_scouted():
+    # 2 'already_have' but NO scout sweep yet → acquire ≠ scouting → NOT a gap → stays thin_corpus
+    # (the closure ladder will fire the targeted scout sweep before this can escalate)
+    pool = ScriptedPool(rules=[("acquire.fulfilled", [{"status": "already_have"}, {"status": "already_have"}])])
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 7, "thin_corpus") == "thin_corpus"
+    # it DID consult the scout ledger (the new gate) before holding
+    assert any("library.sweep_requested" in sql for _, sql, _ in pool.calls)
 
 
 @pytest.mark.asyncio
@@ -158,9 +174,42 @@ async def test_refine_disposition_no_escalation_when_too_few_rows():
 @pytest.mark.asyncio
 async def test_refine_disposition_no_escalation_when_no_history():
     # no claim-attributed replies yet → empty ledger → stays thin_corpus
-    pool = ScriptedPool(rules=[("acquire.fulfilled", [])])
+    pool = ScriptedPool(rules=[("library.sweep_requested", 1), ("acquire.fulfilled", [])])
     state = make_state(pool=pool)
     assert await refine_disposition(state, 7, "thin_corpus") == "thin_corpus"
+
+
+# Rule order matters: the saturation 'stuck' query embeds library.sweep_requested in a subquery, so
+# its disposition substring must be matched BEFORE the bare sweep rule (ScriptedConn = first match wins).
+@pytest.mark.asyncio
+async def test_refine_disposition_escalates_on_saturation_when_no_experiments():
+    # Scouted + acquires keep SUCCEEDING (not already_have) but >= N re-looks still thin AND no
+    # experiments settling it → declare the gap. This is the spin-breaker for claim 61's pattern.
+    pool = ScriptedPool(
+        rules=[
+            ("disposition' = 'thin_corpus'", 4),  # stuck re-looks after the sweep (>= RELOOKS)
+            ("library.sweep_requested", 1),  # a sweep ran
+            ("acquire.fulfilled", [{"status": "fulfilled"}, {"status": "fulfilled"}]),  # path-1 (already_have) fails
+            ("FROM experiment_runs", 0),  # no experiments
+        ]
+    )
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 61, "thin_corpus") == "corpus_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_refine_disposition_saturation_deferred_when_experiments_running():
+    # Same saturation, but experiments ARE completing → leave it to the experiment lane (stay thin).
+    pool = ScriptedPool(
+        rules=[
+            ("disposition' = 'thin_corpus'", 4),
+            ("library.sweep_requested", 1),
+            ("acquire.fulfilled", [{"status": "fulfilled"}, {"status": "fulfilled"}]),
+            ("FROM experiment_runs", 3),  # experiments running → don't retire
+        ]
+    )
+    state = make_state(pool=pool)
+    assert await refine_disposition(state, 61, "thin_corpus") == "thin_corpus"
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -194,12 +243,17 @@ async def test_apply_feedback_moves_confidence_on_active_claim(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_apply_feedback_clamps_new_confidence_to_unit_interval(monkeypatch):
+async def test_apply_feedback_research_ceiling_and_clamp(monkeypatch):
     monkeypatch.setattr(fb_mod, "request_acquire", _noop_acquire)
-    pool = _active_pool(0.95)
-    state = make_state(pool=pool)
-    res = await apply_feedback(state, _df(confidence_delta=0.20, dominant="supported"))
-    assert res["confidence"] == [0.95, 1.0]  # 1.15 clamped to 1.0
+    # From below: a positive literature move can't push past the 0.85 research ceiling.
+    res = await apply_feedback(make_state(pool=_active_pool(0.80)), _df(confidence_delta=0.20, dominant="supported"))
+    assert res["confidence"] == [0.8, 0.85]  # 1.0 capped at the ceiling
+    # Already above the ceiling (experiment-earned): a positive research move is HELD, not raised.
+    res2 = await apply_feedback(make_state(pool=_active_pool(0.95)), _df(confidence_delta=0.20, dominant="supported"))
+    assert res2["confidence"] == [0.95, 0.95]
+    # A negative move is never lifted by the ceiling — still clamps at the 0.0 floor.
+    res3 = await apply_feedback(make_state(pool=_active_pool(0.05)), _df(confidence_delta=-0.12, dominant="contradicted"))
+    assert res3["confidence"] == [0.05, 0.0]
 
 
 @pytest.mark.asyncio
@@ -241,12 +295,14 @@ async def test_apply_feedback_fires_acquires(monkeypatch):
 
     async def _acq(state, mreq):
         seen.append(mreq)
+        return True  # emitted (not held by backpressure)
 
     monkeypatch.setattr(fb_mod, "request_acquire", _acq)
     pool = ScriptedPool()
     state = make_state(pool=pool)
     res = await apply_feedback(state, _df(acquire_queries=["q1", "q2"]))
     assert res["acquires_fired"] == 2
+    assert "acquires_held_backpressure" not in res
     assert [m.query for m in seen] == ["q1", "q2"]
     assert all(m.requester == "researcher" and m.claim_id == 7 and m.kind == "paper" for m in seen)
     assert all(len(m.why) >= 30 for m in seen)  # AcquireRequest.why min_length=30 satisfied
@@ -274,6 +330,7 @@ async def test_apply_feedback_full_path_combines_all_effects(monkeypatch):
 
     async def _acq(state, mreq):
         seen.append(mreq)
+        return True  # emitted
 
     monkeypatch.setattr(fb_mod, "request_acquire", _acq)
     pool = _active_pool(0.5)
@@ -290,5 +347,23 @@ async def test_apply_feedback_full_path_combines_all_effects(monkeypatch):
     assert len(seen) == 1
 
 
+@pytest.mark.asyncio
+async def test_apply_feedback_records_backpressure_holds(monkeypatch):
+    # request_acquire returns False when Mimir's queue is deep → the acquires are
+    # HELD, surfaced as acquires_held_backpressure, and NOT counted as fired.
+    held = []
+
+    async def _held(state, mreq):
+        held.append(mreq)
+        return False
+
+    monkeypatch.setattr(fb_mod, "request_acquire", _held)
+    state = make_state(pool=ScriptedPool())
+    res = await apply_feedback(state, _df(acquire_queries=["q1", "q2", "q3"]))
+    assert res["acquires_held_backpressure"] == 3
+    assert "acquires_fired" not in res
+    assert len(held) == 3  # all attempted, all held
+
+
 async def _noop_acquire(state, mreq):
-    return None
+    return True

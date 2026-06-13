@@ -35,6 +35,28 @@ log = logging.getLogger(__name__)
 # Plane-2 allow-list: only these roles may ask Mimir to acquire.
 ALLOWED_REQUESTERS = frozenset({"pi", "researcher", "novelty"})
 
+# Demand-side backpressure. High-volume requesters (researchers fire 4-6 acquires
+# per direction-round across many concurrent tasks) can outrun Mimir's ingest
+# (one arXiv fetch + parse + embed apiece) and bury the queue thousands deep,
+# delaying everything else behind it — including first-party experiment-result
+# notes. When Mimir's pending acquire backlog is already at/above the limit, a
+# backpressured requester's new acquires are HELD (not emitted); the direction
+# stays thin_corpus and re-fires on its next pass once the queue has drained.
+# Curated requesters (Ariadne's agenda = "pi") ask for few, targeted sources and
+# are exempt. Self-regulating: the queue settles near ACQUIRE_BACKLOG_LIMIT
+# instead of growing unbounded. Env-tunable; set the limit to 0 to disable.
+BACKPRESSURE_REQUESTERS = frozenset(
+    a.strip() for a in os.environ.get("ACQUIRE_BACKPRESSURE_REQUESTERS", "researcher").split(",") if a.strip()
+)
+ACQUIRE_BACKLOG_LIMIT = int(os.environ.get("ACQUIRE_BACKLOG_LIMIT", "40"))
+# Direction-tied acquisitions (req.claim_id set) ARE the lab's active research demand —
+# the evidence a researcher needs to move a direction off thin_corpus. Starving them at
+# the generic limit is what kept ~90% of research stuck on thin_corpus. Now that task
+# volume is bounded upstream (planner per-direction cap + the gate budget), give the
+# active directions a much higher allowance so the lab can actually gather what it's
+# researching; untargeted asks stay at the low generic limit.
+ACQUIRE_BACKLOG_LIMIT_DIRECTION = int(os.environ.get("ACQUIRE_BACKLOG_LIMIT_DIRECTION", "150"))
+
 
 class AcquireRequest(BaseModel):
     """An agent's request for Mimir to acquire a specific source.
@@ -59,12 +81,42 @@ def _req_target_id(req: AcquireRequest) -> int:
     return int.from_bytes(hashlib.blake2b(f"{req.requester}:{key}".encode(), digest_size=7).digest(), "big")
 
 
-async def request_acquire(state, req: AcquireRequest) -> None:
+async def _acquire_backlog(state) -> int:
+    """Mimir's pending acquisition queue depth (acquire.requested awaiting ingest)."""
+    async with state.pool.acquire() as conn:
+        return (
+            await conn.fetchval(
+                "SELECT count(*) FROM events WHERE event_type = 'acquire.requested' AND status = 'pending'"
+            )
+            or 0
+        )
+
+
+async def request_acquire(state, req: AcquireRequest) -> bool:
     """The lever an allowed agent calls to ask Mimir for a source. Validates the
     requester against the allow-list and emits an `acquire.requested` event for
-    Mimir to adjudicate. Raises ValueError if the requester isn't allowed."""
+    Mimir to adjudicate. Raises ValueError if the requester isn't allowed.
+
+    Returns True if the request was emitted, False if HELD by demand-side
+    backpressure (the requester is backpressured and Mimir's queue is already at
+    the limit — see BACKPRESSURE_REQUESTERS). A held request is not an error: the
+    caller's direction stays thin_corpus and re-fires once the queue drains."""
     if req.requester not in ALLOWED_REQUESTERS:
         raise ValueError(f"requester {req.requester!r} not allowed to acquire (allow-list: {sorted(ALLOWED_REQUESTERS)})")
+    # Direction-tied asks get the higher allowance; untargeted ones the generic limit.
+    limit = ACQUIRE_BACKLOG_LIMIT_DIRECTION if req.claim_id is not None else ACQUIRE_BACKLOG_LIMIT
+    if req.requester in BACKPRESSURE_REQUESTERS and limit > 0:
+        backlog = await _acquire_backlog(state)
+        if backlog >= limit:
+            log.info(
+                "acquire backpressure: backlog=%d >= %d — holding %s request (claim=%s) %r",
+                backlog,
+                limit,
+                req.requester,
+                req.claim_id,
+                (req.query or req.arxiv_id or req.url or "")[:50],
+            )
+            return False
     await state.emit_corpus_event(
         "acquire.requested",
         target_type="acquire",
@@ -72,6 +124,7 @@ async def request_acquire(state, req: AcquireRequest) -> None:
         payload=req.model_dump(),
         dedup_key=f"acquire-{req.requester}-{_req_target_id(req)}",
     )
+    return True
 
 
 async def _resolve_candidates(req: AcquireRequest, *, n: int = 8) -> list[SourceDescriptor]:
@@ -104,12 +157,15 @@ async def _resolve_candidates(req: AcquireRequest, *, n: int = 8) -> list[Source
     if req.url:
         return [SourceDescriptor(kind=req.kind, source_kind="web", canonical_key=req.url, url=req.url, why=req.why)]
     if req.query:
-        # Walk a few pages (newest → older) so a relevant paper the scouts haven't reached can
-        # still be found, not just the newest hits the scouts already pulled.
+        # RELEVANCE-ranked, walking a few pages of the best matches. An acquire is a TARGETED
+        # fetch for a specific claim — newest-first makes a niche query fall back to the newest
+        # arXiv-WIDE submissions (random off-topic papers, which is what we observed getting
+        # ingested against a thin direction). Relevance returns on-topic hits, or genuinely
+        # nothing (→ already_have/rejected = a real gap) instead of off-topic noise.
         pages = int(os.environ.get("MIMIR_ACQUIRE_PAGES", "3"))
         out: list[SourceDescriptor] = []
         for pg in range(max(1, pages)):
-            hits = await scout_arxiv([req.query], per_topic=n, start=pg * n)
+            hits = await scout_arxiv([req.query], per_topic=n, start=pg * n, sort="relevance")
             if not hits:
                 break
             out.extend(d.model_copy(update={"why": req.why}) for d in hits)

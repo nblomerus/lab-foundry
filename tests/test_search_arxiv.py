@@ -92,6 +92,38 @@ async def test_search_arxiv_parses_fields():
 
 
 @pytest.mark.asyncio
+async def test_search_arxiv_sort_defaults_to_date_and_honors_relevance():
+    """The `sort` arg maps to arXiv's sortBy: default newest-first (standing sweep),
+    'relevance' for targeted searches (so a niche query gets on-topic, not newest arXiv-wide)."""
+    urls: list[str] = []
+
+    async def _fake_get(self, url):
+        urls.append(url)
+        return _atom_resp()
+
+    with patch.object(httpx.AsyncClient, "get", new=_fake_get):
+        await search_arxiv("all:gaussian process kernel design")  # default
+        await search_arxiv("all:gaussian process kernel design", sort="relevance")
+
+    assert "sortBy=submittedDate" in urls[0]
+    assert "sortBy=relevance" in urls[1]
+
+
+@pytest.mark.asyncio
+async def test_scout_arxiv_threads_sort_to_api():
+    urls: list[str] = []
+
+    async def _fake_get(self, url):
+        urls.append(url)
+        return _atom_resp()
+
+    with patch.object(httpx.AsyncClient, "get", new=_fake_get):
+        await scout_arxiv(["niche topic"], per_topic=5, sort="relevance")
+
+    assert urls and "sortBy=relevance" in urls[0]
+
+
+@pytest.mark.asyncio
 async def test_search_arxiv_robust_to_missing_authors():
     async def _fake_get(self, url):
         return _atom_resp()

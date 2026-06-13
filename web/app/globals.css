@@ -80,6 +80,25 @@ html, body {
 }
 .rise-in { animation: rise-in 0.35s ease-out both; }
 
+/* Breathing emerald halo — wraps an agent card while it is actively working, so
+   busy agents glow + pulse and pop out of the floorplan at a glance. */
+@keyframes busy-halo {
+  0%, 100% { box-shadow: 0 0 0 1px rgb(16 185 129 / 0.30), 0 0 8px 0 rgb(16 185 129 / 0.12); }
+  50%      { box-shadow: 0 0 0 3px rgb(16 185 129 / 0.32), 0 0 22px 4px rgb(16 185 129 / 0.34); }
+}
+.busy-halo { animation: busy-halo 1.8s ease-in-out infinite; }
+
+/* Heartbeat — the global lab-activity pulse (two quick beats then rest, like an ECG). */
+@keyframes heartbeat {
+  0%   { transform: scale(1); }
+  14%  { transform: scale(1.28); }
+  28%  { transform: scale(1); }
+  42%  { transform: scale(1.18); }
+  70%  { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+.heartbeat { animation: heartbeat 1.4s ease-in-out infinite; transform-origin: center; }
+
 ::-webkit-scrollbar         { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track   { background: transparent; }
 ::-webkit-scrollbar-thumb   { background: #cbd5e1; border-radius: 4px; }

@@ -25,6 +25,11 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "strict"
 addopts = "-ra"
+# Per-test wall-clock cap (pytest-timeout). No single test comes near this — the whole suite
+# runs in well under a minute — so it only trips on a genuine HANG, failing that one test fast
+# instead of stalling CI until the job's hard timeout. (A stale watchdog-loop test once spun
+# forever; this is the backstop so a future hang can't stall the build server again.)
+timeout = 120
 filterwarnings = [
     # Third-party noise, not actionable here: langfuse -> opentelemetry reads
     # importlib.metadata entry points via the deprecated SelectableGroups dict

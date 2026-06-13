@@ -25,9 +25,19 @@ def test_composite_bounds_and_midpoint():
 
 def test_composite_weights_novelty_above_cost():
     base = composite(_scores())
-    nov = composite(_scores(novelty=5)) - base  # novelty weight 0.20
+    nov = composite(_scores(novelty=5)) - base  # novelty weight 0.18
     cost = composite(_scores(cost_efficiency=5)) - base  # cost weight 0.03
     assert nov > cost > 0
+
+
+def test_impact_co_leads_with_novelty():
+    # impact (significance) is the top-weighted dimension — a clear answer that
+    # changes a real decision outranks publishability/novelty alone.
+    base = composite(_scores())
+    impact = composite(_scores(impact=5)) - base  # impact weight 0.20
+    nov = composite(_scores(novelty=5)) - base  # novelty weight 0.18
+    review = composite(_scores(reviewer_interest=5)) - base  # reviewer_interest weight 0.04
+    assert impact >= nov > review > 0
 
 
 def test_val_clamps_out_of_range_and_bad_types():

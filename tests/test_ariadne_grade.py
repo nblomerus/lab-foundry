@@ -28,6 +28,7 @@ from agents.ariadne.schemas import (
 # ── builders for the canned (LLM-graded) outputs ───────────────────────────────
 _VALID_SCORES = {
     "novelty": 4,
+    "impact": 4,
     "feasibility": 3,
     "evidence_availability": 4,
     "paper_potential": 3,
@@ -57,6 +58,7 @@ def _direction(
     *,
     title="Trust-weighted RRF",
     novelty_rationale="No prior work decays trust over time.",
+    stakes="RAG engineers choose whether to decay retrieval trust over time.",
     grounded_in=("A Survey of Hybrid Retrieval",),
     scores=_DEFAULT,
     claim_goals=None,
@@ -64,6 +66,7 @@ def _direction(
     return Direction(
         title=title,
         statement="Attack stale retrieval via trust-decayed RRF.",
+        stakes=stakes,
         novelty_rationale=novelty_rationale,
         grounded_in=list(grounded_in),
         scores=_scores() if scores is _DEFAULT else scores,
@@ -188,6 +191,17 @@ async def test_grade_fewer_than_three_directions_not_schema_valid(monkeypatch):
 async def test_grade_blank_novelty_rationale_breaks_schema(monkeypatch):
     _patch_search(monkeypatch, chunks=[_chunk()])
     dirs = [_direction(), _direction(), _direction(novelty_rationale="   ")]
+    rep = await grade.grade(_output(dirs))
+    assert rep.schema_valid is False
+    assert rep.passed is False
+
+
+@pytest.mark.asyncio
+async def test_grade_blank_stakes_breaks_schema(monkeypatch):
+    # A direction with no stakes has no "so what" — the significance bar is
+    # unmet, so it's not schema-valid (mirrors the novelty_rationale guard).
+    _patch_search(monkeypatch, chunks=[_chunk()])
+    dirs = [_direction(), _direction(), _direction(stakes="   ")]
     rep = await grade.grade(_output(dirs))
     assert rep.schema_valid is False
     assert rep.passed is False

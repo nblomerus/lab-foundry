@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import types
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from agents import llm
+from agents.scholarship_schemas import Hypothesis, ResearchProposal
 from harness.router import Provider
 from tests._helpers import ScriptedPool
 
@@ -356,7 +359,9 @@ async def test_record_run_persists_when_session_present(monkeypatch, set_session
         step_name="ask",
     )
     assert out == "answer"
-    inserts = [c for c in pool.calls if c[0] == "execute" and "INSERT INTO agent_runs" in c[1]]
+    # _record_run inserts via fetchval(... RETURNING id) — it captures the new run id to expose
+    # as last_run_id — so the agent_runs insert is a `fetchval` call, not `execute`.
+    inserts = [c for c in pool.calls if c[0] == "fetchval" and "INSERT INTO agent_runs" in c[1]]
     assert len(inserts) == 1
     args = inserts[0][2]
     assert args[0] == "mimir"  # agent derived from invocation_type prefix
@@ -431,3 +436,75 @@ async def test_record_run_swallows_db_exception(monkeypatch, set_session):
         step_name="ask",
     )
     assert out == "still-ok"  # observability failure swallowed
+
+
+# ── complete_validated: corrective retry + schema-alias tolerance ─────────────────
+# (research-arc robustness — a malformed first attempt self-corrects in-loop instead of
+#  failing the day-bucketed arc step for a day.)
+aio = pytest.mark.asyncio
+
+
+def _valid_proposal_json() -> str:
+    return json.dumps(
+        {
+            "title": "T",
+            "research_questions": ["rq1"],
+            "hypotheses": [{"hid": "H1", "statement": "s", "metric": "m", "threshold": "t"}],
+            "method_plan": "m" * 320,
+            "success_criteria": "concludes when X; kills when Y",
+            "body_md": "## Research Proposal\n" + ("filled-out templated proposal body. " * 40),
+        }
+    )
+
+
+def test_hypothesis_accepts_id_and_decision_aliases():
+    # the EXACT live failure shape: 'id' for hid, 'decision' for threshold
+    h = Hypothesis.model_validate({"id": "H1", "statement": "s", "metric": "acc", "decision": ">=0.1"})
+    assert h.hid == "H1" and h.threshold == ">=0.1"
+    assert h.model_dump()["hid"] == "H1"  # stored meta uses canonical names
+
+
+@aio
+async def test_complete_validated_corrective_retry(monkeypatch):
+    # first attempt: 'id' + missing threshold AND a missing required field that the alias can't fix
+    bad = json.dumps(
+        {
+            "title": "T",
+            "research_questions": ["q"],
+            "hypotheses": [{"id": "H1", "statement": "s", "metric": "m"}],
+            "method_plan": "x",
+            "success_criteria": "c",
+        }
+    )  # method_plan too short + no threshold
+    calls = {"n": 0}
+
+    async def fake_chain(messages, **kw):
+        calls["n"] += 1
+        return bad if calls["n"] == 1 else _valid_proposal_json()
+
+    monkeypatch.setattr(llm, "_chain_complete", fake_chain)
+    out = await llm.complete_validated(
+        [{"role": "user", "content": "go"}],
+        ResearchProposal,
+        invocation_type="ariadne.propose",
+        step_name="ariadne.propose",
+        retries=1,
+    )
+    assert isinstance(out, ResearchProposal) and out.hypotheses[0].hid == "H1"
+    assert calls["n"] == 2  # it retried once with the validation error fed back
+
+
+@aio
+async def test_complete_validated_raises_after_exhausting_retries(monkeypatch):
+    async def always_bad(messages, **kw):
+        return json.dumps({"title": "T"})  # missing everything
+
+    monkeypatch.setattr(llm, "_chain_complete", always_bad)
+    with pytest.raises(ValidationError):
+        await llm.complete_validated(
+            [{"role": "user", "content": "go"}],
+            ResearchProposal,
+            invocation_type="ariadne.propose",
+            step_name="ariadne.propose",
+            retries=1,
+        )

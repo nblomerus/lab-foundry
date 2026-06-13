@@ -246,6 +246,7 @@ async def _cost(pool: asyncpg.Pool) -> CostTrackingOut:
             workhorse_calls=0,
             fast_calls=0,
             code_calls=0,
+            experiment_calls=0,
             total_cost_usd=0.0,
             cap_reached=False,
         )
@@ -255,6 +256,7 @@ async def _cost(pool: asyncpg.Pool) -> CostTrackingOut:
         workhorse_calls=row["workhorse_calls"],
         fast_calls=row["fast_calls"],
         code_calls=row["code_calls"],
+        experiment_calls=row["experiment_calls"],
         total_cost_usd=float(row["total_cost_usd"]),
         cap_reached=row["cap_reached"],
     )

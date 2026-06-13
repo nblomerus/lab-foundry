@@ -71,6 +71,26 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
         log.exception("grounded researcher: feedback failed for T%s", task.id)
         disp, applied = disposition(finding), {"feedback_error": str(e)[:200]}
 
+    # needs_experiment: literature can't settle this number — hand it to the experiments agent.
+    # The feedback seam makes NO confidence move for this blocker; emitting here turns the dead-end
+    # into a runnable experiment. Best-effort (deduped per task) — a failure must never strand the task.
+    if finding.blocker == "needs_experiment" and ctx.get("claim_id") is not None:
+        try:
+            await state.emit_corpus_event(
+                "experiment.requested",
+                target_type="claim",
+                target_id=ctx["claim_id"],
+                payload={
+                    "claim_id": ctx["claim_id"],
+                    "task_id": task.id,
+                    "hypothesis": "; ".join(finding.gaps) if finding.gaps else finding.summary,
+                    "goal": ctx.get("expectation") or ctx.get("direction") or "",
+                },
+                dedup_key=f"exp-req-{task.id}",
+            )
+        except Exception:  # noqa: BLE001 — the experiment request is best-effort; the finding still completes
+            log.exception("grounded researcher: experiment.requested emit failed for T%s", task.id)
+
     await state.complete_task(
         task_id=task.id,
         result={

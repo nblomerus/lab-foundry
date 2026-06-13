@@ -10,16 +10,20 @@ the /trace step-DAG (a session), Langfuse (an LLM call), or `ops.why` (causality
     python -m ops.lab_doctor [--hours 1]
 
 Checks: activity/liveness · errors · stuck/orphaned runs · events not draining ·
-friction gates (cooldown/cost-cap/slop) · cost today · Mimir intake + holds · per-agent
-last-seen. Thresholds are deliberately loose — a ⚠ is a pointer, not a verdict.
+stall/saturation/broken-agent indicators · unclosed-loop indicators · friction gates
+(cooldown/cost-cap/slop) · cost today · Mimir intake + holds · per-agent last-seen.
+Thresholds are deliberately loose — a ⚠ is a pointer, not a verdict. For the full
+non-closure inventory run `python -m ops.closure_audit`.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
+from collections import Counter
 
 import asyncpg
 from dotenv import load_dotenv
@@ -36,6 +40,28 @@ def _line(mark: str, text: str) -> None:
 
 def _h(title: str) -> None:
     print(f"\n{title}")
+
+
+async def _pulse(conn) -> None:
+    """The lab's heartbeat — what it is doing RIGHT NOW and what it is waiting on.
+    A pulse is emitted every watchdog tick (5 min); a stale one means the watchdog
+    itself is down, which is the real 'lab looks dead'."""
+    _h("NOW — latest lab.pulse (doing + waiting_on, emitted every watchdog tick)")
+    row = await conn.fetchrow(
+        "SELECT emitted_at, payload, extract(epoch FROM now() - emitted_at) AS age_s "
+        "FROM events WHERE event_type = 'lab.pulse' ORDER BY id DESC LIMIT 1"
+    )
+    if row is None:
+        _line(_WARN, "no lab.pulse yet — harness predates the heartbeat or never ticked")
+        return
+    p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+    age = int(row["age_s"])
+    stale = age > 15 * 60  # > 3 missed ticks ⇒ the watchdog is down — THIS is a dead lab
+    _line(_BAD if stale else _OK, f"pulse age: {age // 60}m{age % 60:02d}s" + (" — WATCHDOG DOWN?" if stale else ""))
+    for s in p.get("doing", []):
+        _line(_DOT, f"doing:   {s}")
+    for s in p.get("waiting_on", []):
+        _line(_DOT, f"waiting: {s}")
 
 
 async def _activity(conn, hours: int) -> None:
@@ -88,6 +114,109 @@ async def _stuck(conn) -> None:
         "SELECT count(*) FROM events WHERE status = 'pending' AND emitted_at < now() - interval '5 minutes'"
     )
     _line(_OK if not stale_pending else _WARN, f"events pending >5m (not draining): {stale_pending}")
+
+
+async def _stalls(conn, hours: int) -> None:
+    _h("Stall / saturation / broken agents (in-process guards the watchdog's row-reap can't see)")
+    rows = await conn.fetch(
+        "SELECT event_type, count(*) AS n, max(emitted_at) AS last FROM events "
+        "WHERE event_type IN ('agent.stalled','dispatch.saturated','agent.broken','agent.slow') "
+        "AND emitted_at > now() - ($1||' hours')::interval "
+        "GROUP BY event_type ORDER BY 2 DESC",
+        str(hours),
+    )
+    if not rows:
+        _line(_OK, "no stall / saturation / broken-agent indicators")
+        return
+    # stalled/saturated/broken are hard problems; slow is an early-warning ⚠.
+    sev = {"agent.stalled": _BAD, "dispatch.saturated": _BAD, "agent.broken": _BAD, "agent.slow": _WARN}
+    for r in rows:
+        _line(sev.get(r["event_type"], _WARN), f"{r['event_type']}: {r['n']}  (last {r['last']})")
+
+
+async def _loop(conn) -> None:
+    _h("Research loop — where every direction sits on the formal stage ladder (direction_stage_v)")
+    try:
+        rows = await conn.fetch(
+            "SELECT stage, count(*) AS n FROM direction_stage_v "
+            "WHERE claim_status IN ('proposed','tested','weakly_supported','replicated','concluded') "
+            "GROUP BY stage ORDER BY n DESC"
+        )
+    except asyncpg.UndefinedTableError:
+        _line(_DOT, "direction_stage_v not present (migration 019 not applied)")
+        return
+    if not rows:
+        _line(_DOT, "no live/concluded directions")
+    else:
+        _line(_DOT, "by stage: " + ", ".join(f"{r['stage']}={r['n']}" for r in rows))
+    # Active directions parked behind a named blocker — the loop's current friction, per direction.
+    blocked = await conn.fetch(
+        "SELECT claim_id, blocker FROM direction_stage_v "
+        "WHERE blocker IS NOT NULL AND claim_status IN ('proposed','tested','weakly_supported','replicated') "
+        "ORDER BY claim_id DESC LIMIT 10"
+    )
+    if blocked:
+        tally = Counter(b["blocker"] for b in blocked)
+        for blk, n in tally.most_common():
+            _line(_WARN, f"{n} direction(s) blocked: {blk}")
+    # Recent lifecycle transitions (the audit trail advance_direction now writes).
+    trans = await conn.fetch(
+        "SELECT transition, count(*) AS n FROM direction_transitions "
+        "WHERE created_at > now() - interval '24 hours' GROUP BY transition ORDER BY n DESC"
+    )
+    if trans:
+        _line(_DOT, "transitions (24h): " + ", ".join(f"{t['transition']}={t['n']}" for t in trans))
+
+
+async def _realism(conn, hours: int) -> None:
+    _h("Data realism — are experiments grounded in REAL data, or synthesizing it? (the real-research metric)")
+    try:
+        rows = await conn.fetch(
+            "SELECT COALESCE(data_realism, 'unclassified') AS r, count(*) AS n FROM experiment_runs "
+            "WHERE status = 'completed' AND completed_at > now() - ($1||' hours')::interval "
+            "GROUP BY 1 ORDER BY 2 DESC",
+            str(hours),
+        )
+    except asyncpg.UndefinedColumnError:
+        _line(_DOT, "data_realism not present (migration 020 not applied)")
+        return
+    total = sum(r["n"] for r in rows)
+    if not total:
+        _line(_DOT, "no completed experiments in window")
+        return
+    by = {r["r"]: r["n"] for r in rows}
+    real_pct = round(100 * by.get("real", 0) / total)
+    synth_pct = round(100 * (by.get("synthetic", 0) + by.get("unclassified", 0)) / total)
+    mark = _OK if real_pct >= 50 else (_WARN if real_pct > 0 else _BAD)
+    _line(
+        mark,
+        f"{real_pct}% real · {by.get('builtin', 0)} builtin · {synth_pct}% synthetic  (of {total} completed, {hours}h)",
+    )
+    mism = await conn.fetchval(
+        "SELECT count(*) FROM experiment_runs WHERE realism_mismatch AND completed_at > now() - ($1||' hours')::interval",
+        str(hours),
+    )
+    if mism:
+        _line(
+            _WARN, f"{mism} realism MISMATCH (plan named real data, run used synthetic) — designer not following the plan"
+        )
+
+
+async def _closure(conn, hours: int) -> None:
+    _h("Closure — work produced but the loop never closed (guard auto-closes the research ladder)")
+    rows = await conn.fetch(
+        "SELECT payload->>'kind' AS kind, count(*) AS n, max(emitted_at) AS last FROM events "
+        "WHERE event_type = 'loop.unclosed' AND emitted_at > now() - ($1||' hours')::interval "
+        "GROUP BY payload->>'kind' ORDER BY 2 DESC",
+        str(hours),
+    )
+    if not rows:
+        _line(_OK, "no unclosed-loop indicators")
+        return
+    # an unhandled event is a wiring regression (✗); stalled/gap directions are the ladder's work (⚠).
+    sev = {"unhandled_event": _BAD}
+    for r in rows:
+        _line(sev.get(r["kind"], _WARN), f"loop.unclosed [{r['kind']}]: {r['n']}  (last {r['last']})")
 
 
 async def _gates(conn, hours: int) -> None:
@@ -169,9 +298,27 @@ async def run(hours: int) -> int:
     print("=" * 78 + f"\nLAB DOCTOR  (read-only; window={hours}h)\n" + "=" * 78)
     conn = await asyncpg.connect(dsn)
     try:
-        for check in (_activity, _errors, _stuck, _gates, _cost, _mimir, _modes, _agents):
+        for check in (
+            _pulse,
+            _activity,
+            _errors,
+            _stuck,
+            _stalls,
+            _loop,
+            _realism,
+            _closure,
+            _gates,
+            _cost,
+            _mimir,
+            _modes,
+            _agents,
+        ):
             try:
-                await (check(conn, hours) if check in (_activity, _gates, _mimir) else check(conn))
+                await (
+                    check(conn, hours)
+                    if check in (_activity, _stalls, _realism, _closure, _gates, _mimir)
+                    else check(conn)
+                )
             except Exception as e:  # noqa: BLE001 — one check failing must not sink the report
                 _line(_BAD, f"{check.__name__} check errored: {str(e)[:120]}")
     finally:

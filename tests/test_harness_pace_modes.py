@@ -70,23 +70,40 @@ def _decide_rules(
     corpus,
     mission,
     approved_active=0,
+    active_directions=1,
+    actionable=1,
     queued=0,
     last_delib=None,
     last_reflect=None,
+    last_agenda_at=None,
+    readj_pending=0,
+    readj_today=0,
     now=NOW,
 ):
     """Build the ordered ScriptedPool rules _decide issues (first match wins, so the
-    more specific substrings must precede the broad count(*) ones)."""
+    more specific substrings must precede the broad count(*) ones). active_directions /
+    actionable default to 1 (agenda alive + workable) so the exhaustion branch stays
+    out of the older tests."""
     return [
         ("SELECT now()", now),
         ("FROM documents WHERE queryable", corpus),
         ("claim_kind='mission'", mission),
         # approved_active count — direction_gate JOIN claims.
         ("FROM direction_gate dg JOIN claims c", approved_active),
+        # live directions of any gate status (the agenda-exhaustion probe).
+        ("claim_kind='direction' AND status IN", active_directions),
+        # directions that can still move the lab: approved / pending adjudication / passed.
+        ("da.verdict='pass'", actionable),
+        # newest mission/direction creation time — barren-deliberate detection (defaults to NOW,
+        # i.e. the last deliberate DID produce an agenda, so older tests stay on the full cooldown).
+        ("max(created_at) FROM claims WHERE claim_kind IN", last_agenda_at if last_agenda_at is not None else now),
         # queued deliberate/reflect events.
         ("event_type IN ('ariadne.deliberate','ariadne.reflect')", queued),
         ("event_type='ariadne.deliberate' ORDER BY", [last_delib] if last_delib else []),
         ("event_type='ariadne.reflect' ORDER BY", [last_reflect] if last_reflect else []),
+        # the all-held daily re-adjudication probes (_readjudicate_held).
+        ("event_type='direction.adjudicate' AND status='pending'", readj_pending),
+        ("event_type='direction.adjudicate' AND dedup_key", readj_today),
     ]
 
 
@@ -164,6 +181,199 @@ async def test_decide_reflect_cooldown_blocks(monkeypatch):
     pool = ScriptedPool(_decide_rules(corpus=1000, mission=1, last_delib=last_d, last_reflect=last_r))
     et, _ = await ariadne_pace._decide(pool)
     assert et is None
+
+
+@aio
+async def test_decide_agenda_exhausted_forces_deliberate(monkeypatch):
+    """Mission set but ZERO live directions → deliberate fires on the cooldown alone (growth is
+    irrelevant with nothing to steer) and the agenda_exhausted indicator is emitted."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)  # growth 10 ≪ 3000, cooldown elapsed
+    pool = ScriptedPool(_decide_rules(corpus=1000, mission=7, active_directions=0, last_delib=last_d))
+    et, corpus = await ariadne_pace._decide(pool)
+    assert et == "ariadne.deliberate"
+    assert corpus == 1000
+    flags = [c for c in pool.calls if c[0] == "execute" and "'loop.unclosed'" in c[1]]
+    assert len(flags) == 1
+    payload = json.loads(flags[0][2][0])
+    assert payload["kind"] == "agenda_exhausted"
+    assert payload["mission_id"] == 7
+    assert flags[0][2][1].startswith("agenda-exhausted-")
+
+
+@aio
+async def test_decide_agenda_exhausted_cooldown_holds_and_skips_reflect(monkeypatch):
+    """Exhausted inside the deliberate cooldown → no event at all (reflect would no-op on an
+    empty agenda, so it is skipped even when its own conditions are met); the indicator still
+    fires, carrying the retry ETA."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_MAX_AGE_S", 6 * 3600)
+    last_d = _event_row(_ago(30 * 60), corpus=0)  # 30 min < 2h cooldown
+    last_r = _event_row(_ago(7 * 3600), corpus=0)  # reflect WOULD fire (max-age) if not exhausted
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=0, last_delib=last_d, last_reflect=last_r)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None
+    flags = [c for c in pool.calls if c[0] == "execute" and "'loop.unclosed'" in c[1]]
+    assert len(flags) == 1
+    payload = json.loads(flags[0][2][0])
+    assert payload["deliberate_retry_in_s"] == 5400  # 2h - 30min
+
+
+@aio
+async def test_decide_all_held_agenda_forces_deliberate(monkeypatch):
+    """Live directions exist but NONE are actionable (all held, none approved, none pending
+    adjudication) and today's re-adjudication is already SPENT → exhausted in all but name:
+    deliberate fires on the cooldown alone and the indicator carries the unactionable count."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)  # tiny growth, cooldown elapsed
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=3, actionable=0, last_delib=last_d, readj_today=1)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.deliberate"
+    flags = [c for c in pool.calls if c[0] == "execute" and "'loop.unclosed'" in c[1]]
+    assert len(flags) == 1
+    payload = json.loads(flags[0][2][0])
+    assert payload["kind"] == "agenda_exhausted"
+    assert payload["active_unactionable"] == 3
+
+
+@aio
+async def test_decide_all_held_first_queues_readjudication(monkeypatch):
+    """The FIRST all-held encounter of the day re-adjudicates the held directions instead of
+    re-framing: a reconsider_held direction.adjudicate is emitted (day-bucketed) and neither
+    deliberate nor the exhaustion indicator fires this tick."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)  # deliberate WOULD fire if exhausted
+    pool = ScriptedPool(_decide_rules(corpus=1000, mission=7, active_directions=3, actionable=0, last_delib=last_d))
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None
+    emits = [c for c in pool.calls if c[0] == "execute" and "'direction.adjudicate'" in c[1]]
+    assert len(emits) == 1
+    payload, dedup = emits[0][2]
+    assert json.loads(payload)["reconsider_held"] is True
+    assert dedup.startswith("pace-readjudicate-")
+    assert not [c for c in pool.calls if c[0] == "execute" and "'loop.unclosed'" in c[1]]
+
+
+@aio
+async def test_decide_all_held_waits_on_inflight_readjudication(monkeypatch):
+    """A direction.adjudicate sweep already queued → hold off exhaustion without emitting
+    anything new; the sweep's outcome decides whether the agenda becomes actionable."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=3, actionable=0, last_delib=last_d, readj_pending=1)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None
+    assert not [c for c in pool.calls if c[0] == "execute"]  # no emit, no indicator
+
+
+@aio
+async def test_decide_barren_deliberate_retries_on_short_cooldown(monkeypatch):
+    """The last deliberate produced NOTHING (no mission/direction created after it) → the
+    exhaustion branch retries on DELIB_BARREN_RETRY_S instead of billing the full cooldown."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    monkeypatch.setattr(ariadne_pace, "DELIB_BARREN_RETRY_S", 30 * 60)
+    last_d = _event_row(_ago(35 * 60), corpus=990)  # 35 min ago: > barren retry, < full cooldown
+    pool = ScriptedPool(
+        _decide_rules(
+            corpus=1000,
+            mission=7,
+            active_directions=0,
+            last_delib=last_d,
+            last_agenda_at=_ago(5 * 3600),  # agenda predates the barren deliberate
+        )
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.deliberate"
+
+
+@aio
+async def test_decide_fruitful_deliberate_keeps_full_cooldown(monkeypatch):
+    """The last deliberate DID restock (agenda newer than it) → exhaustion still respects the
+    FULL cooldown at the same 35-minute age."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_COOLDOWN_S", 2 * 3600)
+    monkeypatch.setattr(ariadne_pace, "DELIB_BARREN_RETRY_S", 30 * 60)
+    last_d = _event_row(_ago(35 * 60), corpus=990)
+    pool = ScriptedPool(
+        _decide_rules(
+            corpus=1000,
+            mission=7,
+            active_directions=0,  # (it restocked, then everything resolved again)
+            last_delib=last_d,
+            last_agenda_at=_ago(30 * 60),  # created AFTER the deliberate → not barren
+        )
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None  # 35 min < 2h full cooldown
+
+
+@aio
+async def test_decide_all_held_blocked_by_committed_work(monkeypatch):
+    """All-held EXCEPT committed in-flight work exists (approved_active > 0) → never re-frame
+    over it; normal flow continues (no exhaustion, no deliberate)."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_MAX_AGE_S", 6 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=990)
+    last_r = _event_row(_ago(10 * 60), corpus=990)  # recent reflect → nothing fires
+    pool = ScriptedPool(
+        _decide_rules(
+            corpus=1000,
+            mission=7,
+            active_directions=3,
+            actionable=1,  # the approved one counts as actionable
+            approved_active=1,
+            last_delib=last_d,
+            last_reflect=last_r,
+        )
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et is None
+    assert not any(c[0] == "execute" and "'loop.unclosed'" in c[1] for c in pool.calls)
+
+
+@aio
+async def test_decide_pass_awaiting_approval_skips_exhaustion(monkeypatch):
+    """An adjudicated-pass direction awaiting auto-approve is actionable supply — the
+    exhaustion hatch must NOT fire over it."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    last_d = _event_row(_ago(3 * 3600), corpus=100)
+    last_r = _event_row(_ago(50 * 60), corpus=100)  # grew 900 ≥ 800 → normal reflect
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=2, actionable=1, last_delib=last_d, last_reflect=last_r)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.reflect"
+    assert not any(c[0] == "execute" and "'loop.unclosed'" in c[1] for c in pool.calls)
+
+
+@aio
+async def test_decide_live_directions_skip_exhaustion(monkeypatch):
+    """With live directions the exhaustion branch must not fire — normal reflect flow, no flag."""
+    monkeypatch.setattr(ariadne_pace, "DELIB_GROWTH", 3000)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_GROWTH", 800)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_COOLDOWN_S", 45 * 60)
+    monkeypatch.setattr(ariadne_pace, "REFLECT_MAX_AGE_S", 6 * 3600)
+    last_d = _event_row(_ago(3 * 3600), corpus=100)
+    last_r = _event_row(_ago(50 * 60), corpus=100)  # grew 900 ≥ 800, cooldown passed
+    pool = ScriptedPool(
+        _decide_rules(corpus=1000, mission=7, active_directions=2, last_delib=last_d, last_reflect=last_r)
+    )
+    et, _ = await ariadne_pace._decide(pool)
+    assert et == "ariadne.reflect"
+    assert not any(c[0] == "execute" and "'loop.unclosed'" in c[1] for c in pool.calls)
 
 
 @aio
@@ -271,6 +481,99 @@ async def test_maybe_plan_emits(monkeypatch):
     assert len(inserts) == 1
     assert "INSERT INTO events" in inserts[0][1]
     assert "planner.plan" in inserts[0][1]
+
+
+# ── _maybe_adjudicate ─────────────────────────────────────────────────────────
+@aio
+async def test_maybe_adjudicate_none_unadjudicated(monkeypatch):
+    pool = ScriptedPool([("NOT EXISTS (SELECT 1 FROM direction_adjudications", 0)])
+    assert await ariadne_pace._maybe_adjudicate(pool) is False
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_maybe_adjudicate_already_queued(monkeypatch):
+    pool = ScriptedPool(
+        [
+            ("NOT EXISTS (SELECT 1 FROM direction_adjudications", 3),
+            ("event_type = 'direction.adjudicate' AND status = 'pending'", 1),
+        ]
+    )
+    assert await ariadne_pace._maybe_adjudicate(pool) is False
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_maybe_adjudicate_emits(monkeypatch):
+    pool = ScriptedPool(
+        [
+            ("NOT EXISTS (SELECT 1 FROM direction_adjudications", 3),
+            ("event_type = 'direction.adjudicate' AND status = 'pending'", 0),
+        ]
+    )
+    assert await ariadne_pace._maybe_adjudicate(pool) is True
+    inserts = [c for c in pool.calls if c[0] == "execute"]
+    assert len(inserts) == 1
+    assert "INSERT INTO events" in inserts[0][1]
+    assert "direction.adjudicate" in inserts[0][1]
+
+
+# ── _maybe_drive_experiments ────────────────────────────────────────────────────
+@aio
+async def test_drive_experiments_drives_only_under_target_idle_directions(monkeypatch):
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    rows = [
+        {"id": 61, "done": 1, "attempts": 1, "inflight": 0, "task_id": 500, "last_synth_n": None},  # under target → DRIVE
+        {"id": 62, "done": 3, "attempts": 3, "inflight": 0, "task_id": 501, "last_synth_n": None},  # at target → skip
+        {"id": 63, "done": 0, "attempts": 0, "inflight": 1, "task_id": 502, "last_synth_n": None},  # in flight → skip
+        {"id": 64, "done": 0, "attempts": 0, "inflight": 0, "task_id": None, "last_synth_n": None},  # no task → skip
+        {"id": 65, "done": 0, "attempts": 9, "inflight": 0, "task_id": 503, "last_synth_n": None},  # give-up cap → skip
+    ]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    n = await ariadne_pace._maybe_drive_experiments(pool)
+    assert n == 1
+    inserts = [c for c in pool.calls if c[0] == "execute" and "experiment.requested" in c[1]]
+    assert len(inserts) == 1
+    args = inserts[0][2]
+    assert args[0] == 61  # target_id = the under-target idle direction
+    payload = json.loads(args[1])
+    assert payload == {"claim_id": 61, "task_id": 500, "trigger": "coverage"}
+    # dedup round keyed on attempts (so failures retry) + a 6h bucket (so a DEAD request —
+    # crashed/suppressed event, no run created — re-arms instead of deadlocking forever)
+    assert args[2].startswith("drive-exp-61-1-")
+
+
+@aio
+async def test_drive_experiments_none_when_all_covered(monkeypatch):
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    rows = [{"id": 61, "done": 3, "attempts": 3, "inflight": 0, "task_id": 1, "last_synth_n": None}]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 0
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_drive_experiments_marches_past_inconclusive_finding(monkeypatch):
+    """A direction synthesized at n=3 but NOT concluded (still active) gets driven toward the
+    NEXT synthesis bucket — evidence marches toward a decision instead of parking forever."""
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_RESYNTH_STEP", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_CAP", 9)
+    rows = [{"id": 61, "done": 3, "attempts": 3, "inflight": 0, "task_id": 500, "last_synth_n": 3}]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 1  # target now 6, done 3 → drive
+
+
+@aio
+async def test_drive_experiments_evidence_cap_parks_for_reflect(monkeypatch):
+    """Past the evidence cap the driver stops — the verdict belongs to Ariadne's reflect
+    (which now SEES the finding), not to infinite evidence accumulation."""
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_RESYNTH_STEP", 3)
+    monkeypatch.setattr(ariadne_pace, "EVIDENCE_CAP", 9)
+    rows = [{"id": 61, "done": 9, "attempts": 12, "inflight": 0, "task_id": 500, "last_synth_n": 9}]
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", rows), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 0
 
 
 # ── _emit ─────────────────────────────────────────────────────────────────────
@@ -609,3 +912,59 @@ async def test_set_agent_mode_upsert_and_cache_invalidate():
     assert args[1] == "shadow"
     assert args[2] == "paused"
     assert "ariadne" not in agent_modes._cache  # invalidated
+
+
+# ── _maybe_scholarship: the written research arc ──────────────────────────────
+@aio
+async def test_scholarship_emits_review_for_unreviewed_direction():
+    pool = ScriptedPool(
+        [
+            ("to_char(now()", "2026-06-09"),
+            ("rd.kind = 'lit_review' AND rd.status = 'final') ORDER BY c.id LIMIT 1", 43),
+            ("status = 'pending'", 0),
+            ("INSERT INTO events", "INSERT 0 1"),
+        ]
+    )
+    n = await ariadne_pace._maybe_scholarship(pool)
+    assert n >= 1
+    ins = [c for c in pool.calls if c[0] == "execute" and "ariadne.review" in str(c[2])]
+    assert len(ins) == 1 and ins[0][2][1] == 43  # target claim
+    assert ins[0][2][3].startswith("arc-ariadne.review-43-")
+
+
+@aio
+async def test_scholarship_quiet_when_arc_complete():
+    pool = ScriptedPool([("to_char(now()", "2026-06-09")])  # all stage scans → None
+    assert await ariadne_pace._maybe_scholarship(pool) == 0
+    assert not any(c[0] == "execute" for c in pool.calls)
+
+
+@aio
+async def test_drive_experiments_waits_for_proposal(monkeypatch):
+    """No final proposal on file → the driver's candidate query excludes the direction
+    (research is conducted against the PI's plan)."""
+    monkeypatch.setattr(ariadne_pace, "EXPERIMENT_COVERAGE_TARGET", 3)
+    pool = ScriptedPool([("FROM claims c JOIN direction_gate dg", []), ("INSERT INTO events", "INSERT 0 1")])
+    assert await ariadne_pace._maybe_drive_experiments(pool) == 0
+    sql = next(c[1] for c in pool.calls if c[0] == "fetch" and "direction_gate" in c[1])
+    assert "rd.kind = 'proposal'" in sql  # the gate is in the SQL itself
+
+
+# ── deliberate_churn indicator (the anti-churn visibility signal) ─────────────────
+@aio
+async def test_deliberate_churn_flags_when_exhaustion_recurs():
+    # agenda_exhausted fired 3× this hour → the deliberate↔adjudicate loop is churning → flag it.
+    pool = ScriptedPool([("payload->>'kind' = 'agenda_exhausted'", 3)])
+    await ariadne_pace._flag_deliberate_churn(pool, NOW, active=3)
+    ins = [c for c in pool.calls if c[0] == "execute" and "loop.unclosed" in c[1]]
+    assert len(ins) == 1
+    assert json.loads(ins[0][2][0])["kind"] == "deliberate_churn"
+    assert ins[0][2][1].startswith("deliberate-churn-")
+
+
+@aio
+async def test_deliberate_churn_quiet_below_threshold():
+    # only one exhaustion this hour → a one-off, not churn → no indicator.
+    pool = ScriptedPool([("payload->>'kind' = 'agenda_exhausted'", 1)])
+    await ariadne_pace._flag_deliberate_churn(pool, NOW, active=3)
+    assert not any(c[0] == "execute" and "loop.unclosed" in c[1] for c in pool.calls)

@@ -314,7 +314,7 @@ export interface TraceJourneysResponse {
   total: number;
 }
 export interface AriadneScores {
-  novelty: number; feasibility: number; evidence_availability: number; paper_potential: number;
+  novelty: number; impact: number; feasibility: number; evidence_availability: number; paper_potential: number;
   reviewer_interest: number; technical_depth: number; differentiation: number;
   cost_efficiency: number; lab_alignment: number;
 }
@@ -330,9 +330,13 @@ export interface AriadneOverview {
     active_directions: number; retired_directions: number; claim_goals: number; lessons: number;
     top_priority: string | null; focus: string[]; status: string;
     approved: number; gate_budget: number;
-    claims_total: number; acquire_requests_24h: number;
+    claims_total: number; acquire_requests_24h: number; acquire_pending: number;
     planner_mode: string; researcher_mode: string;
-    research_tasks: number; research_tasks_pending: number;
+    research_tasks: number; research_tasks_pending: number; research_tasks_running: number;
+    experiments_mode: string; quartermaster_mode: string;
+    experiments_running: number; experiments_total: number;
+    critic_mode?: string; evaluation_mode?: string; synthesis_mode?: string; novelty_mode?: string;
+    critic_verdicts?: number; findings?: number; concluded_directions?: number;
   };
   mission: { id: number; statement: string; framed_at: string } | null;
   directions: AriadneDirection[];
@@ -621,8 +625,74 @@ export interface AgentRunResult {
   note?: string;
 }
 
+export interface QmExperiment {
+  id: number;
+  kind: string;
+  status: string;
+  data_realism?: "real" | "builtin" | "synthetic" | null;
+  realism_mismatch?: boolean | null;
+  claim_id?: number | null;
+  claim_statement?: string | null;
+  claim_confidence?: number | null;
+  hypothesis?: string | null;
+  requires_gpu?: boolean | null;
+  gpu_mem_mb?: number | null;
+  priority?: number | null;
+  wall_clock_budget_s?: number | null;
+  mem_budget_mb?: number | null;
+  iterations?: number | null;
+  kill_reason?: string | null;
+  error?: string | null;
+  interpretation?: string | null;
+  researcher_notes?: string | null;
+  ingested_doc_id?: number | null;
+  worker?: string | null;
+  started_at?: string | null;
+  at?: string | null;
+}
+export interface QmExperiments {
+  mode: string;
+  by_status: Record<string, number>;
+  running: number;
+  queued: number;
+  experiments: QmExperiment[];
+}
+export interface QmExperimentDetail {
+  id: number;
+  kind: string;
+  status: string;
+  data_realism?: "real" | "builtin" | "synthetic" | null;
+  realism_mismatch?: boolean | null;
+  claim_id?: number | null;
+  claim_statement?: string | null;
+  claim_confidence?: number | null;
+  hypothesis?: string | null;
+  dataset_plan?: string | null;
+  code?: string | null;
+  result?: unknown;
+  error?: string | null;
+  interpretation?: string | null;
+  researcher_notes?: string | null;
+  provenance?: Record<string, unknown>;
+  dataset_refs?: unknown;
+  resource_usage?: Record<string, unknown>;
+  requires_gpu?: boolean | null;
+  gpu_mem_mb?: number | null;
+  wall_clock_budget_s?: number | null;
+  mem_budget_mb?: number | null;
+  kill_reason?: string | null;
+  worker?: string | null;
+  ingested_doc_id?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_s?: number | null;
+}
+
 export const api = {
   snapshot:  () => jget<Snapshot>("/snapshot"),
+  qmExperiments: (limit = 50) => jget<QmExperiments>(`/quartermaster/experiments?limit=${limit}`),
+  qmExperimentDetail: (id: number) => jget<QmExperimentDetail>(`/quartermaster/experiments/${id}`),
+  qmKillExperiment: (id: number) => jpost<{ killed: number }>(`/quartermaster/experiments/${id}/kill`, {}),
   knowledge: () => jget<KnowledgeStats>("/knowledge/stats"),
   recentIngests: (limit = 8) => jget<RecentIngests>(`/knowledge/recent?limit=${limit}`),
   mimirPanel: () => jget<MimirPanel>("/knowledge/mimir"),

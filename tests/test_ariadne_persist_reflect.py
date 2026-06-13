@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from agents.ariadne import handler, persist, reflect
+from agents.ariadne.grade import GradeReport
 from tests._helpers import ScriptedPool, make_state, patch_chain
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -23,6 +24,7 @@ from tests._helpers import ScriptedPool, make_state, patch_chain
 # ════════════════════════════════════════════════════════════════════════════════
 _SCORES = {
     "novelty": 4,
+    "impact": 4,
     "feasibility": 3,
     "evidence_availability": 4,
     "paper_potential": 3,
@@ -124,7 +126,7 @@ async def test_persist_directions_happy_path_full_tree():
     sqls = " || ".join(c[1] for c in pool.calls)
     assert "INSERT INTO direction_scores" in sqls
     assert "INSERT INTO claim_goals" in sqls
-    # composite 3.65 → priority "medium" persisted into direction_scores
+    # composite 3.75 → priority "medium" persisted into direction_scores
     score_args = next(c[2] for c in pool.calls if "INSERT INTO direction_scores" in c[1])
     assert "medium" in score_args
 
@@ -183,9 +185,12 @@ async def test_persist_reflection_all_assessment_branches():
     state = make_state(pool=pool)
     out = _reflection_out(verdicts=verdicts, lessons=[_lesson()])
     res = await persist.persist_reflection(state, out, [1, 2, 3, 4], run_id=5)
-    assert res == {"retired": 1, "reprioritized": 2, "advanced": 1, "lessons": 1}
+    assert res == {"retired": 1, "reprioritized": 2, "advanced": 1, "lessons": 1, "reinforced": 0}
+    # retire now routes through the single guarded write path (legal-edge check + audit row)
+    state.advance_direction.assert_awaited_once()
+    _a, _k = state.advance_direction.call_args
+    assert _a[0] == 1 and _a[1] == "invalidated" and _k["transition"] == "retire" and _k["decided_by"] == "reflect"
     sqls = " || ".join(c[1] for c in pool.calls)
-    assert "UPDATE claims SET status='invalidated'" in sqls
     assert "UPDATE direction_scores SET priority" in sqls
     assert "INSERT INTO lessons" in sqls
 
@@ -196,7 +201,7 @@ async def test_persist_reflection_skips_invalid_ids():
     pool = ScriptedPool()
     state = make_state(pool=pool)
     res = await persist.persist_reflection(state, _reflection_out(verdicts=verdicts, lessons=[]), [1, 2])
-    assert res == {"retired": 0, "reprioritized": 0, "advanced": 0, "lessons": 0}
+    assert res == {"retired": 0, "reprioritized": 0, "advanced": 0, "lessons": 0, "reinforced": 0}
 
 
 @pytest.mark.asyncio
@@ -226,6 +231,34 @@ async def test_persist_reflection_lesson_with_when_and_blank_skipped():
     # first lesson's applies_when serialized to {"when": ...}; third to {}
     assert json.loads(lesson_calls[0][2][0]) == {"when": "weak eval"}
     assert json.loads(lesson_calls[1][2][0]) == {}
+
+
+@pytest.mark.asyncio
+async def test_persist_reflection_dedup_credits_recurrence_instead_of_inserting():
+    # find_near_duplicate hits (trigram SELECT returns an id) → credit the original with a supportive
+    # application (promotion pressure) and DON'T insert a duplicate lesson row.
+    pool = ScriptedPool([("similarity(lesson_text", 42)])  # find_near_duplicate -> existing lesson id 42
+    state = make_state(pool=pool)
+    res = await persist.persist_reflection(state, _reflection_out(verdicts=[], lessons=[_lesson()]), [], run_id=7)
+    assert res["reinforced"] == 1
+    assert res["lessons"] == 0
+    sqls = " || ".join(c[1] for c in pool.calls)
+    assert "INSERT INTO lesson_applications" in sqls  # credited the original
+    assert "INSERT INTO lessons" not in sqls  # no duplicate row
+
+
+@pytest.mark.asyncio
+async def test_persist_reflection_dedup_without_run_id_skips_insert_no_credit():
+    # A near-duplicate but no run to credit (run_id=None) → still dedup (no duplicate row), but no
+    # application is written (degrades gracefully to plain dedup).
+    pool = ScriptedPool([("similarity(lesson_text", 42)])
+    state = make_state(pool=pool)
+    res = await persist.persist_reflection(state, _reflection_out(verdicts=[], lessons=[_lesson()]), [])
+    assert res["reinforced"] == 0
+    assert res["lessons"] == 0
+    sqls = " || ".join(c[1] for c in pool.calls)
+    assert "INSERT INTO lesson_applications" not in sqls
+    assert "INSERT INTO lessons" not in sqls
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -315,7 +348,17 @@ async def test_request_evidence_empty_and_none(monkeypatch):
 # handler.handle_ariadne_deliberate
 # ════════════════════════════════════════════════════════════════════════════════
 def _grade_report(passed=True, citations_resolved=1.0):
-    return SimpleNamespace(passed=passed, citations_resolved=citations_resolved)
+    # The real model — the handler's failure path reads every predicate + model_dump().
+    return GradeReport(
+        schema_valid=passed,
+        claim_goals_wellformed=1.0,
+        directions_grounded=1.0,
+        citations_resolved=citations_resolved,
+        scores_wellformed=1.0,
+        n_citations=3,
+        unresolved=[],
+        passed=passed,
+    )
 
 
 def _dispatcher(pool=None):
@@ -744,3 +787,34 @@ async def test_mimir_reflect_brief_answer_failure_returns_empty(monkeypatch):
     monkeypatch.setattr(reflect, "answer_question", _boom)
     block = await reflect._mimir_reflect_brief(SimpleNamespace(pool=pool), "m", "a", emit=True)
     assert block == ""
+
+
+@pytest.mark.asyncio
+async def test_deliberate_failed_grading_retries_once_with_feedback(monkeypatch):
+    """First grade fails, retry passes: run_shadow is called twice — the second time with the
+    grader's corrective feedback — and the passing agenda persists with retried=True."""
+    out, pd, _re = _wire_deliberate(monkeypatch, mode="advisory", passed=True)
+    fail = _grade_report(passed=False)
+    fail.directions_grounded = 0.0
+    ok = _grade_report(passed=True)
+    monkeypatch.setattr(handler, "grade", AsyncMock(side_effect=[fail, ok]))
+    res = await handler.handle_ariadne_deliberate({"payload": {}}, _dispatcher())
+    assert res["persisted"] is True
+    assert res["retried"] is True
+    assert handler.run_shadow.await_count == 2
+    _a, kwargs = handler.run_shadow.call_args
+    assert "grounded_in citations" in kwargs["feedback"]
+    pd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deliberate_double_grade_failure_gives_up(monkeypatch):
+    """Both attempts fail grading → not persisted, retried=True, exactly one retry (no loop)."""
+    _out, pd, _re = _wire_deliberate(monkeypatch, mode="advisory", passed=False)
+    fail = _grade_report(passed=False)
+    monkeypatch.setattr(handler, "grade", AsyncMock(side_effect=[fail, fail]))
+    res = await handler.handle_ariadne_deliberate({"payload": {}}, _dispatcher())
+    assert res["persisted"] is False and res["reason"] == "failed_grading"
+    assert res["retried"] is True
+    assert handler.run_shadow.await_count == 2
+    pd.assert_not_awaited()

@@ -23,6 +23,7 @@ verdict — same discipline as Mimir's trust gate. `disposition` / `finding_feed
 from __future__ import annotations
 
 import logging
+import os
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,15 @@ _CONTRADICT_STEP = -0.12
 _EXHAUSTED_STEP = -0.05
 _GROUNDED_MIN = 0.5  # only findings whose cited evidence resolves may move confidence
 _MAX_ROUND_DELTA = 0.20  # cap how far ONE research round can move a direction
+# Literature reading alone can't take a direction past PROVISIONAL confidence — the top band
+# is EARNED by experiment / replication evidence (which moves confidence via the experiments
+# handler, not here). This stops a direction climbing to near-certainty on findings alone,
+# especially while most rounds are thin_corpus (an over-confidence we observed: a 'proposed'
+# direction at 1.0 with no experiment backing).
+_RESEARCH_CONFIDENCE_CEILING = float(os.environ.get("RESEARCH_CONFIDENCE_CEILING", "0.85"))
+# After a targeted sweep, how many MORE thin_corpus re-looks (with the corpus still growing) before we
+# call it a genuine gap — so a direction can't spin thin_corpus forever while papers keep pouring in.
+THIN_CORPUS_SATURATION_RELOOKS = int(os.environ.get("THIN_CORPUS_SATURATION_RELOOKS", "4"))
 
 DISPOSITIONS = ("supported", "contradicted", "corpus_exhausted", "thin_corpus", "needs_experiment", "inconclusive")
 # Priority for the headline steering signal: decisive verdicts first, then the actionable blockers.
@@ -59,12 +69,25 @@ def disposition(f: GroundedFinding) -> str:
 
 
 async def refine_disposition(state, claim_id: int | None, base: str) -> str:
-    """Escalate thin_corpus → corpus_exhausted when this direction's own researcher-acquires have
-    already come back 'already_have' (the Library can't be enriched here, so acquiring again is a
-    no-op and the right answer is PIVOT). Needs claim_id-attributed acquire replies; returns the
+    """Escalate thin_corpus → corpus_exhausted once a targeted scout sweep has run AND fetching more
+    has stopped moving the verdict — a genuine research gap. Two ways fetching "stops helping":
+      (1) acquire candidates all come back 'already_have' (the known set is exhausted), or
+      (2) SATURATION — the sweep ran, the corpus kept GROWING (acquires keep succeeding), yet the last
+          N re-looks still emit thin_corpus. Without (2) the loop spins forever, because Mimir always
+          admits a (often tangential) new paper, so 'already_have' never happens (observed live: a
+          direction stuck thin_corpus 100+ times while papers poured in).
+    Saturation only declares the gap when EXPERIMENTS aren't settling it either (no completed runs for
+    the claim) — an experimentable direction is left for the experiment lane, not retired. Returns the
     base disposition unchanged if there's no such history yet."""
     if base != "thin_corpus" or claim_id is None:
         return base
+    scouted = await state.pool.fetchval(
+        "SELECT 1 FROM events WHERE event_type = 'library.sweep_requested' AND (payload->>'claim_id')::int = $1 LIMIT 1",
+        claim_id,
+    )
+    if not scouted:  # never escalate before a targeted sweep has had its chance
+        return base
+    # (1) Known candidates exhausted (acquire keeps replying already_have).
     rows = await state.pool.fetch(
         "SELECT payload->>'status' AS status FROM events "
         "WHERE event_type = 'acquire.fulfilled' AND payload->>'requester' = 'researcher' "
@@ -73,6 +96,22 @@ async def refine_disposition(state, claim_id: int | None, base: str) -> str:
     )
     if len(rows) >= 2 and all(r["status"] == "already_have" for r in rows):
         return "corpus_exhausted"
+    # (2) Saturation: enough post-sweep re-looks still thin, and experiments aren't settling it.
+    stuck = await state.pool.fetchval(
+        "SELECT count(*) FROM tasks t WHERE t.claim_id = $1 AND t.department = 'research' "
+        "AND t.status = 'completed' AND t.result->>'disposition' = 'thin_corpus' "
+        "AND t.completed_at > (SELECT max(emitted_at) FROM events "
+        "WHERE event_type = 'library.sweep_requested' AND (payload->>'claim_id')::int = $1)",
+        claim_id,
+    )
+    if (stuck or 0) >= THIN_CORPUS_SATURATION_RELOOKS:
+        experimented = await state.pool.fetchval(
+            "SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id "
+            "WHERE t.claim_id = $1 AND e.status = 'completed'",
+            claim_id,
+        )
+        if not experimented:
+            return "corpus_exhausted"
     return base
 
 
@@ -159,6 +198,10 @@ async def apply_feedback(state, fb: DirectionFeedback, *, run_id: int | None = N
             )
         if cur is not None:
             new_conf = max(0.0, min(1.0, float(cur) + fb.confidence_delta))
+            # A positive (literature) move can't push past the research ceiling — but never
+            # drag down a direction already above it on stronger (experiment) evidence.
+            if fb.confidence_delta > 0 and new_conf > _RESEARCH_CONFIDENCE_CEILING:
+                new_conf = max(float(cur), _RESEARCH_CONFIDENCE_CEILING)
             try:
                 await state.update_claim_confidence(
                     fb.claim_id, new_conf, reason=f"researcher findings: {fb.dominant}", run_id=run_id
@@ -171,10 +214,10 @@ async def apply_feedback(state, fb: DirectionFeedback, *, run_id: int | None = N
             await conn.execute("UPDATE claims SET last_evidence_at = now() WHERE id = $1", fb.claim_id)
         applied["last_evidence_at"] = "now"
 
-    fired = 0
+    fired = held = 0
     for q in fb.acquire_queries:
         try:
-            await request_acquire(
+            emitted = await request_acquire(
                 state,
                 MimirAcquireRequest(
                     requester="researcher",
@@ -184,9 +227,15 @@ async def apply_feedback(state, fb: DirectionFeedback, *, run_id: int | None = N
                     why=f"researcher: corpus thin on '{q[:60]}' while testing direction {fb.claim_id}",
                 ),
             )
-            fired += 1
+            if emitted:
+                fired += 1
+            else:
+                held += 1  # demand-side backpressure: Mimir's queue is already deep
         except Exception as e:  # noqa: BLE001 — demand side is best-effort
             log.warning("feedback acquire failed for %r: %s", q, e)
     if fired:
         applied["acquires_fired"] = fired
+    if held:
+        # The direction stays thin_corpus and will re-request once the queue drains.
+        applied["acquires_held_backpressure"] = held
     return applied

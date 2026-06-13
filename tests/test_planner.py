@@ -273,6 +273,57 @@ async def test_persist_plan_caps_tasks_per_direction():
     assert len(_inserts(pool)) == MAX_TASKS_PER_DIRECTION
 
 
+# The 'stuck' check (last 3 completed all thin_corpus) runs first and matches
+# "status = 'completed'"; rule it not-stuck so the pending-cap tests isolate that path.
+_NOT_STUCK = ("status = 'completed'", [{"stuck": False}])
+
+
+async def test_persist_plan_skips_direction_already_at_pending_cap():
+    # Direction 10 already has MAX pending tasks -> add NONE. This is the per-direction
+    # PENDING cap (not per-invocation), so repeated planner.plan calls can't pile up.
+    pool = ScriptedPool(rules=[_NOT_STUCK, ("FROM tasks WHERE claim_id", [{"count": MAX_TASKS_PER_DIRECTION}])])
+    state = make_state(pool)
+    out = PlanOutput(plans=[_plan(10, tasks=[_task(10), _task(10)])], notes="")
+    counts = await persist_plan(state, out, [10])
+    assert counts["tasks"] == 0
+    assert _inserts(pool) == []
+
+
+async def test_persist_plan_only_fills_remaining_pending_room():
+    # Direction 10 has 1 pending already -> only (MAX - 1) new tasks created.
+    pool = ScriptedPool(rules=[_NOT_STUCK, ("FROM tasks WHERE claim_id", [{"count": 1}])])
+    state = make_state(pool)
+    many = [_task(10, title=f"t{i}") for i in range(MAX_TASKS_PER_DIRECTION + 2)]
+    out = PlanOutput(plans=[_plan(10, tasks=many)], notes="")
+    counts = await persist_plan(state, out, [10])
+    assert counts["tasks"] == MAX_TASKS_PER_DIRECTION - 1
+
+
+async def test_persist_plan_skips_thin_corpus_stuck_direction():
+    # Last 3 completed tasks all thin_corpus -> the planner hands the direction to the
+    # closure ladder (no new tasks) instead of refilling it and resetting the ladder.
+    pool = ScriptedPool()
+    state = make_state(pool, direction_is_thin_stuck=True)
+    out = PlanOutput(plans=[_plan(10, tasks=[_task(10), _task(10)])], notes="")
+    counts = await persist_plan(state, out, [10])
+    assert counts["tasks"] == 0
+    assert _inserts(pool) == []
+
+
+async def test_queue_empty_v2_skips_thin_corpus_stuck_direction(monkeypatch):
+    # The v2 path bypasses persist_plan — confirm its own INSERT loop also gates on the stuck-check.
+    monkeypatch.setenv("PLANNER_LOOP", "v2")
+    tasks = [_planned_task(1), _planned_task(2)]
+    monkeypatch.setattr(loop_mod, "run_planner_loop", AsyncMock(return_value=(tasks, 42, "s", 0.8)))
+    pool = ScriptedPool([("JOIN direction_gate dg", [{"id": 1}, {"id": 2}])])  # gated-in, but stuck
+    dispatcher = AsyncMock()
+    dispatcher.pool = pool
+    dispatcher.state.direction_is_thin_stuck = AsyncMock(return_value=True)  # both directions stuck
+    res = await handle_queue_empty({"id": 1, "payload": {"department": "research"}}, dispatcher)
+    assert res["tasks_created"] == 0
+    assert [c for c in pool.calls if c[0] == "execute" and "INSERT INTO tasks" in c[1]] == []
+
+
 async def test_persist_plan_priority_default_for_unknown_label():
     pool = ScriptedPool()
     state = make_state(pool)
@@ -394,9 +445,10 @@ async def test_queue_empty_v2_with_tasks(monkeypatch):
     loop_stub = AsyncMock(return_value=(tasks, 42, "summary", 0.8))
     monkeypatch.setattr(loop_mod, "run_planner_loop", loop_stub)
 
-    pool = ScriptedPool()
+    pool = ScriptedPool([("JOIN direction_gate dg", [{"id": 1}, {"id": 2}])])  # both gate-approved
     dispatcher = AsyncMock()
     dispatcher.pool = pool
+    dispatcher.state.direction_is_thin_stuck = AsyncMock(return_value=False)  # not stuck → tasks land
     event = {"id": 99, "payload": {"department": "research"}}
     res = await handle_queue_empty(event, dispatcher)
 
@@ -405,10 +457,43 @@ async def test_queue_empty_v2_with_tasks(monkeypatch):
         "run_id": 42,
         "reasoning": "summary",
         "critique_confidence": 0.8,
+        "gate_skipped": 0,
     }
     dispatcher.set_cooldown.assert_awaited_once()
     ins = [c for c in pool.calls if c[0] == "execute" and "INSERT INTO tasks" in c[1]]
     assert len(ins) == 2
+
+
+async def test_queue_empty_v2_gate_skips_unapproved(monkeypatch):
+    """Only gate-approved direction claims may be refilled — the rest are counted + skipped."""
+    monkeypatch.setenv("PLANNER_LOOP", "v2")
+    tasks = [_planned_task(1), _planned_task(2)]
+    monkeypatch.setattr(loop_mod, "run_planner_loop", AsyncMock(return_value=(tasks, 42, "s", 0.8)))
+    pool = ScriptedPool([("JOIN direction_gate dg", [{"id": 2}])])  # only claim 2 passed the gate
+    dispatcher = AsyncMock()
+    dispatcher.pool = pool
+    dispatcher.state.direction_is_thin_stuck = AsyncMock(return_value=False)
+    res = await handle_queue_empty({"id": 1, "payload": {"department": "research"}}, dispatcher)
+    assert res["tasks_created"] == 1
+    assert res["gate_skipped"] == 1
+    ins = [c for c in pool.calls if c[0] == "execute" and "INSERT INTO tasks" in c[1]]
+    assert len(ins) == 1 and ins[0][2][0] == 2  # the surviving insert targets claim 2
+
+
+async def test_queue_empty_v2_all_ungated_creates_nothing(monkeypatch):
+    """A refill against ONLY ungated/mission/finding claims lands zero tasks (the live bypass:
+    pre-adjudication research + orphan floods on claims no closure ladder owns)."""
+    monkeypatch.setenv("PLANNER_LOOP", "v2")
+    tasks = [_planned_task(1), _planned_task(2)]
+    monkeypatch.setattr(loop_mod, "run_planner_loop", AsyncMock(return_value=(tasks, 42, "s", 0.8)))
+    pool = ScriptedPool()  # gate query matches nothing → no claim approved
+    dispatcher = AsyncMock()
+    dispatcher.pool = pool
+    res = await handle_queue_empty({"id": 1, "payload": {"department": "research"}}, dispatcher)
+    assert res["tasks_created"] == 0
+    assert res["gate_skipped"] == 2
+    assert [c for c in pool.calls if c[0] == "execute" and "INSERT INTO tasks" in c[1]] == []
+    dispatcher.state.direction_is_thin_stuck.assert_not_awaited()  # gate filters before the stuck probe
 
 
 async def test_queue_empty_v2_empty(monkeypatch):
@@ -429,13 +514,13 @@ async def test_queue_empty_v2_empty(monkeypatch):
 async def test_queue_empty_legacy_with_tasks(monkeypatch):
     monkeypatch.setenv("PLANNER_LOOP", "legacy")
     planned = PlannedTasks(tasks=[_planned_task(1)], reasoning="covers the under-explored claim space")
-    pool = ScriptedPool()
+    pool = ScriptedPool([("JOIN direction_gate dg", [{"id": 1}])])  # gate-approved
     dispatcher = AsyncMock()
     dispatcher.pool = pool
     dispatcher.curator.build = AsyncMock(return_value="PROMPT")
     dispatcher.router.invoke = AsyncMock(return_value=(planned, 55))
     res = await handle_queue_empty({"id": 3, "payload": {"department": "research"}}, dispatcher)
-    assert res == {"tasks_created": 1, "run_id": 55, "reasoning": planned.reasoning}
+    assert res == {"tasks_created": 1, "run_id": 55, "reasoning": planned.reasoning, "gate_skipped": 0}
     ins = [c for c in pool.calls if c[0] == "execute" and "INSERT INTO tasks" in c[1]]
     assert len(ins) == 1
 
@@ -453,7 +538,7 @@ async def test_queue_empty_legacy_empty(monkeypatch):
 
 # ── handler.py: _build_planner_task_data ────────────────────────────────────────
 def _claim(cid=1, claim="claim text", conf=0.5):
-    return SimpleNamespace(id=cid, claim=claim, confidence=conf)
+    return SimpleNamespace(id=cid, statement=claim, claim=claim, confidence=conf)
 
 
 def _finding(fid=1):
@@ -489,7 +574,7 @@ async def test_build_planner_task_data_with_claims_and_findings():
 
 # ── loop.py: prompt builders ────────────────────────────────────────────────────
 def _thesis(tid=1, claim="thesis claim", conf=0.7):
-    return SimpleNamespace(id=tid, claim=claim, confidence=conf)
+    return SimpleNamespace(id=tid, statement=claim, claim=claim, confidence=conf)
 
 
 def _tfinding(fid=1):
@@ -553,9 +638,9 @@ async def test_build_propose_tasks_no_gaps():
 
 
 def _loop_task(thesis_id=1):
-    # PlannedTask has no thesis_id; loop builders/orchestrator read t.thesis_id, so use a stub.
+    # PlannedTask exposes claim_id; loop builders/orchestrator read t.claim_id, so use a stub.
     return SimpleNamespace(
-        thesis_id=thesis_id,
+        claim_id=thesis_id,
         task_type="deepen",
         description="probe",
         query="q?",
@@ -629,7 +714,7 @@ async def test_run_planner_loop_full_filters_unknown_theses():
     d.state.get_active_theses = AsyncMock(return_value=[_thesis(1)])
     d.state.get_company_state = AsyncMock(return_value=_company_state())
     final, run_id, summary, conf = await run_planner_loop(dispatcher=d, triggered_by_event_id=7)
-    assert [t.thesis_id for t in final] == [1]
+    assert [t.claim_id for t in final] == [1]
     assert run_id == 33 and summary == "kept one" and conf == 0.6
 
 

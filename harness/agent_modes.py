@@ -23,7 +23,21 @@ _RUNNABLE = frozenset({"advisory", "active"})
 # Research-loop agents that the legacy KNOWLEDGE_CORE_ONLY flag gated off. Mimir (the
 # Library warden) is never gated by that flag; everything else defaults to active.
 _RESEARCH = frozenset(
-    {"pi", "ariadne", "critic", "planner", "researcher", "evaluation", "novelty", "reviewer", "reflection", "auditor"}
+    {
+        "pi",
+        "ariadne",
+        "critic",
+        "planner",
+        "researcher",
+        "evaluation",
+        "novelty",
+        "reviewer",
+        "reflection",
+        "auditor",
+        "experiments",
+        "quartermaster",
+        "synthesis",
+    }
 )
 
 _cache: dict[str, tuple[str, float]] = {}

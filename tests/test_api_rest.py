@@ -1051,6 +1051,7 @@ def _cost_row():
         "workhorse_calls": 2,
         "fast_calls": 3,
         "code_calls": 0,
+        "experiment_calls": 0,
         "total_cost_usd": 1.5,
         "cap_reached": False,
     }
@@ -1715,6 +1716,7 @@ def test_models_cost_org_telemetry_taskcount_stats_edge():
         workhorse_calls=0,
         fast_calls=0,
         code_calls=0,
+        experiment_calls=0,
         total_cost_usd=0.0,
         cap_reached=False,
     )
@@ -1767,6 +1769,7 @@ def test_models_snapshot_out():
         workhorse_calls=0,
         fast_calls=0,
         code_calls=0,
+        experiment_calls=0,
         total_cost_usd=0.0,
         cap_reached=False,
     )

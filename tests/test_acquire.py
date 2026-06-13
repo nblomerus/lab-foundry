@@ -5,11 +5,27 @@ before any fetch."""
 
 import pytest
 
-from agents.mimir.acquire import AcquireRequest, handle_acquire_requested, request_acquire
+import agents.mimir.acquire as acquire_mod
+from agents.mimir.acquire import AcquireRequest, _resolve_candidates, handle_acquire_requested, request_acquire
 
 pytestmark = pytest.mark.asyncio
 
 _WHY = "this source grounds the speculative-decoding claim we are testing now"
+
+
+async def test_resolve_candidates_query_uses_relevance_sort(monkeypatch):
+    """A targeted acquire query must search arXiv by RELEVANCE, not newest-first — else a niche
+    query falls back to the newest arXiv-wide submissions (off-topic papers). No DB needed."""
+    seen: list[dict] = []
+
+    async def _fake_scout(topics, per_topic, *, start=0, sort="submittedDate"):
+        seen.append({"topics": topics, "sort": sort})
+        return []  # empty → resolver stops after page 0
+
+    monkeypatch.setattr(acquire_mod, "scout_arxiv", _fake_scout)
+    await _resolve_candidates(AcquireRequest(requester="researcher", why=_WHY, query="deep kernel learning GP"))
+    assert seen and all(c["sort"] == "relevance" for c in seen)
+    assert seen[0]["topics"] == ["deep kernel learning GP"]
 
 
 class _Disp:
@@ -63,3 +79,25 @@ async def test_acquire_gated_off_is_noop(db, monkeypatch):
     monkeypatch.delenv("MIMIR_LOOP", raising=False)
     req = AcquireRequest(requester="pi", why=_WHY, arxiv_id="2401.44444")
     assert await handle_acquire_requested({"payload": req.model_dump()}, _Disp(db)) is None
+
+
+@pytest.mark.asyncio
+async def test_request_acquire_prioritizes_direction_tied_asks(monkeypatch):
+    """Direction-tied asks (claim_id set) get the higher backlog allowance; untargeted
+    asks stay at the low generic limit — so active research isn't starved by backpressure."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    state = SimpleNamespace(emit_corpus_event=AsyncMock())
+    # backlog=100: above the generic limit (40), below the direction limit (150).
+    monkeypatch.setattr(acquire_mod, "_acquire_backlog", AsyncMock(return_value=100))
+
+    # untargeted researcher ask -> HELD (over the generic 40 cap), nothing emitted
+    held = await request_acquire(state, AcquireRequest(requester="researcher", why=_WHY, query="x"))
+    assert held is False
+    state.emit_corpus_event.assert_not_awaited()
+
+    # direction-tied ask -> EMITTED (under the 150 priority cap)
+    emitted = await request_acquire(state, AcquireRequest(requester="researcher", claim_id=52, why=_WHY, query="x"))
+    assert emitted is True
+    state.emit_corpus_event.assert_awaited_once()

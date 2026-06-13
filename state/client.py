@@ -13,11 +13,39 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Literal
 
 import asyncpg
 from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
+
+# ── The direction lifecycle state machine (the ONE legal write path is advance_direction) ──
+# claims.status has no DB CHECK constraint (verified live), so legality is enforced here. A
+# direction graduates UPWARD on findings, concludes or invalidates terminally, and the ONLY
+# edge out of 'invalidated' is a reopen back to 'proposed' (the closure reopen rung). 'concluded'
+# and 'merged' (legacy/market-era) are terminal.
+_LEGAL_DIRECTION_TRANSITIONS: dict[str, set[str]] = {
+    "proposed": {"tested", "weakly_supported", "replicated", "concluded", "invalidated"},
+    "tested": {"weakly_supported", "replicated", "concluded", "invalidated"},
+    "weakly_supported": {"replicated", "concluded", "invalidated"},
+    "replicated": {"concluded", "invalidated"},
+    "invalidated": {"proposed"},  # reopen only
+    "concluded": set(),  # terminal
+    "merged": set(),  # legacy/market-era; terminal
+}
+# Monotone rank — a finding never demotes a direction to a weaker status (the prior _RANK guard).
+_STATUS_RANK: dict[str, int] = {"proposed": 0, "tested": 1, "weakly_supported": 2, "replicated": 3, "concluded": 4}
+# Which lifecycle event each transition emits (None = silent, e.g. graduate; reopen's richer
+# direction.reopened stays with the closure caller to avoid a double-emit).
+_TRANSITION_EVENT: dict[str, str] = {
+    "conclude": "direction.concluded",
+    "gap": "claim.invalidated",
+    "retire": "claim.invalidated",
+    "supersede": "claim.invalidated",
+}
 
 # -------------------------------------------------------------------------
 # Pydantic return types
@@ -642,6 +670,112 @@ class PostgresClient:
     ) -> Claim:
         return await self.invalidate_claim(thesis_id, reason, verdict_id, run_id)
 
+    async def advance_direction(
+        self,
+        claim_id: int,
+        to_status: str,
+        *,
+        transition: str,  # graduate | conclude | gap | retire | supersede | reopen
+        decided_by: str,  # synthesis | reflect | closure | deliberate | human | auto | critic
+        reason: str | None = None,
+        run_id: int | None = None,
+        monotone: bool = False,
+        verdict_id: int | None = None,
+        payload: dict | None = None,
+        emit_event: bool = True,
+        conn=None,
+    ) -> dict | None:
+        """The ONE legal write path for a direction's lifecycle status.
+
+        Validates the edge against ``_LEGAL_DIRECTION_TRANSITIONS`` (claims.status has no DB
+        CHECK), applies it, records a ``direction_transitions`` audit row, marks unaudited
+        findings stale on invalidating transitions, and emits the lifecycle event
+        (``direction.concluded`` on a conclude; ``claim.invalidated`` on gap/retire/supersede).
+        Returns ``{claim_id, from, to, transition}`` on success, ``None`` if the edge was
+        illegal, a no-op, or the row is not a live direction (logged, never raised).
+
+        Pass ``conn`` to run inside a caller's existing transaction (synthesis); otherwise a
+        fresh transaction is opened. ``monotone`` rejects any edge that does not raise the rank
+        (the finding-graduation guard)."""
+        async with contextlib.AsyncExitStack() as stack:
+            if conn is None:
+                conn = await stack.enter_async_context(self.pool.acquire())
+                await stack.enter_async_context(conn.transaction())
+            cur = await conn.fetchval(
+                "SELECT status::text FROM claims WHERE id = $1 AND claim_kind = 'direction' FOR UPDATE",
+                claim_id,
+            )
+            if cur is None:
+                log.info("advance_direction: claim %s is not a live direction — skipped (%s)", claim_id, transition)
+                return None
+            if to_status == cur or to_status not in _LEGAL_DIRECTION_TRANSITIONS.get(cur, set()):
+                log.info(
+                    "advance_direction: illegal/no-op %s→%s (%s) for direction %s — skipped",
+                    cur,
+                    to_status,
+                    transition,
+                    claim_id,
+                )
+                return None
+            if monotone and _STATUS_RANK.get(to_status, -1) <= _STATUS_RANK.get(cur, -1):
+                return None
+
+            if to_status == "invalidated":
+                await conn.execute(
+                    "UPDATE claims SET status = 'invalidated', invalidated_at = now(), "
+                    "invalidation_reason = $2, invalidated_by_verdict_id = $3, updated_at = now() WHERE id = $1",
+                    claim_id,
+                    (reason or "")[:2000] or None,
+                    verdict_id,
+                )
+                # A dead direction's unaudited findings should not surface in recall (mirrors invalidate_claim).
+                await conn.execute(
+                    "UPDATE findings SET audit_verdict = 'stale' WHERE claim_id = $1 AND audit_verdict IS NULL",
+                    claim_id,
+                )
+            elif transition == "reopen":
+                await conn.execute(
+                    "UPDATE claims SET status = $2::claim_status, invalidated_at = NULL, "
+                    "invalidated_by_verdict_id = NULL, invalidation_reason = NULL, updated_at = now() WHERE id = $1",
+                    claim_id,
+                    to_status,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE claims SET status = $2::claim_status, updated_at = now() WHERE id = $1",
+                    claim_id,
+                    to_status,
+                )
+
+            await conn.execute(
+                "INSERT INTO direction_transitions "
+                "(claim_id, from_status, to_status, transition, reason, decided_by, payload, created_by_run_id) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)",
+                claim_id,
+                cur,
+                to_status,
+                transition,
+                (reason or None) and reason[:2000],
+                decided_by,
+                json.dumps(payload or {}),
+                run_id,
+            )
+
+            event_type = _TRANSITION_EVENT.get(transition)
+            if emit_event and event_type:
+                dedup = f"concluded-{claim_id}" if transition == "conclude" else f"invalidate-{claim_id}"
+                await conn.execute(
+                    "INSERT INTO events (event_type, target_type, target_id, payload, emitted_by_run_id, dedup_key) "
+                    "VALUES ($1, 'claim', $2, $3::jsonb, $4, $5) "
+                    "ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING",
+                    event_type,
+                    claim_id,
+                    json.dumps({"transition": transition, "reason": (reason or "")[:300], "from": cur, "to": to_status}),
+                    run_id,
+                    dedup,
+                )
+            return {"claim_id": claim_id, "from": cur, "to": to_status, "transition": transition}
+
     # ---- Critic verdicts -----------------------------------------------
 
     async def create_critic_verdict(
@@ -911,6 +1045,558 @@ class PostgresClient:
                 """,
                 error[:1000],
                 experiment_id,
+            )
+
+    # ---- Sandboxed code experiments + Quartermaster lifecycle -------------
+
+    @staticmethod
+    def _parse_experiment_row(r) -> dict:
+        d = dict(r)
+        for k in ("params", "result", "provenance", "dataset_refs", "resource_usage"):
+            v = d.get(k)
+            if isinstance(v, str):
+                with contextlib.suppress(Exception):
+                    d[k] = json.loads(v)
+        return d
+
+    async def queue_experiment(
+        self,
+        task_id: int,
+        inquiry_id: int | None,
+        kind: str,
+        params: dict,
+        *,
+        code: str | None = None,
+        wall_clock_budget_s: int = 600,
+        mem_budget_mb: int = 2048,
+        requires_gpu: bool = False,
+        gpu_mem_mb: int | None = None,
+        priority: int = 5,
+        provenance: dict | None = None,
+        dataset_refs: list | dict | None = None,
+    ) -> int:
+        """Enqueue a code experiment for the Quartermaster to schedule (status='queued')."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                INSERT INTO experiment_runs (
+                    task_id, inquiry_id, kind, params, status, code,
+                    wall_clock_budget_s, mem_budget_mb, requires_gpu, gpu_mem_mb,
+                    priority, provenance, dataset_refs
+                )
+                VALUES ($1, $2, $3, $4::jsonb, 'queued', $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)
+                RETURNING id
+                """,
+                task_id,
+                inquiry_id,
+                kind,
+                json.dumps(params),
+                code,
+                wall_clock_budget_s,
+                mem_budget_mb,
+                requires_gpu,
+                gpu_mem_mb,
+                priority,
+                json.dumps(provenance) if provenance is not None else None,
+                json.dumps(dataset_refs) if dataset_refs is not None else None,
+            )
+
+    async def get_queued_experiments(self, limit: int = 20) -> list[dict]:
+        """Queued experiments, highest priority + oldest first (the QM's run order)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM experiment_runs WHERE status = 'queued' ORDER BY priority DESC, started_at ASC LIMIT $1",
+                limit,
+            )
+            return [self._parse_experiment_row(r) for r in rows]
+
+    async def get_running_experiments(self) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM experiment_runs WHERE status = 'running' ORDER BY started_at ASC")
+            return [self._parse_experiment_row(r) for r in rows]
+
+    async def mark_experiment_running(self, experiment_id: int, worker: str) -> bool:
+        """Atomically claim a queued experiment for execution. Returns False if it
+        was already taken (lost the race) — the QM only launches on a True."""
+        async with self.pool.acquire() as conn:
+            status = await conn.fetchval(
+                "UPDATE experiment_runs "
+                "SET status = 'running', worker = $2, started_at = NOW(), heartbeat_at = NOW() "
+                "WHERE id = $1 AND status = 'queued' RETURNING status",
+                experiment_id,
+                worker,
+            )
+            return status == "running"
+
+    async def heartbeat_experiment(self, experiment_id: int) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE experiment_runs SET heartbeat_at = NOW() WHERE id = $1", experiment_id)
+
+    async def update_experiment_code(self, experiment_id: int, code: str, provenance: dict | None = None) -> None:
+        """Persist the current code (the coding loop rewrites it each debug attempt;
+        the final WORKING code is what's stored for reproducibility)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs SET code = $2, provenance = COALESCE($3::jsonb, provenance) WHERE id = $1",
+                experiment_id,
+                code,
+                json.dumps(provenance) if provenance is not None else None,
+            )
+
+    async def record_experiment_result(
+        self,
+        experiment_id: int,
+        *,
+        status: str,
+        result: dict | None = None,
+        error: str | None = None,
+        resource_usage: dict | None = None,
+    ) -> None:
+        """Write the sandbox outcome (status in completed|failed) — the QM calls this
+        when the container exits. Interpretation + notes land later via the handler."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE experiment_runs
+                SET status = $2,
+                    result = COALESCE($3::jsonb, result),
+                    error = COALESCE($4, error),
+                    resource_usage = COALESCE($5::jsonb, resource_usage),
+                    completed_at = NOW()
+                WHERE id = $1
+                """,
+                experiment_id,
+                status,
+                json.dumps(result) if result is not None else None,
+                (error or "")[:2000] if error is not None else None,
+                json.dumps(resource_usage) if resource_usage is not None else None,
+            )
+
+    async def kill_experiment(self, experiment_id: int, reason: str) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs "
+                "SET status = 'killed', kill_reason = $2, killed_at = NOW(), completed_at = NOW() "
+                "WHERE id = $1 AND status IN ('running', 'queued')",
+                experiment_id,
+                reason[:500],
+            )
+
+    async def set_experiment_interpretation(
+        self,
+        experiment_id: int,
+        interpretation: str | None,
+        interpret_run_id: int | None = None,
+        researcher_notes: str | None = None,
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs "
+                "SET interpretation = $2, interpret_run_id = $3, researcher_notes = $4 WHERE id = $1",
+                experiment_id,
+                interpretation,
+                interpret_run_id,
+                researcher_notes,
+            )
+
+    async def set_experiment_ingested_doc(self, experiment_id: int, doc_id: int) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE experiment_runs SET ingested_doc_id = $2 WHERE id = $1", experiment_id, doc_id)
+
+    async def set_experiment_dataset_refs(self, experiment_id: int, refs: list | dict) -> None:
+        """Record the dataset(s) an experiment used/produced (content-hash + how-produced)
+        so its data lineage is captured — the reproducibility record for the inputs."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs SET dataset_refs = $2::jsonb WHERE id = $1",
+                experiment_id,
+                json.dumps(refs),
+            )
+
+    async def set_experiment_realism(self, experiment_id: int, realism: str, mismatch: bool = False) -> None:
+        """Record how REAL an experiment's data was — 'real' | 'builtin' | 'synthetic' — plus a
+        plan-vs-actual mismatch flag. The loop uses this to discount synthetic-only findings and
+        to escalate them to a real-data confirmation run (migration 020)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE experiment_runs SET data_realism = $2, realism_mismatch = $3 WHERE id = $1",
+                experiment_id,
+                realism,
+                mismatch,
+            )
+
+    async def get_experiment(self, experiment_id: int) -> dict | None:
+        async with self.pool.acquire() as conn:
+            r = await conn.fetchrow("SELECT * FROM experiment_runs WHERE id = $1", experiment_id)
+            return self._parse_experiment_row(r) if r else None
+
+    async def get_recent_experiment_notes_for_claims(self, claim_ids: list[int], limit: int = 12) -> list[dict]:
+        """Recent experiment narrative notes for a set of directions — Ariadne reads
+        these so she reasons over what the lab actually ran, not just confidence deltas."""
+        if not claim_ids:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT t.claim_id, e.id AS experiment_id, e.kind, e.status,
+                       e.researcher_notes, e.interpretation, e.completed_at
+                FROM experiment_runs e
+                JOIN tasks t ON t.id = e.task_id
+                WHERE t.claim_id = ANY($1)
+                  AND (e.researcher_notes IS NOT NULL OR e.interpretation IS NOT NULL)
+                ORDER BY e.completed_at DESC NULLS LAST, e.id DESC
+                LIMIT $2
+                """,
+                claim_ids,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    # ── synthesis: a direction's experiments → a paper-shaped finding ────────────────
+    async def get_completed_experiments_for_claim(self, claim_id: int, limit: int = 30) -> list[dict]:
+        """Every COMPLETED experiment on a direction (newest first) with its result, params, and
+        the researcher's read — the evidence the synthesis agent composes into one finding."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT e.id AS experiment_id, e.kind, e.params, e.result,
+                       e.interpretation, e.researcher_notes, e.completed_at, e.data_realism
+                FROM experiment_runs e
+                JOIN tasks t ON t.id = e.task_id
+                WHERE t.claim_id = $1 AND e.status = 'completed' AND e.result IS NOT NULL
+                ORDER BY e.completed_at DESC NULLS LAST, e.id DESC
+                LIMIT $2
+                """,
+                claim_id,
+                limit,
+            )
+            return [self._parse_experiment_row(r) for r in rows]
+
+    async def count_completed_experiments_for_claim(self, claim_id: int) -> int:
+        """How many completed experiments a direction has — the condition the synthesis trigger reads."""
+        async with self.pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    """
+                    SELECT count(*) FROM experiment_runs e JOIN tasks t ON t.id = e.task_id
+                    WHERE t.claim_id = $1 AND e.status = 'completed' AND e.result IS NOT NULL
+                    """,
+                    claim_id,
+                )
+                or 0
+            )
+
+    async def direction_is_thin_stuck(self, claim_id: int | None, *, n: int = 3) -> bool:
+        """True if a direction's last `n` completed research tasks were ALL thin_corpus — it's stuck.
+        The planner reads this to STOP refilling it (more tasks just churn + flood acquires, and each
+        fresh planner task resets the closure ladder's scout→retry→retire state, so it never hands
+        off). Drained, the watchdog ladder fires its sweep and declares the gap, or the experiment
+        lane settles it. False on a None claim_id / too little history."""
+        if claim_id is None:
+            return False
+        async with self.pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    "SELECT count(*) = $2 AND bool_and(result->>'disposition' = 'thin_corpus') "
+                    "FROM (SELECT result FROM tasks WHERE claim_id = $1 AND status = 'completed' "
+                    "      AND result->>'disposition' IS NOT NULL ORDER BY id DESC LIMIT $2) t",
+                    claim_id,
+                    n,
+                )
+            )
+
+    async def get_research_document(self, claim_id: int, kind: str) -> dict | None:
+        """The direction's current (final) research document of `kind` — lit_review /
+        proposal / article. The research arc's readers (proposal builder, experiment
+        designer, article composer) all come through here."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, claim_id, kind, title, body_md, meta, citations, created_at "
+                "FROM research_documents WHERE claim_id = $1 AND kind = $2 AND status = 'final' "
+                "ORDER BY id DESC LIMIT 1",
+                claim_id,
+                kind,
+            )
+        if row is None:
+            return None
+        d = dict(row)
+        for k in ("meta", "citations"):
+            if isinstance(d.get(k), str):
+                d[k] = json.loads(d[k])
+        return d
+
+    async def latest_finding_n_for_claim(self, claim_id: int) -> int | None:
+        """The evidence size (n_experiments) of the most recent finding for a direction, or None —
+        so the synthesizer only re-runs when materially more experiments have accumulated."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT max(n_experiments) FROM research_findings WHERE direction_claim_id = $1", claim_id
+            )
+
+    async def get_claim_goals_text(self, claim_id: int) -> str:
+        """The direction's goals as a compact block (expectation / kill-condition) for the compose prompt."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT expectation, kill_condition FROM claim_goals WHERE claim_id = $1 ORDER BY id", claim_id
+            )
+        return "\n".join(f"- expect: {r['expectation']} · kill if: {r['kill_condition']}" for r in rows)
+
+    async def persist_research_finding(
+        self,
+        *,
+        direction_claim_id: int,
+        headline: str,
+        claim_text: str,
+        supported: str,
+        method: str,
+        key_numbers: str,
+        limitations: str,
+        so_what: str,
+        next_step: str,
+        confidence: float,
+        n_experiments: int,
+        grounded_in: list[str],
+        graduate_to: str,
+        run_id: int | None = None,
+        data_realism: str | None = None,
+    ) -> dict:
+        """Write the finding: a `finding` claim (graph lineage + status), a research_findings row,
+        and graduate the direction's lifecycle status (upward only) via the single guarded write
+        path (advance_direction). All in one transaction. `data_realism` (worst-case across the
+        grounding experiments) records whether the finding rests on real / builtin / synthetic data."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            finding_claim_id = await conn.fetchval(
+                """
+                INSERT INTO claims (statement, claim_kind, parent_id, status, confidence, created_by_run_id)
+                VALUES ($1, 'finding', $2, 'proposed', $3, $4) RETURNING id
+                """,
+                headline[:4000],
+                direction_claim_id,
+                max(0.0, min(1.0, float(confidence))),
+                run_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO events (event_type, target_type, target_id, payload, dedup_key)
+                VALUES ('claim.created', 'claim', $1, $2::jsonb, $3)
+                ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                """,
+                finding_claim_id,
+                json.dumps({"statement": headline, "parent_id": direction_claim_id, "claim_kind": "finding"}),
+                f"create-{finding_claim_id}",
+            )
+            finding_id = await conn.fetchval(
+                """
+                INSERT INTO research_findings
+                    (direction_claim_id, finding_claim_id, headline, claim_text, supported, method,
+                     key_numbers, limitations, so_what, next_step, confidence, n_experiments,
+                     grounded_in, created_by_run_id, data_realism)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15)
+                RETURNING id
+                """,
+                direction_claim_id,
+                finding_claim_id,
+                headline,
+                claim_text,
+                supported,
+                method,
+                key_numbers,
+                limitations,
+                so_what,
+                next_step,
+                float(confidence),
+                n_experiments,
+                json.dumps(grounded_in),
+                run_id,
+                data_realism,
+            )
+            # Graduate the direction UPWARD only (a finding never demotes a stronger prior status),
+            # and ONLY while it's still active — never resurrect an invalidated/superseded direction.
+            # The legal-transition table + monotone guard + audit row all live in advance_direction;
+            # a decisive 'concluded' graduation also emits the direction.concluded lifecycle event.
+            adv = await self.advance_direction(
+                direction_claim_id,
+                graduate_to,
+                transition=("conclude" if graduate_to == "concluded" else "graduate"),
+                decided_by="synthesis",
+                reason=f"finding: {headline[:200]}",
+                run_id=run_id,
+                monotone=True,
+                payload={"finding_id": finding_id, "supported": supported, "confidence": float(confidence)},
+                conn=conn,
+            )
+            graduated_to = adv["to"] if adv else None
+        return {"finding_id": finding_id, "finding_claim_id": finding_claim_id, "graduated_to": graduated_to}
+
+    async def get_recent_findings_for_claims(self, claim_ids: list[int], limit: int = 8) -> list[dict]:
+        """Recent paper-shaped findings for a set of directions — Ariadne reads these so she
+        re-frames over the lab's CONCLUSIONS, not just raw experiment notes."""
+        if not claim_ids:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT direction_claim_id, headline, claim_text, supported, confidence, so_what, n_experiments
+                FROM research_findings
+                WHERE direction_claim_id = ANY($1)
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                """,
+                claim_ids,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def get_recent_findings(self, limit: int = 8) -> list[dict]:
+        """The lab's most recent paper-shaped findings across ALL directions — NOT scoped to the
+        currently-active claim ids. A finding survives a re-frame (the supersede invalidates
+        'mission'/'direction' claims, never 'finding'), but its direction bond goes inactive, so the
+        per-claim read returns nothing after a re-frame. This global read is the durable channel:
+        every deliberation sees what the lab has CONCLUDED so it builds beyond it instead of re-rolling."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT direction_claim_id, headline, claim_text, supported, confidence, so_what, n_experiments
+                FROM research_findings
+                ORDER BY created_at DESC, id DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    # ── independent novelty/impact adjudication (agents/novelty) ─────────────────────
+    async def get_unadjudicated_directions(self, limit: int = 20) -> list[dict]:
+        """Scored, active directions that have NO independent adjudication yet — the work the
+        novelty agent picks up so the gate has an external verdict to require."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.statement
+                FROM claims c JOIN direction_scores ds ON ds.claim_id = c.id
+                WHERE c.claim_kind = 'direction'
+                  AND c.status IN ('proposed', 'tested', 'weakly_supported', 'replicated')
+                  AND NOT EXISTS (SELECT 1 FROM direction_adjudications da WHERE da.claim_id = c.id)
+                ORDER BY c.id
+                LIMIT $1
+                """,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def get_prior_directions_with_outcomes(self, exclude_claim_id: int, limit: int = 12) -> list[dict]:
+        """Recent directions (any status, newest first) WITH how each one ENDED — status plus
+        its latest finding, if any. The adjudicator must see outcomes, not just statements:
+        a question is only "already answered" if a prior attempt concluded with a decisive
+        finding; an invalidated/retired attempt without one left the question OPEN (observed
+        2026-06-12: a fresh agenda held wholesale as redundant with INVALIDATED prior work)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.statement, c.status,
+                       rf.supported AS finding_supported, rf.confidence AS finding_confidence
+                FROM claims c
+                LEFT JOIN LATERAL (
+                    SELECT supported, confidence FROM research_findings
+                    WHERE direction_claim_id = c.id ORDER BY id DESC LIMIT 1
+                ) rf ON true
+                WHERE c.claim_kind = 'direction' AND c.id <> $1
+                ORDER BY c.id DESC LIMIT $2
+                """,
+                exclude_claim_id,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def get_held_directions(self, limit: int = 20) -> list[dict]:
+        """Live directions whose independent adjudication is 'hold' and that no gate has
+        approved — the reconsideration set for the pacemaker's daily all-held re-look."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.statement
+                FROM claims c JOIN direction_adjudications da ON da.claim_id = c.id
+                WHERE c.claim_kind = 'direction'
+                  AND c.status IN ('proposed', 'tested', 'weakly_supported', 'replicated')
+                  AND da.verdict = 'hold'
+                  AND NOT EXISTS (SELECT 1 FROM direction_gate dg WHERE dg.claim_id = c.id AND dg.status = 'approved')
+                ORDER BY c.id
+                LIMIT $1
+                """,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def get_held_directions_with_rationale(self, limit: int = 8) -> list[dict]:
+        """Recently-held directions WITH the adjudicator's hold rationale — the deliberation
+        feedback edge. When the independent adjudicator holds an agenda wholesale (prior-art
+        overlap / re-tread), the re-frame must SEE why, or it re-proposes near-duplicates and
+        the lab churns deliberate→hold→exhausted. Newest first; rationale falls back to the
+        redundancy note."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.statement,
+                       COALESCE(NULLIF(da.rationale, ''), da.redundant_note, 'redundant with prior work') AS rationale
+                FROM claims c JOIN direction_adjudications da ON da.claim_id = c.id
+                WHERE c.claim_kind = 'direction'
+                  AND c.status IN ('proposed', 'tested', 'weakly_supported', 'replicated')
+                  AND da.verdict = 'hold'
+                  AND NOT EXISTS (SELECT 1 FROM direction_gate dg WHERE dg.claim_id = c.id AND dg.status = 'approved')
+                ORDER BY da.created_at DESC, c.id DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def persist_direction_adjudication(
+        self,
+        *,
+        claim_id: int,
+        novelty_independent: int,
+        impact_independent: int,
+        is_novel: bool,
+        is_impactful: bool,
+        redundant: bool,
+        redundant_note: str,
+        verdict: str,
+        rationale: str,
+        nearest_prior_art: list[str],
+        run_id: int | None = None,
+    ) -> None:
+        """Write (or replace) a direction's independent adjudication."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO direction_adjudications
+                    (claim_id, novelty_independent, impact_independent, is_novel, is_impactful,
+                     redundant, redundant_note, verdict, rationale, nearest_prior_art, created_by_run_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+                ON CONFLICT (claim_id) DO UPDATE SET
+                    novelty_independent = EXCLUDED.novelty_independent,
+                    impact_independent = EXCLUDED.impact_independent,
+                    is_novel = EXCLUDED.is_novel,
+                    is_impactful = EXCLUDED.is_impactful,
+                    redundant = EXCLUDED.redundant,
+                    redundant_note = EXCLUDED.redundant_note,
+                    verdict = EXCLUDED.verdict,
+                    rationale = EXCLUDED.rationale,
+                    nearest_prior_art = EXCLUDED.nearest_prior_art,
+                    created_by_run_id = EXCLUDED.created_by_run_id,
+                    created_at = now()
+                """,
+                claim_id,
+                novelty_independent,
+                impact_independent,
+                is_novel,
+                is_impactful,
+                redundant,
+                redundant_note,
+                verdict,
+                rationale,
+                json.dumps(nearest_prior_art),
+                run_id,
             )
 
     async def get_research_tree(self, task_id: int) -> dict:

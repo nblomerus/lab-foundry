@@ -15,8 +15,10 @@ import dataclasses
 import logging
 import os
 import re
+from typing import TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from harness.dispatch import _current_session
 from harness.router import CloudProvider, Provider
@@ -97,11 +99,11 @@ async def _record_run(
     agent = invocation_type.split(".")[0]
     try:
         async with pool.acquire() as conn:
-            await conn.execute(
+            rid = await conn.fetchval(
                 "INSERT INTO agent_runs (department, agent_name, invocation_type, model_tier, model_name, "
                 "triggered_by_event_id, input_token_count, output_token_count, status, completed_at, "
                 "session_id, step_name, step_order, input_summary, output_summary) "
-                "VALUES ('research',$1,$2,'reasoning',$3,$4,$5,$6,'completed',now(),$7,$8,$9,$10,$11)",
+                "VALUES ('research',$1,$2,'reasoning',$3,$4,$5,$6,'completed',now(),$7,$8,$9,$10,$11) RETURNING id",
                 agent,
                 invocation_type,
                 model_name,
@@ -114,8 +116,18 @@ async def _record_run(
                 input_summary,
                 output_summary,
             )
+        # Surface the run id so the _chain_complete caller can credit it (e.g. Ariadne's reflection
+        # crediting a re-derived lesson against this reflect run — the only path that records it).
+        sess.last_run_id = rid
     except Exception as e:  # noqa: BLE001 — observability is best-effort
         log.debug("agent_run record skipped (%s): %s", step_name, e)
+
+
+def current_run_id() -> int | None:
+    """The agent_runs.id of the most recent _chain_complete call on the current handler session
+    (None outside a session / if recording was skipped). Used to credit a non-Router LLM run."""
+    sess = _current_session.get()
+    return getattr(sess, "last_run_id", None) if sess is not None else None
 
 
 async def _chain_complete(
@@ -176,3 +188,58 @@ def _strip_fences(content: str) -> str:
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
     return content
+
+
+_M = TypeVar("_M", bound=BaseModel)
+
+
+async def complete_validated(
+    messages: list[dict],
+    model_cls: type[_M],
+    *,
+    invocation_type: str,
+    step_name: str,
+    primary_model: str | None = None,
+    temperature: float = 0.3,
+    retries: int = 1,
+) -> _M:
+    """Complete a chat and parse its JSON into `model_cls`. On a pydantic ValidationError, do up to
+    `retries` CORRECTIVE re-prompts that feed the exact errors + the offending output back, so a
+    schema-violating first attempt (a renamed key, a dropped required field) self-corrects in the
+    same handler run — instead of failing the step and (for the day-bucketed arc) parking it until
+    tomorrow. Mirrors Ariadne's deliberation-grading retry. Raises the last ValidationError if it
+    never validates, so the caller can decide whether to skip gracefully."""
+    last_exc: ValidationError | None = None
+    msgs = list(messages)
+    for attempt in range(retries + 1):
+        content = await _chain_complete(
+            msgs,
+            temperature=temperature,
+            invocation_type=invocation_type,
+            step_name=step_name if attempt == 0 else f"{step_name}.fix",
+            primary_model=primary_model,
+        )
+        try:
+            return model_cls.model_validate_json(_strip_fences(content))
+        except ValidationError as e:
+            last_exc = e
+            errs = "; ".join(
+                f"{'.'.join(str(p) for p in err.get('loc', ()))}: {err.get('msg', '')}" for err in e.errors()[:8]
+            )
+            log.warning(
+                "%s: output failed %s validation (attempt %d): %s", step_name, model_cls.__name__, attempt + 1, errs
+            )
+            msgs = [
+                *messages,
+                {"role": "assistant", "content": content[:6000]},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Your JSON failed schema validation:\n{errs}\n\n"
+                        "Re-emit the COMPLETE corrected JSON only. Use the EXACT field names from the schema "
+                        "(e.g. 'hid' not 'id', 'threshold' for the decision rule), and include EVERY required "
+                        "field for each item. Output ONLY the JSON object."
+                    ),
+                },
+            ]
+    raise last_exc if last_exc else RuntimeError(f"{step_name}: no output to validate")

@@ -1,0 +1,11 @@
+# The experiment image COPYs nothing from the build context (it pip-installs the
+# stack); keep the context tiny so `docker build` doesn't tar the whole repo.
+.git
+web/node_modules
+web/.next
+**/__pycache__
+**/.pytest_cache
+.ruff_cache
+**/*.pyc
+/mnt
+datasets

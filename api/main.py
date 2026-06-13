@@ -34,7 +34,20 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import agentlab, ariadne, bench, debug, knowledge, ops, researcher, snapshot, stream, trace
+from api import (
+    agentlab,
+    ariadne,
+    bench,
+    debug,
+    knowledge,
+    ops,
+    quartermaster,
+    research,
+    researcher,
+    snapshot,
+    stream,
+    trace,
+)
 
 
 async def _init_conn(conn: asyncpg.Connection) -> None:
@@ -105,6 +118,8 @@ app.include_router(ops.router)
 app.include_router(agentlab.router)
 app.include_router(ariadne.router)
 app.include_router(researcher.router)
+app.include_router(quartermaster.router)
+app.include_router(research.router)
 
 
 @app.get("/health")

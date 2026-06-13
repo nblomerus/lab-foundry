@@ -21,6 +21,7 @@ import pytest
 from ops import (
     _env,
     agent_mode,
+    closure_audit,
     lab_debug,
     lab_doctor,
     lab_snapshot,
@@ -54,10 +55,12 @@ def _no_dotenv(monkeypatch, *modules):
 
 @pytest.fixture(autouse=True)
 def _reset_doctor_flags():
-    """lab_doctor accumulates flags in a module global — reset around each test."""
+    """lab_doctor / closure_audit accumulate flags in a module global — reset around each test."""
     lab_doctor._flags.clear()
+    closure_audit._flags.clear()
     yield
     lab_doctor._flags.clear()
+    closure_audit._flags.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,6 +134,8 @@ async def test_env_register_vector_codec_failure(monkeypatch, capsys):
 def _doctor_clean_rules():
     """Rules giving a fully-healthy lab (no flags raised)."""
     return [
+        # NOW / lab.pulse heartbeat — a RECENT pulse (age_s small) → not stale → no flag.
+        ("event_type = 'lab.pulse'", {"emitted_at": "2026-06-09 10:00", "payload": {}, "age_s": 60}),
         ("max(emitted_at) FROM events", "2026-06-09 10:00"),
         ("max(started_at) FROM agent_runs", "2026-06-09 10:01"),
         # events-by-status (last Nh)
@@ -210,6 +215,68 @@ async def test_lab_doctor_with_warnings(monkeypatch, capsys):
 
 
 @pytest.mark.asyncio
+async def test_lab_doctor_clean_reports_no_stall_indicators(monkeypatch, capsys):
+    """The clean rules have no indicator rows → the stall section reports OK."""
+    conn = ScriptedConn(_doctor_clean_rules())
+    _patch_connect(monkeypatch, lab_doctor, conn)
+    _no_dotenv(monkeypatch, lab_doctor)
+    monkeypatch.setenv("DATABASE_URL", "x")
+    rc = await lab_doctor.run(hours=1)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no stall / saturation / broken-agent indicators" in out
+
+
+@pytest.mark.asyncio
+async def test_lab_doctor_stall_indicators_flagged(monkeypatch, capsys):
+    """agent.stalled is a ✗ (exit 1); agent.slow is a ⚠ early warning."""
+    rules = _doctor_clean_rules()
+    rules.append(
+        (
+            "event_type IN ('agent.stalled'",
+            [
+                {"event_type": "agent.stalled", "n": 2, "last": "10:00"},
+                {"event_type": "agent.slow", "n": 3, "last": "09:50"},
+            ],
+        )
+    )
+    conn = ScriptedConn(rules)
+    _patch_connect(monkeypatch, lab_doctor, conn)
+    _no_dotenv(monkeypatch, lab_doctor)
+    monkeypatch.setenv("DATABASE_URL", "x")
+    rc = await lab_doctor.run(hours=1)
+    out = capsys.readouterr().out
+    assert rc == 1  # a ✗ indicator → exit 1
+    assert "agent.stalled: 2" in out
+    assert "agent.slow: 3" in out
+    assert "thing(s) to look at" in out
+
+
+@pytest.mark.asyncio
+async def test_lab_doctor_closure_indicators_flagged(monkeypatch, capsys):
+    """loop.unclosed[unhandled_event] is a ✗ (exit 1); other kinds are ⚠."""
+    rules = _doctor_clean_rules()
+    rules.append(
+        (
+            "event_type = 'loop.unclosed'",
+            [
+                {"kind": "unhandled_event", "n": 4, "last": "10:00"},
+                {"kind": "research_gap", "n": 1, "last": "09:00"},
+            ],
+        )
+    )
+    conn = ScriptedConn(rules)
+    _patch_connect(monkeypatch, lab_doctor, conn)
+    _no_dotenv(monkeypatch, lab_doctor)
+    monkeypatch.setenv("DATABASE_URL", "x")
+    rc = await lab_doctor.run(hours=1)
+    out = capsys.readouterr().out
+    assert rc == 1  # a ✗ unhandled_event → exit 1
+    assert "loop.unclosed [unhandled_event]: 4" in out
+    assert "loop.unclosed [research_gap]: 1" in out
+
+
+@pytest.mark.asyncio
 async def test_lab_doctor_check_errors_isolated(monkeypatch, capsys):
     """A single check raising → ✗ flag, exit 1, but the report still completes."""
 
@@ -260,6 +327,100 @@ def test_lab_doctor_main(monkeypatch):
     monkeypatch.setattr(asyncio, "run", lambda coro: (coro.close(), 7)[1])
     monkeypatch.setattr("sys.argv", ["ops.lab_doctor", "--hours", "3"])
     assert lab_doctor.main() == 7
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ops.closure_audit
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_closure_audit_clean(monkeypatch, capsys):
+    """Everything empty → every loop that ran also closed → exit 0."""
+    conn = ScriptedConn([])  # all sections default to empty/None
+    _patch_connect(monkeypatch, closure_audit, conn)
+    _no_dotenv(monkeypatch, closure_audit)
+    monkeypatch.setenv("DATABASE_URL", "x")
+    rc = await closure_audit.run(days=3)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CLOSURE AUDIT" in out
+    assert "no open non-closures" in out
+    assert "every non-telemetry event reaches a handler" in out
+
+
+@pytest.mark.asyncio
+async def test_closure_audit_event_regression_and_stuck(monkeypatch, capsys):
+    """A non-exempt event dropped no_handler (was-handled) + a stuck direction → ✗ → exit 1.
+    An exempt telemetry event in the same result is NOT flagged."""
+    rules = [
+        (
+            "HAVING count(*) FILTER (WHERE suppression_reason='no_handler')",
+            [
+                {"event_type": "task.completed", "consumed": 5, "nh": 3, "last": "10:00"},
+                {"event_type": "session.started", "consumed": 0, "nh": 99, "last": "10:00"},
+            ],
+        ),
+        ("HAVING count(t.*) > 0", [{"id": 43, "status": "proposed", "tasks": 2, "open": 0}]),
+    ]
+    conn = ScriptedConn(rules)
+    _patch_connect(monkeypatch, closure_audit, conn)
+    _no_dotenv(monkeypatch, closure_audit)
+    monkeypatch.setenv("DATABASE_URL", "x")
+    rc = await closure_audit.run(days=3)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "task.completed: 3 dropped no_handler" in out and "was-handled" in out
+    assert "session.started" not in out  # exempt telemetry → never flagged
+    assert "direction #43" in out
+
+
+@pytest.mark.asyncio
+async def test_closure_audit_warnings_only(monkeypatch, capsys):
+    """Thin-corpus orphan + unadvanced claim + a research_gap indicator → all ⚠ → exit 0."""
+    rules = [
+        ("'thin_corpus'", [{"id": 19, "claim_id": 43, "cstatus": "proposed", "last_evidence_at": None}]),
+        ("count(DISTINCT t.claim_id)", 2),
+        ("event_type='loop.unclosed'", [{"kind": "research_gap", "n": 1, "last": "10:00"}]),
+    ]
+    conn = ScriptedConn(rules)
+    _patch_connect(monkeypatch, closure_audit, conn)
+    _no_dotenv(monkeypatch, closure_audit)
+    monkeypatch.setenv("DATABASE_URL", "x")
+    rc = await closure_audit.run(days=2)
+    out = capsys.readouterr().out
+    assert rc == 0  # ⚠ only, no ✗
+    assert "thin_corpus" in out
+    assert "completed task but no evidence: 2" in out
+    assert "loop.unclosed [research_gap]: 1" in out
+
+
+@pytest.mark.asyncio
+async def test_closure_audit_check_error_isolated(monkeypatch, capsys):
+    def _boom():
+        raise RuntimeError("db gone")
+
+    conn = ScriptedConn([("HAVING count(*) FILTER (WHERE suppression_reason='no_handler')", _boom)])
+    _patch_connect(monkeypatch, closure_audit, conn)
+    _no_dotenv(monkeypatch, closure_audit)
+    monkeypatch.setenv("DATABASE_URL", "x")
+    rc = await closure_audit.run(days=1)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "_event_closure check errored" in out
+
+
+@pytest.mark.asyncio
+async def test_closure_audit_no_dsn(monkeypatch, capsys):
+    _no_dotenv(monkeypatch, closure_audit)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    rc = await closure_audit.run(days=1)
+    assert rc == 2
+    assert "DATABASE_URL not set" in capsys.readouterr().err
+
+
+def test_closure_audit_main(monkeypatch):
+    monkeypatch.setattr(asyncio, "run", lambda coro: (coro.close(), 5)[1])
+    monkeypatch.setattr("sys.argv", ["ops.closure_audit", "--days", "2"])
+    assert closure_audit.main() == 5
 
 
 # ─────────────────────────────────────────────────────────────────────────────

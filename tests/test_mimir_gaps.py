@@ -129,7 +129,7 @@ async def test_resolve_candidates_query_walks_multiple_pages(monkeypatch):
     monkeypatch.setenv("MIMIR_ACQUIRE_PAGES", "3")
     seen_starts: list[int] = []
 
-    async def _scout(topics, per_topic=8, start=0):
+    async def _scout(topics, per_topic=8, start=0, sort="submittedDate"):
         seen_starts.append(start)
         # page 0 and 1 return a hit each, page 2 returns empty → loop breaks early
         if start >= 2 * per_topic:
@@ -148,7 +148,7 @@ async def test_resolve_candidates_query_breaks_on_first_empty(monkeypatch):
     monkeypatch.setenv("MIMIR_ACQUIRE_PAGES", "5")
     calls = {"n": 0}
 
-    async def _scout(topics, per_topic=8, start=0):
+    async def _scout(topics, per_topic=8, start=0, sort="submittedDate"):
         calls["n"] += 1
         return []  # first page already empty → break immediately
 
@@ -162,7 +162,7 @@ async def test_resolve_candidates_pages_floor_at_one(monkeypatch):
     monkeypatch.setenv("MIMIR_ACQUIRE_PAGES", "0")  # max(1, 0) → still one page
     calls = {"n": 0}
 
-    async def _scout(topics, per_topic=8, start=0):
+    async def _scout(topics, per_topic=8, start=0, sort="submittedDate"):
         calls["n"] += 1
         return [_desc(canonical_key="only")]
 
@@ -354,7 +354,7 @@ async def test_sweep_runs_discovery_with_payload_topics(monkeypatch):
     state = make_state()
     out = await H.handle_sweep_requested({"payload": {"topics": ["t1", "t2"]}}, _Disp(state))
     assert out == {"scanned": 5, "discovered": 2}
-    sweep.assert_awaited_once_with(["t1", "t2"], state)
+    sweep.assert_awaited_once_with(["t1", "t2"], state, sort="submittedDate", claim_id=None)
 
 
 async def test_sweep_no_payload_topics_passes_none(monkeypatch):
@@ -363,7 +363,7 @@ async def test_sweep_no_payload_topics_passes_none(monkeypatch):
     monkeypatch.setattr(H, "run_discovery_sweep", sweep)
     state = make_state()
     await H.handle_sweep_requested({"payload": {}}, _Disp(state))
-    sweep.assert_awaited_once_with(None, state)
+    sweep.assert_awaited_once_with(None, state, sort="submittedDate", claim_id=None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -923,14 +923,20 @@ async def test_sweep_scout_failure_is_swallowed(monkeypatch):
     monkeypatch.setitem(C._SCOUTS, "arxiv", _boom)
     st = _sweep_state()
     res = await C.run_discovery_sweep(["topic"], st)
-    assert res == {"scanned": 0, "discovered": 0, "topics": ["topic"]}
+    # The failure is swallowed (sweep survives) but COUNTED — the settle artifact must
+    # let the closure ladder tell a blind sweep apart from genuine emptiness.
+    assert res == {"scanned": 0, "discovered": 0, "errors": 1, "topics": ["topic"]}
+    settles = [c for c in st.emit_corpus_event.await_args_list if c.args[0] == "library.sweep_settled"]
+    assert len(settles) == 1
+    assert settles[0].kwargs["payload"]["scanned"] == 0
+    assert settles[0].kwargs["payload"]["errors"] == 1
 
 
 async def test_sweep_cursor_failure_defaults_offset_zero(monkeypatch):
     monkeypatch.setenv("LIBRARY_SCOUTS", "arxiv")
     seen_start = {}
 
-    async def _scout(topics, per_topic=5, start=0):
+    async def _scout(topics, per_topic=5, start=0, sort="submittedDate"):
         seen_start["start"] = start
         return [_desc("a")]
 
@@ -976,7 +982,7 @@ async def test_sweep_topics_none_with_explicit_per_topic(monkeypatch):
     monkeypatch.setenv("LIBRARY_SCOUTS", "arxiv")
     captured = {}
 
-    async def _scout(topics, per_topic=5, start=0):
+    async def _scout(topics, per_topic=5, start=0, sort="submittedDate"):
         captured["per_topic"] = per_topic
         return []
 
@@ -992,7 +998,7 @@ async def test_sweep_explicit_topics_default_per_topic(monkeypatch):
     monkeypatch.setenv("LIBRARY_SCOUTS", "arxiv")
     captured = {}
 
-    async def _scout(topics, per_topic=5, start=0):
+    async def _scout(topics, per_topic=5, start=0, sort="submittedDate"):
         captured["per_topic"] = per_topic
         return []
 

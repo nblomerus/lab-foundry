@@ -4,16 +4,17 @@
 // the intake Gate. Lifted from the original SVG Floorplan (retired in this
 // upgrade) so the React Flow rebuild reuses the exact, working /knowledge/* panels.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
-  Boxes, CheckCircle2, Clock, Compass, Database, Download, FileCode, FileText,
+  Boxes, CheckCircle2, ChevronRight, Clock, Compass, Database, Download, FileCode, FileText,
   Github, Globe, Network, Search, ShieldAlert, ShieldCheck,
 } from "lucide-react";
 import {
   api, type AcquireRequestRow, type AriadneOverview, type CorpusHit, type DebugCosts,
   type GatePanel, type HostStats, type KnowledgeStats, type MimirPanel, type PlannerPanel,
-  type QueueHealth, type RecentIngest, type ResearcherOverview, type ScoutPanel,
+  type QmExperiment, type QmExperimentDetail, type QmExperiments, type QueueHealth, type RecentIngest,
+  type ResearcherOverview, type ScoutPanel,
 } from "../../lib/api";
 import type { LabFoundryEvent, Snapshot } from "../../lib/types";
 import { ago } from "../../lib/format";
@@ -975,23 +976,29 @@ function fmtDur(s: number): string {
 
 function QueueHealthBanner({ h }: { h: QueueHealth }) {
   const age = h.oldest_pending_age_seconds;
-  const lagging = h.pending > 0 && age != null && age >= QUEUE_LAG_THRESHOLD_S;
   const drained = h.pending === 0;
-  const dot = drained ? "bg-emerald-500" : lagging ? "bg-amber-500" : "bg-sky-500";
+  // "Backing up" means the queue is GROWING — asks arrive faster than Mimir resolves
+  // them — not merely "deep". Acquire backpressure intentionally holds the queue near
+  // its cap, so a healthy draining queue still sits at ~the cap with a minutes-old tail;
+  // that's "flowing", not stuck. Gate on inflow > outflow (1h), with the oldest-wait
+  // threshold as a secondary guard so a brief blip doesn't trip it.
+  const backingUp =
+    !drained && h.requested_1h > h.resolved_1h && age != null && age >= QUEUE_LAG_THRESHOLD_S;
+  const dot = drained ? "bg-emerald-500" : backingUp ? "bg-amber-500" : "bg-sky-500";
   const label = drained
     ? "Drained — no asks waiting"
-    : lagging
-      ? "Backing up — Mimir slow or not draining"
+    : backingUp
+      ? "Backing up — asks arriving faster than Mimir resolves"
       : "Flowing — asks in flight";
   return (
-    <div className={cx("rounded-xl border p-2.5", lagging ? "border-amber-200 bg-amber-50/40" : "border-slate-100")}>
+    <div className={cx("rounded-xl border p-2.5", backingUp ? "border-amber-200 bg-amber-50/40" : "border-slate-100")}>
       <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600">
         <span className={cx("inline-block h-2 w-2 rounded-full", dot, !drained && "pulse-dot")} />
         {label}
       </div>
       <div className="mt-2 grid grid-cols-3 gap-2">
-        <StatTile label="In queue" value={h.pending} tone={lagging ? "amber" : drained ? "emerald" : "blue"} />
-        <StatTile label="Oldest wait" value={age != null ? fmtDur(age) : "—"} tone={lagging ? "amber" : "slate"} />
+        <StatTile label="In queue" value={h.pending} tone={backingUp ? "amber" : drained ? "emerald" : "blue"} />
+        <StatTile label="Oldest wait" value={age != null ? fmtDur(age) : "—"} tone={backingUp ? "amber" : "slate"} />
         <StatTile label="Resolved / h" value={h.resolved_1h} tone={h.resolved_1h > 0 ? "emerald" : "slate"} />
       </div>
       <p className="mt-1.5 text-[10px] text-slate-400">Last hour: {h.requested_1h} asked · {h.resolved_1h} resolved</p>
@@ -1212,6 +1219,7 @@ export function OpsInspector({ host, costs, mimir }: { host: HostStats | null; c
           <StatTile label="Power (proj)" value={projected != null ? `$${projected.toFixed(2)}/d` : "—"} />
         </div>
       </div>
+      <QmExperimentsPanel />
       <div>
         <SubHead label="Recent certifications" />
         {certs.length === 0 ? (
@@ -1227,6 +1235,166 @@ export function OpsInspector({ host, costs, mimir }: { host: HostStats | null; c
           </ul>
         )}
       </div>
+    </div>
+  );
+}
+
+const EXP_TONE: Record<string, string> = {
+  running: "text-emerald-600",
+  queued: "text-amber-600",
+  completed: "text-slate-500",
+  failed: "text-rose-600",
+  killed: "text-rose-600",
+};
+
+function DetailBlock({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function ExperimentDetailView({ d }: { d: QmExperimentDetail }) {
+  const prov = d.provenance ?? {};
+  const pre = "mt-0.5 max-h-44 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-[10px] leading-snug text-slate-100 whitespace-pre-wrap break-words";
+  return (
+    <div className="mt-1.5 space-y-2 border-t border-slate-200 pt-1.5">
+      {d.dataset_plan && (
+        <DetailBlock label="Dataset — how it was assembled">
+          <p className="mt-0.5 text-[11px] text-slate-600">{d.dataset_plan}</p>
+        </DetailBlock>
+      )}
+      {d.researcher_notes && (
+        <DetailBlock label="Researcher note">
+          <p className="mt-0.5 whitespace-pre-wrap text-[11px] text-slate-700">{d.researcher_notes}</p>
+        </DetailBlock>
+      )}
+      {d.interpretation && (
+        <DetailBlock label="Interpretation">
+          <p className="mt-0.5 whitespace-pre-wrap text-[11px] text-slate-700">{d.interpretation}</p>
+        </DetailBlock>
+      )}
+      {d.result != null && (
+        <DetailBlock label="Result">
+          <pre className={pre}>{JSON.stringify(d.result, null, 2)}</pre>
+        </DetailBlock>
+      )}
+      {d.error && (
+        <DetailBlock label="Error">
+          <pre className={cx(pre, "text-rose-200")}>{d.error}</pre>
+        </DetailBlock>
+      )}
+      {d.code && (
+        <DetailBlock label="Code that ran">
+          <pre className={pre}>{d.code}</pre>
+        </DetailBlock>
+      )}
+      <DetailBlock label="Provenance (reproducibility)">
+        <div className="mt-0.5 space-y-0.5 font-mono text-[10px] text-slate-500">
+          <div>image: {String(prov.image ?? "—")}</div>
+          {prov.image_digest != null && <div className="break-all">digest: {String(prov.image_digest)}</div>}
+          <div>seed: {String(prov.seed ?? "—")} · code_hash: {String(prov.code_hash ?? "—")}</div>
+          {d.duration_s != null && <div>duration: {d.duration_s}s {d.worker ? `· ${d.worker}` : ""}</div>}
+        </div>
+      </DetailBlock>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px]">
+        {d.ingested_doc_id != null && <span className="text-emerald-600">→ Library note #{d.ingested_doc_id}</span>}
+        {Array.isArray(d.dataset_refs) && d.dataset_refs.length > 0 && (
+          <span className="text-emerald-600">→ dataset card captured</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExperimentRow({ e, onKill }: { e: QmExperiment; onKill: (id: number) => void }) {
+  const live = e.status === "running" || e.status === "queued";
+  const budget = e.wall_clock_budget_s != null ? `${Math.round(e.wall_clock_budget_s / 60)}m` : null;
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<QmExperimentDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && detail == null && !loading) {
+      setLoading(true);
+      api.qmExperimentDetail(e.id)
+        .then(setDetail)
+        .catch(() => setDetail(null))
+        .finally(() => setLoading(false));
+    }
+  };
+
+  return (
+    <li className="rounded-md border border-slate-100 bg-slate-50/60 px-2 py-1.5">
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <button onClick={toggle} className="flex items-center gap-1.5 font-mono hover:opacity-70" title="Show what ran">
+          <ChevronRight className={cx("h-3 w-3 text-slate-400 transition-transform", open && "rotate-90")} />
+          <span className={cx("font-semibold uppercase", EXP_TONE[e.status] ?? "text-slate-500")}>{e.status}</span>
+          <span className="text-slate-400">#{e.id}</span>
+          {e.requires_gpu && <span className="rounded bg-violet-100 px-1 text-[10px] font-semibold text-violet-700">GPU</span>}
+        </button>
+        <span className="flex items-center gap-2 text-slate-400">
+          {budget && <span>{budget}</span>}
+          {e.iterations != null && <span>{e.iterations} it</span>}
+          {live && (
+            <button onClick={() => onKill(e.id)} className="text-rose-500 hover:text-rose-700" title="Kill experiment">
+              <ShieldAlert className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </span>
+      </div>
+      {e.hypothesis && <p className="mt-0.5 line-clamp-2 cursor-pointer text-[11px] text-slate-600" onClick={toggle}>{e.hypothesis}</p>}
+      {e.kill_reason && <p className="mt-0.5 text-[10px] text-rose-500">killed: {e.kill_reason}</p>}
+      {!e.kill_reason && e.error && !open && <p className="mt-0.5 line-clamp-1 text-[10px] text-rose-500">{e.error}</p>}
+      {open && (loading ? <p className="mt-1 text-[10px] text-slate-400">Loading…</p> : detail ? <ExperimentDetailView d={detail} /> : <p className="mt-1 text-[10px] text-slate-400">Unavailable.</p>)}
+    </li>
+  );
+}
+
+function QmExperimentsPanel() {
+  const [data, setData] = useState<QmExperiments | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.qmExperiments(20)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoaded(true); });
+    load();
+    const t = setInterval(load, 5000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  const onKill = (id: number) => {
+    api.qmKillExperiment(id).then(() => api.qmExperiments(20).then(setData).catch(() => {})).catch(() => {});
+  };
+
+  const rows = (data?.experiments ?? []).slice(0, 10);
+  const mode = data?.mode ?? "off";
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <SubHead label="Experiments" />
+        <span className={cx("text-[10px] font-semibold uppercase", mode === "active" ? "text-emerald-600" : "text-slate-400")}>{mode}</span>
+      </div>
+      <div className="mb-1.5 grid grid-cols-2 gap-2">
+        <StatTile label="Running" value={data?.running ?? 0} tone={data?.running ? "emerald" : undefined} />
+        <StatTile label="Queued" value={data?.queued ?? 0} tone={data?.queued ? "blue" : undefined} />
+      </div>
+      {!loaded ? (
+        <p className="text-slate-400">Loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="text-slate-400">No experiments yet.</p>
+      ) : (
+        <ul className="space-y-1">
+          {rows.map((e) => <ExperimentRow key={e.id} e={e} onKill={onKill} />)}
+        </ul>
+      )}
     </div>
   );
 }

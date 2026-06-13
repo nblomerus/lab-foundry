@@ -6,7 +6,7 @@
 // Must be rendered inside <EventStreamProvider> (it reads the shared stream).
 
 import { useCallback, useMemo, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Heart } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ReactFlow, ReactFlowProvider, Controls, Panel, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -14,13 +14,17 @@ import type { Snapshot } from "../../lib/types";
 import { cx } from "../ui";
 import { ActivityFeed } from "../ActivityFeed";
 import { NODE_DEFS, EDGE_DEFS, type NodeDef } from "./topology";
-import { NODE_TYPES, type FloorNodeData, type Selected } from "./nodes";
+import { NODE_TYPES, ActivityMeter, type FloorNodeData, type Selected } from "./nodes";
 import { EDGE_TYPES } from "./FlowEdge";
 import { type FloorData } from "./useFloorData";
+import { NarrationContext, useNarration } from "./narration";
 import { useFlowHeat } from "./useFlowHeat";
+import { useNodeActivity, NodeActivityContext, BUSY_MS } from "./useNodeActivity";
 import { AriadneInspector, GateInspector, LibraryInspector, MimirInspector, OpsInspector, PlannerInspector, QueueInspector, ResearcherInspector, ScoutInspector } from "./inspectors";
 
 function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: (s: Selected) => void): FloorNodeData {
+  // NOTE: no activity/narration fields here — both are read from context per node,
+  // so this stays structural and the nodes array reference is stable across event ticks.
   const base: FloorNodeData = { def, onOpen };
   switch (def.type) {
     case "scout":
@@ -36,11 +40,32 @@ function nodeData(def: NodeDef, fd: FloorData, priority: string | null, onOpen: 
   }
 }
 
-function FlowLegend({ connected }: { connected: boolean }) {
+function FlowLegend({ connected, working }: { connected: boolean; working: number }) {
   const flows: [string, string][] = [["Intake", "#2c5fb8"], ["Knowledge", "#10b981"], ["Converse", "#8b5cf6"], ["Feedback", "#f59e0b"], ["Planned", "#9aa3ad"]];
-  const statuses: [string, string][] = [["Live", "bg-emerald-500"], ["Busy", "bg-amber-500"], ["Idle", "bg-slate-400"], ["Offline", "bg-slate-300"]];
+  // [label, dot classes, pulse?] — matches the per-node ActivityBadge exactly so
+  // the legend reads as the key to what's on the floor.
+  const statuses: [string, string, boolean][] = [
+    ["Busy", "bg-emerald-500", true],
+    ["Live", "bg-emerald-500", false],
+    ["Idle", "bg-slate-300", false],
+    ["Offline", "bg-transparent ring-1 ring-inset ring-slate-300", false],
+  ];
   return (
     <div className="glass-panel rounded-card px-3 py-2.5 text-[10px]">
+      {/* at-a-glance: how many agents are working right now */}
+      <div className="mb-2 flex items-center gap-1.5">
+        <span className={cx("inline-block h-2 w-2 rounded-full", working > 0 ? "bg-emerald-500 pulse-dot" : "bg-slate-300")} />
+        <span className="text-[11px] font-semibold tabular-nums text-slate-700">{working}</span>
+        <span className="text-slate-400">working now</span>
+      </div>
+      <div className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Status</div>
+      <div className="mb-2 flex flex-wrap gap-x-2.5 gap-y-1">
+        {statuses.map(([label, c, pulse]) => (
+          <span key={label} className="flex items-center gap-1 text-slate-500">
+            <span className={cx("inline-block h-1.5 w-1.5 rounded-full", c, pulse && "pulse-dot")} /> {label}
+          </span>
+        ))}
+      </div>
       <div className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Flows</div>
       <div className="flex flex-col gap-1">
         {flows.map(([label, c]) => (
@@ -49,18 +74,29 @@ function FlowLegend({ connected }: { connected: boolean }) {
           </span>
         ))}
       </div>
-      <div className="mt-2 mb-1 font-semibold uppercase tracking-wide text-slate-400">Status</div>
-      <div className="flex flex-wrap gap-x-2.5 gap-y-1">
-        {statuses.map(([label, c]) => (
-          <span key={label} className="flex items-center gap-1 text-slate-500">
-            <span className={cx("inline-block h-1.5 w-1.5 rounded-full", c)} /> {label}
-          </span>
-        ))}
-      </div>
       <div className="mt-2 flex items-center gap-1 text-slate-400">
         <span className={cx("inline-block h-1.5 w-1.5 rounded-full", connected ? "bg-emerald-500 pulse-dot" : "bg-slate-300")} />
         {connected ? "stream live" : "stream offline"}
       </div>
+    </div>
+  );
+}
+
+// Global lab heartbeat — the whole lab's pulse. The heart beats while events are
+// flowing, the meter shows the rate, so you can feel the lab breathing (bursts of
+// ingest) vs resting at a glance.
+function LabHeartbeat({ total, rate, connected }: { total: number[]; rate: number; connected: boolean }) {
+  const beating = connected && rate > 0;
+  return (
+    <div className="glass-panel flex items-center gap-2.5 rounded-card px-3 py-2">
+      <Heart className={cx("h-4 w-4 text-emerald-500", beating && "heartbeat")} fill={beating ? "currentColor" : "none"} strokeWidth={2.2} />
+      <div className="flex flex-col">
+        <span className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">Lab Activity</span>
+        <span className="text-[11px] font-semibold tabular-nums text-slate-700">
+          {rate} <span className="font-medium text-slate-400">events · 90s</span>
+        </span>
+      </div>
+      <ActivityMeter series={total} state={beating ? "busy" : "idle"} className="h-5 w-24" />
     </div>
   );
 }
@@ -84,9 +120,14 @@ function InspectorShell({ title, planned, onClose, children }: { title: string; 
 
 function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot | null; floorData: FloorData; className?: string }) {
   const { hot, connected, events } = useFlowHeat();
+  const activity = useNodeActivity();
+  const { activeAt, total, rate, now } = activity;
   const [selected, setSelected] = useState<Selected | null>(null);
   const [activityOpen, setActivityOpen] = useState(true);
   const stats = floorData.pulse.stats;
+
+  // "working now" = nodes that emitted an event within the busy window.
+  const working = useMemo(() => Object.values(activeAt).filter((t) => now - t < BUSY_MS).length, [activeAt, now]);
 
   const priority = useMemo(() => {
     const focus = floorData.pulse.mimir?.focus_topics;
@@ -94,6 +135,10 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
   }, [floorData.pulse.mimir]);
 
   const onOpen = useCallback((s: Selected) => setSelected(s), []);
+
+  // plain-language narration per node — event bubbles land instantly off the stream;
+  // state bubbles refresh with the (event-nudged) polls. Provided via context below.
+  const narration = useNarration(floorData.ariadne, floorData.qm);
 
   const nodes = useMemo<Node<FloorNodeData>[]>(
     () =>
@@ -149,6 +194,8 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
   }, []);
 
   return (
+    <NodeActivityContext.Provider value={activity}>
+    <NarrationContext.Provider value={narration}>
     <div className={cx("bg-blueprint relative overflow-hidden rounded-wing border border-slate-200 shadow-card", className ?? "h-[calc(100vh-15rem)] min-h-[620px]")}>
       <ReactFlow
         nodes={nodes}
@@ -172,7 +219,8 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
         elementsSelectable
       >
         <Controls showInteractive={false} position="bottom-left" className="!shadow-panel !rounded-xl" />
-        <Panel position="top-left"><FlowLegend connected={connected} /></Panel>
+        <Panel position="top-left"><FlowLegend connected={connected} working={working} /></Panel>
+        <Panel position="top-center"><LabHeartbeat total={total} rate={rate} connected={connected} /></Panel>
         <Panel position="bottom-right">
           <div className={cx("glass-panel flex w-80 flex-col rounded-card p-3", activityOpen && "h-72")}>
             <div className="flex items-center justify-between">
@@ -247,6 +295,8 @@ function FloorplanInner({ snapshot, floorData, className }: { snapshot: Snapshot
         )}
       </AnimatePresence>
     </div>
+    </NarrationContext.Provider>
+    </NodeActivityContext.Provider>
   );
 }
 

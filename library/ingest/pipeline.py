@@ -334,6 +334,13 @@ async def _resolve_fulltext(
     if desc.source_kind == "openml":
         return await _resolve_openml_fulltext(desc, state)
 
+    # First-party lab outputs carry their text in-hand (passed to stage_source as
+    # content_text), never fetched over the network. This branch is a safety net:
+    # if a lab source ever reaches resolution without content_text, we return empty
+    # (the quality gate then rejects it) rather than web-fetching a non-existent URL.
+    if desc.source_kind in ("lab_experiment", "lab_dataset"):
+        return "", desc.url
+
     if desc.url:
         page = await web_fetch(desc.url, state)
         if page is not None and page.content and page.content.strip():
@@ -352,6 +359,7 @@ async def stage_source(
     state,
     *,
     dispatcher=None,
+    content_text: str | None = None,
 ) -> dict:
     """Stage one discovered source for ingest (the pre-trust pass).
 
@@ -360,6 +368,13 @@ async def stage_source(
     defaults — Mimir owns them), stages the chunk plan WITHOUT vectors, and
     emits `document.parsed`. Then STOPS — Mimir decides trust before any embed.
 
+    `content_text` is the first-party content-in-hand path: when provided, the
+    network resolution step is SKIPPED entirely and this text is used as the
+    resolved body (fetched_url becomes the descriptor url, or a synthetic
+    `lab://<source_kind>/<canonical_key>` when the source has no url). Everything
+    downstream — quality gate, parse, chunk-plan, upsert, stage, emit — is
+    identical to the fetched path.
+
     Returns one of:
       {"skipped": True, "reason": ...}                 — nothing fetchable
       {"document_id": id, "deduped": True}             — already ingested
@@ -367,7 +382,11 @@ async def stage_source(
     """
     desc = _as_descriptor(source)
 
-    text, fetched_url = await _resolve_fulltext(desc, state)
+    if content_text is not None:
+        text = content_text
+        fetched_url = desc.url or f"lab://{desc.source_kind}/{desc.canonical_key}"
+    else:
+        text, fetched_url = await _resolve_fulltext(desc, state)
 
     # QUALITY gate — applied to every source before we do any work. Thin stubs,
     # error/wall pages, and non-content remnants never become documents.

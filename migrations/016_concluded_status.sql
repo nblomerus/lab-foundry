@@ -1,0 +1,13 @@
+-- 016_concluded_status.sql — a terminal 'concluded' claim status (convergence).
+--
+-- Every direction stayed 'active' (proposed/tested/weakly_supported/replicated) until a re-frame
+-- INVALIDATED it — so there was no notion of "done", and the loop churned: a direction the lab had
+-- actually settled was either still blocking the gate or got thrown away. This adds a terminal
+-- 'concluded' status. When synthesis produces a confident, decisive finding, the direction graduates
+-- to 'concluded' — a permanent RESULT: because 'concluded' is outside the active-status set every
+-- query already filters on, the direction is preserved (never superseded), never re-planned, and
+-- stops counting as approved-in-flight — which frees the gate so the next round builds BEYOND it.
+--
+-- Additive + idempotent. ALTER TYPE ... ADD VALUE runs outside a transaction (per-statement psql
+-- autocommit), like 012/014. claims.status has no CHECK constraint, so no other change is needed.
+ALTER TYPE public.claim_status ADD VALUE IF NOT EXISTS 'concluded';

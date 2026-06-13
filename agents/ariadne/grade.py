@@ -87,7 +87,9 @@ class GradeReport(BaseModel):
 
 async def grade(out: AriadneOutput) -> GradeReport:
     dirs = out.directions
-    schema_valid = len(dirs) >= 3 and all(d.novelty_rationale.strip() and d.claim_goals for d in dirs)
+    schema_valid = len(dirs) >= 3 and all(
+        d.novelty_rationale.strip() and d.stakes.strip() and d.claim_goals for d in dirs
+    )
 
     goals = [g for d in dirs for g in d.claim_goals]
     cg_wf = (sum(1 for g in goals if g.expectation.strip() and g.kill_condition.strip()) / len(goals)) if goals else 0.0
@@ -114,6 +116,29 @@ async def grade(out: AriadneOutput) -> GradeReport:
         unresolved=unresolved[:8],
         passed=passed,
     )
+
+
+def grade_feedback(report: GradeReport) -> str:
+    """Corrective instructions from a failed GradeReport — fed back into the handler's
+    one-shot retry deliberation so the model fixes the actual defects, not a blind re-roll."""
+    fixes: list[str] = []
+    if not report.schema_valid:
+        fixes.append(
+            "- Produce AT LEAST 3 directions, each with a non-empty novelty_rationale, stakes, "
+            "and at least one claim_goal."
+        )
+    if report.claim_goals_wellformed < 1.0:
+        fixes.append("- EVERY claim_goal needs a non-empty expectation AND a non-empty kill_condition.")
+    if report.directions_grounded < 1.0:
+        fixes.append(
+            "- EVERY direction must list grounded_in citations — real papers (title or arxiv id) "
+            "from the corpus context you were shown, not invented ones."
+        )
+    if report.citations_resolved < 0.8:
+        fixes.append(f"- These citations did not resolve to corpus papers — cite real ones: {report.unresolved[:5]}")
+    if report.scores_wellformed < 1.0:
+        fixes.append("- EVERY direction needs the full scores object, each dimension an integer 1..5.")
+    return "\n".join(fixes) or "- The output failed validation; follow the output schema exactly."
 
 
 class ReflectionGrade(BaseModel):

@@ -229,6 +229,9 @@ def make_state(pool=None, *, sid: int = 1, triggered_by_event_id: int = 1, **ret
     st.id = sid
     st.triggered_by_event_id = triggered_by_event_id
     st.next_step_order = lambda: 1  # sync helper used by _record_run
+    # A fresh test state has no task history → not thin_corpus-stuck (the planner gate no-ops).
+    # Overridable via make_state(direction_is_thin_stuck=True) for the stuck-path tests.
+    st.direction_is_thin_stuck.return_value = False
     for name, val in returns.items():
         getattr(st, name).return_value = val
     return st

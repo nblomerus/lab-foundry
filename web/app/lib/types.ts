@@ -103,6 +103,7 @@ export interface Cost {
   workhorse_calls: number;
   fast_calls: number;
   code_calls: number;
+  experiment_calls: number;
   total_cost_usd: number;
   cap_reached: boolean;
 }
