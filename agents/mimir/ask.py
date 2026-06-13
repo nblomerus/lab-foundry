@@ -46,11 +46,13 @@ class RetrievedRef(BaseModel):
     snippet: str
 
 
-async def retrieve(query: str, *, k: int = 6) -> list[RetrievedRef]:
+async def retrieve(query: str, *, k: int = 6, exclude_lab: bool = False) -> list[RetrievedRef]:
     """EFFICIENT direct mode — when an agent already knows what it wants, Mimir just gives it:
     the top passages from hybrid retrieval, NO LLM synthesis. (Use answer_question only when the
-    request needs multi-hop reasoning.) This is the cheap, fast path Mimir answers most asks with."""
-    chunks = await corpus_search(query, k=k)
+    request needs multi-hop reasoning.) This is the cheap, fast path Mimir answers most asks with.
+    `exclude_lab=True` drops the lab's own first-party artifacts so a researcher gathering EXTERNAL
+    evidence can't be handed the lab's own proposal text back as prior art."""
+    chunks = await corpus_search(query, k=k, exclude_lab=exclude_lab)
     return [
         RetrievedRef(document_id=c.document_id, title=c.title, trust_tier=c.trust_tier, snippet=c.text[:300].strip())
         for c in chunks
@@ -139,13 +141,17 @@ async def _emit(state, event: str, *, asker: str, tid: int, nonce: int, payload:
         log.warning("mimir ask: emit %s failed: %s", event, e)
 
 
-async def answer_question(question: str, *, k: int = 8, state=None, asker: str = "ariadne") -> MimirAnswer:
+async def answer_question(
+    question: str, *, k: int = 8, state=None, asker: str = "ariadne", exclude_lab: bool = False
+) -> MimirAnswer:
     """Answer a multi-hop question over the Library (retrieval + graph + synthesis). Read-only
     for the corpus. When `state` is given, emits `mimir.ask` (before) and `mimir.answered`
-    (after) so the floorplan shows the agent CONVERSING with Mimir in real time."""
+    (after) so the floorplan shows the agent CONVERSING with Mimir in real time.
+    `exclude_lab=True` keeps the lab's own proposals/findings out of the synthesised evidence so a
+    'gap' is asserted against EXTERNAL literature, not against the lab's own write-up of the gap."""
     tid, nonce = _ask_target_id(asker, question), time.time_ns()
     await _emit(state, "mimir.ask", asker=asker, tid=tid, nonce=nonce, payload={"question": question[:400]})
-    chunks = await corpus_search(question, k=k)
+    chunks = await corpus_search(question, k=k, exclude_lab=exclude_lab)
     doc_ids = list({c.document_id for c in chunks})
     passages = (
         "\n".join(f"[{c.trust_tier}] {(c.title or 'untitled')[:90]} — {c.text[:300].strip()}" for c in chunks)

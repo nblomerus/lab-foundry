@@ -109,20 +109,57 @@ _CONCEPT_ALIASES = {
     "support vector machines": "svm",
     "knn": "knn",
     "k nearest neighbors": "knn",
+    "bert": "bert",
+    "gpt": "gpt",
+    "t5": "t5",
+    "resnet": "resnet",
+    "lora": "lora",
+    "low rank adaptation": "lora",
+    "qlora": "qlora",
+    "peft": "peft",
+    "parameter efficient fine tuning": "peft",
+    "ssm": "ssm",
+    "state space model": "ssm",
+    "state space models": "ssm",
+    "mamba": "mamba",
+    # bare 'diffusion' and 'diffusion model(s)' are the SAME concept — without this they split
+    # into two nodes with opposite trend verdicts (953p HOT vs 489p SATURATED).
+    "diffusion": "diffusion",
+    "diffusion model": "diffusion",
+    "diffusion models": "diffusion",
 }
+
+
+def _singularize(key: str) -> str:
+    """Conservative singular of a despaced concept key. Fixes the over-strip bug of a naive
+    'drop trailing s' (which produced processes→processe, analysis→analysi, gaussianprocesses→
+    gaussianprocesse — fragmenting concepts that could then never merge):
+      • words ending ss/us/is/sis/ics/ies/ous are NOT plurals → left intact (process, status,
+        analysis, hypothesis, physics, series, continuous);
+      • '-sses' double-s plurals drop 'es' so they merge with the singular (processes→process,
+        classes→class, masses→mass, gaussianprocesses→gaussianprocess);
+      • any other plain trailing 's' is a regular plural and is dropped (models→model,
+        networks→network, databases→database).
+    Keys ≤4 chars (acronym plurals: cots/gans/vaes) are left alone."""
+    if len(key) <= 4 or not key.endswith("s"):
+        return key
+    if key.endswith("sses"):
+        return key[:-2]
+    if key.endswith(("ss", "us", "is", "sis", "ics", "ies", "ous")):
+        return key
+    return key[:-1]
 
 
 def _canon_key(name: str) -> str:
     """Canonical dedup key: alias map (acronyms) → else mechanical (lowercase, drop
-    hyphens+spaces, conservative singular). Merges fine-tuning/finetuning/fine tuning,
-    LLM/LLMs, diffusion model/models, RAG/retrieval-augmented generation, etc."""
+    hyphens+spaces, conservative singular via _singularize). Merges fine-tuning/finetuning/
+    fine tuning, LLM/LLMs, diffusion/diffusion models, RAG/retrieval-augmented generation, etc."""
     n = re.sub(r"\s+", " ", name.strip().lower())
     spaced = re.sub(r"\s+", " ", n.replace("-", " ")).strip()
     if spaced in _CONCEPT_ALIASES:
         return _CONCEPT_ALIASES[spaced]
     key = re.sub(r"[-\s]+", "", n)  # drop hyphens + spaces
-    if len(key) > 4 and key.endswith("s") and not key.endswith("ss"):
-        key = key[:-1]  # conservative singular
+    key = _singularize(key)
     return _CONCEPT_ALIASES.get(key, key)
 
 

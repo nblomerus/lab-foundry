@@ -155,7 +155,7 @@ async def _mimir_reflect_brief(state, mission: str | None, agenda: str, *, emit:
         "gaps should re-aim or replace them?"
     )
     try:
-        a = await answer_question(question, k=8, state=(state if emit else None), asker="ariadne")
+        a = await answer_question(question, k=8, state=(state if emit else None), asker="ariadne", exclude_lab=True)
     except Exception as e:  # noqa: BLE001 — conversation is best-effort grounding
         log.warning("reflection: Mimir conversation failed: %s", e)
         return ""

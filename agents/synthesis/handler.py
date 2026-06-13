@@ -14,10 +14,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import UTC, datetime
 
 from agents.synthesis.schemas import ResearchFinding
 from harness.curator import RECIPES, SYSTEM_PROMPTS, PromptLayer, Recipe
 from harness.router import ROUTE, Tier
+from library.graph.tools import FINDING_ID_SYNTHESIS, merge_finding_grounds_claim
 
 log = logging.getLogger(__name__)
 
@@ -241,6 +243,27 @@ async def handle_finding_synthesize(event: dict, dispatcher) -> dict | None:
         run_id=run_id,
         data_realism=realism,
     )
+
+    # Project the terminal finding into the trace graph (it GROUNDS its direction/claim). Namespaced
+    # id; synthesis findings rest on EXPERIMENTS not papers, so no CITES edge here. Best-effort.
+    try:
+        rf_id = persisted.get("finding_id")
+        if rf_id is not None:
+            supported = True if finding.supported == "yes" else False if finding.supported == "no" else None
+            await merge_finding_grounds_claim(
+                finding_id=FINDING_ID_SYNTHESIS + rf_id,
+                claim_id=claim_id,
+                source="synthesis",
+                url=None,
+                title=(finding.headline or "")[:200],
+                summary=(finding.claim or finding.so_what or "")[:1000],
+                relevance_score=round(float(finding.confidence) * 10, 1),
+                supports_claim=supported,
+                audit_verdict=finding.supported,
+                created_at=datetime.now(UTC).isoformat(),
+            )
+    except Exception:  # noqa: BLE001 — trace-graph projection is best-effort
+        log.exception("synthesis: trace-graph projection failed for direction %s", claim_id)
 
     # Ingest the finding into the Library so it becomes first-class, queryable knowledge that
     # SURVIVES Ariadne's next re-frame (unlike per-experiment notes bonded to the direction id).

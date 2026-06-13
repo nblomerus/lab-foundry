@@ -46,6 +46,10 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")  # 768-dim
 EMBED_DIM = 768
 HNSW_EF_SEARCH = int(os.environ.get("HNSW_EF_SEARCH", "40"))
+# Best-effort retrieval tracking — stamp documents.last_retrieved_at so the decay sweep
+# (ops.decay_corpus) can spare docs that are actually used. Off via CORPUS_TRACK_RETRIEVAL=off
+# (e.g. to keep eval runs pure). No-ops gracefully if migration 021 hasn't been applied.
+_RETRIEVAL_TRACKING = os.environ.get("CORPUS_TRACK_RETRIEVAL", "on").strip().lower() not in ("0", "off", "false", "no")
 
 # Rerank weights — module constants (§6). Trust at 0.30 must NOT turn retrieval
 # into a pure authority filter; semantic similarity stays dominant at 0.60.
@@ -57,6 +61,16 @@ RECENCY_HALFLIFE_DAYS = 180.0
 # Reciprocal Rank Fusion constant for hybrid (dense ⊕ BM25) retrieval. 60 is the
 # standard value (Cormack et al. 2009); larger flattens the rank weighting.
 RRF_K = 60
+
+# Hybrid final-rerank blend. Raw RRF ignores trust + recency entirely, so a web_unknown
+# blog at lexical-rank 1 could tie/outrank a peer-reviewed paper. After fusion we blend the
+# NORMALIZED RRF score (kept dominant — it carries the recall eval/retrieval proved) with the
+# trust tier weight and recency decay, so trust/recency reorder near-equal fusion ranks without
+# pulling a low-fusion doc above a clearly higher one. Mirrors the dense path's intent (W_TRUST
+# 0.30 there) but at a gentler weight so recall@k is preserved (verify via eval/retrieval).
+W_RRF = 0.80
+W_TRUST_H = 0.15
+W_RECENCY_H = 0.05
 
 # GIN can't return ts_rank-ordered results, so ranking the lexical arm costs one
 # ts_rank per matched row — unbounded for a common single token (e.g. "reinforcement"
@@ -329,6 +343,7 @@ async def _search_by_vector(
     *,
     kind: str | None = None,
     min_trust: str | None = None,
+    exclude_lab: bool = False,
 ) -> list[RetrievedChunk]:
     """
     The ANN candidate pool + Python rerank, over an ALREADY-EMBEDDED query vector.
@@ -340,10 +355,14 @@ async def _search_by_vector(
       AND d.status='certified' AND d.queryable
     `min_trust=NULL` -> floor of 'quarantined' (rank 0), i.e. no extra tier filter
     beyond the certified/queryable/non-decayed gate.
+    `exclude_lab=True` drops first-party lab artifacts (source_url 'lab://…') so a
+    grounding/adjudication caller cannot retrieve the lab's OWN proposals/findings as
+    external prior art (the echo-chamber guard — see corpus_search).
     """
     n = max(4 * k, 32)
     floor = min_trust if min_trust is not None else "quarantined"
-    sql = """
+    lab_clause = "\n          AND coalesce(d.source_url, '') NOT LIKE 'lab://%'" if exclude_lab else ""
+    sql = f"""
         SELECT c.id, c.document_id, c.ordinal, c.text, c.token_count,
                d.kind, d.title, d.source_url, d.trust_tier, d.ingested_at,
                (c.embedding <=> $1) AS distance
@@ -352,7 +371,7 @@ async def _search_by_vector(
           AND d.status = 'certified' AND d.queryable
           AND trust_rank(d.trust_tier) >= trust_rank($3::trust_tier)
           AND d.trust_state NOT IN ('quarantined','decayed')
-          AND c.embedding IS NOT NULL
+          AND c.embedding IS NOT NULL{lab_clause}
         ORDER BY c.embedding <=> $1
         LIMIT $4
     """
@@ -417,6 +436,7 @@ async def _search_hybrid(
     *,
     kind: str | None = None,
     min_trust: str | None = None,
+    exclude_lab: bool = False,
 ) -> list[RetrievedChunk]:
     """
     Hybrid retrieval: Reciprocal-Rank-Fuse a dense ANN ranking with a BM25 (Postgres
@@ -432,12 +452,13 @@ async def _search_hybrid(
     """
     n = max(4 * k, 64)
     floor = min_trust if min_trust is not None else "quarantined"
+    lab_clause = "\n          AND coalesce(d.source_url, '') NOT LIKE 'lab://%'" if exclude_lab else ""
     # Shared trust gate (mirrors _search_by_vector); $1=vec $2=kind $3=floor $4=limit.
-    gate = """
+    gate = f"""
           AND d.status = 'certified' AND d.queryable
           AND trust_rank(d.trust_tier) >= trust_rank($3::trust_tier)
           AND d.trust_state NOT IN ('quarantined','decayed')
-          AND c.embedding IS NOT NULL
+          AND c.embedding IS NOT NULL{lab_clause}
     """
     cols = """c.id, c.document_id, c.ordinal, c.text, c.token_count,
               d.kind, d.title, d.source_url, d.trust_tier, d.ingested_at,
@@ -483,8 +504,12 @@ async def _search_hybrid(
                 fused[cid] = _row_to_chunk(r)
             rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank)
 
+    # Blend normalized RRF (dominant) with trust + recency so authority/freshness reorder
+    # near-equal fusion ranks. trust_w/recency were already computed by _row_to_chunk.
+    max_rrf = max(rrf.values()) if rrf else 1.0
     for cid, chunk in fused.items():
-        chunk.score = rrf[cid]
+        rrf_norm = (rrf[cid] / max_rrf) if max_rrf else 0.0
+        chunk.score = W_RRF * rrf_norm + W_TRUST_H * chunk.trust_w + W_RECENCY_H * chunk.recency
     # score desc; ties broken by smaller cosine distance (closer wins).
     out = sorted(fused.values(), key=lambda c: (c.score, -c.distance), reverse=True)
     return out[:k]
@@ -495,6 +520,25 @@ async def _search_hybrid(
 # =========================================================================
 
 
+async def _track_retrieval(chunks: list[RetrievedChunk]) -> None:
+    """Best-effort: stamp documents.last_retrieved_at for the returned docs (throttled to ≤1×/day/doc
+    via the WHERE clause) so ops.decay_corpus can spare docs that are actually used. Never fails a
+    search — the column may not exist yet (pre-migration 021) or the write may race; both are swallowed."""
+    if not _RETRIEVAL_TRACKING or not chunks:
+        return
+    doc_ids = list({c.document_id for c in chunks})
+    try:
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE documents SET last_retrieved_at = now() WHERE id = ANY($1::bigint[]) "
+                "AND (last_retrieved_at IS NULL OR last_retrieved_at < now() - interval '1 day')",
+                doc_ids,
+            )
+    except Exception:  # noqa: BLE001 — tracking is best-effort; must never block retrieval
+        pass
+
+
 async def corpus_search(
     query: str,
     k: int = 8,
@@ -503,6 +547,7 @@ async def corpus_search(
     min_trust: str | None = None,
     hybrid: bool = True,
     kg_expand: bool = False,
+    exclude_lab: bool = False,
 ) -> list[RetrievedChunk]:
     """
     Search the certified corpus. Pipeline (§6):
@@ -515,12 +560,20 @@ async def corpus_search(
     The trust floor / certified+queryable gate is enforced in SQL either way.
     `kg_expand` is accepted for signature stability but is OFF by default and NOT
     yet wired (it would cost a Neo4j hop — deferred past Phase 1).
+    `exclude_lab=True` filters out the lab's OWN first-party artifacts (source_url
+    'lab://…': proposals/findings/experiments/datasets). Default False keeps them for
+    browse/bench; the grounding & adjudication paths (Ariadne deliberate/grade/
+    scholarship/reflect, Mimir ask, the researcher, the novelty adjudicator) pass True
+    so the lab cannot cite its own speculation as external prior art.
     """
     embedder = await _get_embedder()
     vec = await embedder.embed(query)
     if hybrid:
-        return await _search_hybrid(vec, query, k, kind=kind, min_trust=min_trust)
-    return await _search_by_vector(vec, k, kind=kind, min_trust=min_trust)
+        results = await _search_hybrid(vec, query, k, kind=kind, min_trust=min_trust, exclude_lab=exclude_lab)
+    else:
+        results = await _search_by_vector(vec, k, kind=kind, min_trust=min_trust, exclude_lab=exclude_lab)
+    await _track_retrieval(results)
+    return results
 
 
 async def build_context(

@@ -223,6 +223,37 @@ def _arxiv_tag(source_url: str | None) -> str:
     return f" [arxiv:{m.group(1)}]" if m else ""
 
 
+_GAP_COVERAGE_SIM = 0.6  # top-hit cosine sim above which a flagged 'gap' is plausibly already covered
+_GAP_COVERAGE_MIN_DOCS = 3
+
+
+async def _annotate_gaps(gaps: list[str]) -> list[str]:
+    """Cross-check each Mimir-flagged gap against a direct EXTERNAL hybrid search and ANNOTATE (never
+    drop) the ones the corpus visibly already covers. Mimir's gap signal is graph-neighborhood coverage
+    of the retrieved set, which can undercount a well-covered topic (fragmented concept nodes / thin
+    retrieval → the false 'Gaussian process is absent' failure observed live); surfacing the real
+    external coverage lets deliberation reject a false gap instead of chasing it. A genuine gap has a
+    LOW top-hit similarity (its nearest neighbours are only loosely related) and passes through
+    unannotated, so this never suppresses real gaps. Best-effort."""
+    out: list[str] = []
+    for g in gaps:
+        try:
+            hits = await corpus_search(g, k=8, exclude_lab=True)
+        except Exception:  # noqa: BLE001 — corroboration is best-effort; keep the gap as-is
+            out.append(g)
+            continue
+        ndocs = len({h.document_id for h in hits})
+        top = max((h.sim for h in hits), default=0.0)
+        if ndocs >= _GAP_COVERAGE_MIN_DOCS and top >= _GAP_COVERAGE_SIM:
+            out.append(
+                f"{g}  [corpus check: ~{ndocs} on-topic papers already exist (top match {int(top * 100)}%) "
+                "— confirm this is genuinely under-explored, not a retrieval blind spot, before targeting]"
+            )
+        else:
+            out.append(g)
+    return out
+
+
 async def _mimir_brief(seed: str, pool, *, state=None) -> tuple[str, list[str]]:
     """CONVERSE with Mimir: ask a strategic, multi-hop question about the mission's landscape and
     get a SYNTHESIZED answer + the under-explored GAPS to target. This is Ariadne thinking WITH
@@ -246,17 +277,18 @@ async def _mimir_brief(seed: str, pool, *, state=None) -> tuple[str, list[str]]:
         "small inference-only lab?"
     )
     try:
-        a = await answer_question(question, k=8, state=state, asker="ariadne")
+        a = await answer_question(question, k=8, state=state, asker="ariadne", exclude_lab=True)
     except Exception as e:  # noqa: BLE001 — conversation is best-effort grounding
         log.warning("ariadne: Mimir conversation failed: %s", e)
         return "", []
     block = f"## Mimir's synthesis (multi-hop GraphRAG over the Library)\n{a.answer}"
-    if a.gaps:
+    gaps = await _annotate_gaps(a.gaps) if a.gaps else []
+    if gaps:
         block += (
             "\nUNDER-EXPLORED GAPS Mimir flags (prefer directions + evidence requests that "
-            "fill these):\n" + "\n".join(f"- {g}" for g in a.gaps)
+            "fill these):\n" + "\n".join(f"- {g}" for g in gaps)
         )
-    return block, a.gaps
+    return block, gaps
 
 
 async def recall_prior_art(seed: str, *, k: int = 8, pool=None, state=None) -> tuple[str, list[str]]:
@@ -265,7 +297,7 @@ async def recall_prior_art(seed: str, *, k: int = 8, pool=None, state=None) -> t
     Each prior-art paper is tagged with its [arxiv:ID] (when known) so Ariadne can request a
     specific paper by id for a precise direct fetch. When `state` is given the Mimir conversation
     is emitted live. Returns (grounding_text, gaps) — the gaps drive gap-targeted directions."""
-    chunks = await corpus_search(seed, k=k)
+    chunks = await corpus_search(seed, k=k, exclude_lab=True)
     passages = (
         "\n".join(
             f"[{c.trust_tier}] {(c.title or 'untitled')[:90]}{_arxiv_tag(c.source_url)} — {c.text[:320].strip()}"

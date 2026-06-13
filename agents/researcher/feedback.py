@@ -57,8 +57,15 @@ _DOMINANCE = ("contradicted", "supported", "corpus_exhausted", "thin_corpus", "n
 _STEP = {"supported": _SUPPORT_STEP, "contradicted": _CONTRADICT_STEP, "corpus_exhausted": _EXHAUSTED_STEP}
 
 
-def disposition(f: GroundedFinding) -> str:
-    """Collapse (verdict, blocker) into the single label that drives steering (pre-escalation)."""
+def disposition(f: GroundedFinding, grounded: float | None = None) -> str:
+    """Collapse (verdict, blocker) into the single label that drives steering (pre-escalation).
+    A decisive verdict (supports/contradicts) that cites NO resolvable evidence (grounded==0.0) is
+    NOT supported/contradicted — it's inconclusive (or the underlying blocker). With exclude_lab on,
+    retrieved evidence is external-only, so grounded==0.0 means the claim rests on nothing real —
+    this is the guard against the self-grounding pathology (a direction marked 'supported' off the
+    lab's own asserted proposal text)."""
+    if grounded == 0.0 and f.verdict in ("supports", "contradicts"):
+        return f.blocker if f.blocker in ("thin_corpus", "needs_experiment") else "inconclusive"
     if f.verdict == "supports":
         return "supported"
     if f.verdict == "contradicts":

@@ -173,18 +173,23 @@ async def handle_direction_adjudicate(event: dict, dispatcher) -> dict | None:
         # The ACTUAL nearest prior art (external signal the self-score lacks) + the lab's own
         # recent directions WITH outcomes (the anti-rut signal that can also clear a re-ask).
         # Best-effort: a retrieval blip must not wedge it.
-        try:
-            chunks = await corpus_search(statement, k=8)
-        except Exception:  # noqa: BLE001
-            chunks = []
+        # External-only prior art: exclude_lab keeps the lab's OWN proposals/findings out (its own
+        # directions come through get_prior_directions_with_outcomes below). The whole block is
+        # wrapped so a retrieval blip OR a chunk-shape change can never wedge the only independent
+        # adjudicator — RetrievedChunk has no `source_kind`, so the `lab` flag reads source_url/tier.
         seen, prior_art = set(), []
-        for c in chunks:
-            t = (c.title or "").strip()
-            if t and t.lower() not in seen:
-                seen.add(t.lower())
-                prior_art.append({"title": t, "lab": (c.source_kind or "").startswith("lab_")})
-            if len(prior_art) >= 6:
-                break
+        try:
+            chunks = await corpus_search(statement, k=8, exclude_lab=True)
+            for c in chunks:
+                t = (c.title or "").strip()
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    is_lab = (c.source_url or "").startswith("lab://") or c.trust_tier == "user_asserted"
+                    prior_art.append({"title": t, "lab": is_lab})
+                if len(prior_art) >= 6:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
         prior_directions = await state.get_prior_directions_with_outcomes(exclude_claim_id=d["id"], limit=12)
 
         prompt = await dispatcher.curator.build(

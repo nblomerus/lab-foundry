@@ -59,7 +59,7 @@ async def _resolves(title: str) -> bool:
     if len(t) < 2:
         return False
     try:
-        chunks = await corpus_search(title, k=6)
+        chunks = await corpus_search(title, k=6, exclude_lab=True)
     except Exception:  # noqa: BLE001
         return False
     for c in chunks:

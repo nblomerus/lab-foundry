@@ -280,6 +280,35 @@ async def _guard_rearm_attack(conn) -> list[dict]:
     return out
 
 
+async def _guard_rearm_attack_research(conn) -> list[dict]:
+    """A strong synthesis finding on an active research DIRECTION arms the critic to adversarially
+    review it. Parallels _guard_rearm_attack but sources research_findings (the research loop bypasses
+    the market `findings` table the critic was built on). The critic handler treats a direction as
+    WEAKEN-ONLY — the research loop owns its invalidation/closure (payload research=True signals it)."""
+    rows = await conn.fetch(
+        f"SELECT rf.id, rf.direction_claim_id AS claim_id, rf.confidence "
+        f"FROM research_findings rf JOIN claims c ON c.id = rf.direction_claim_id "
+        f"WHERE c.claim_kind = 'direction' AND c.status IN {ACTIVE_SQL} "
+        f"AND rf.supported = 'yes' AND rf.confidence >= 0.6 "
+        f"AND rf.created_at < now() - make_interval(mins => $1::int) "
+        f"AND NOT EXISTS (SELECT 1 FROM critic_verdicts cv WHERE cv.claim_id = rf.direction_claim_id "
+        f"  AND cv.created_at > rf.created_at) "
+        f"AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.status = 'pending' "
+        f"  AND ev.event_type = 'finding.high_signal' AND ev.target_id = rf.direction_claim_id) "
+        f"ORDER BY rf.id DESC LIMIT $2",
+        int(REARM_GRACE_MIN),
+        REARM_CAP_PER_TICK,
+    )
+    out: list[dict] = []
+    seen: set[int] = set()  # one finding per direction per tick (the critic attacks the CLAIM)
+    for r in rows:
+        if r["claim_id"] in seen:
+            continue
+        seen.add(r["claim_id"])
+        out.append({"claim_id": r["claim_id"], "finding_id": r["id"], "score": float(r["confidence"]) * 10})
+    return out
+
+
 # ── the registry ────────────────────────────────────────────────────────────────
 # Declared order matches the legacy pacemaker tick (adjudicate → plan → arc → coverage),
 # followed by the four re-armers the watchdog used to run.
@@ -431,6 +460,14 @@ REGISTRY: list[Transition] = [
         from_guard=_guard_rearm_attack,
         payload=lambda r: {"finding_id": r["finding_id"], "score": r["score"], "rearmed": True},
         dedup=lambda r, day, ts: f"rearm-highsig-{r['finding_id']}-{day}",
+    ),
+    Transition(
+        name="rearm_attack_research",
+        owner="critic",
+        emits="finding.high_signal",
+        from_guard=_guard_rearm_attack_research,
+        payload=lambda r: {"finding_id": r["finding_id"], "score": r["score"], "rearmed": True, "research": True},
+        dedup=lambda r, day, ts: f"rearm-highsig-research-{r['claim_id']}-{day}",
     ),
 ]
 

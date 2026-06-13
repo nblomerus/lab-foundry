@@ -29,29 +29,38 @@ log = logging.getLogger(__name__)
 KIND_RELS = {"METHOD": "USES", "TASK": "ADDRESSES", "DATASET": "EVALUATED_ON"}
 MIN_TOTAL = 3  # ignore hapax concepts — the landscape is about footholds, not one-offs
 SAT_PERCENTILE = 0.90  # "saturated" = prominence in the top decile and flat
+# A concept needs at least this many PRIOR-window papers before its share-velocity is trusted for a
+# HOT/declining verdict. Without it, prior_n∈{0,1} produced velocity blow-ups (machine translation
+# +241% off prior=1, 58/110 HOT had prior==0) — noise served to Ariadne as the trend landscape. Kept
+# modest (3) so a real small base still trends, while the prior=0/1/2 single-paper spikes are dropped.
+MIN_PRIOR_FOR_VELOCITY = 3
 
 
-async def _windows(driver: AsyncDriver) -> tuple[str, str, int, int] | None:
-    """The two most-populated arxiv cohorts (YYMM), as (recent, prior, n_recent, n_prior)."""
+async def _windows(driver: AsyncDriver) -> tuple[list[str], list[str], int, int, str, str] | None:
+    """The two most-POPULATED arxiv cohorts (later = recent, earlier = prior), returned as 1-month
+    sets. For a pump-dominated, recent-skewed concept graph the densest months ARE the comparable
+    ones — that's where a velocity signal actually exists. Contiguous-by-calendar windows instead
+    drag in sparse seed months (e.g. a prior window with ~226 papers vs ~15k recent) whose near-empty
+    prior makes every concept look prior_n≈0 and starves the HOT/declining signal entirely."""
     async with driver.session() as s:
         res = await s.run(
             "MATCH (p:Paper) WHERE p.arxiv_id IS NOT NULL "
             "RETURN left(p.arxiv_id, 4) AS ym, count(DISTINCT p) AS n ORDER BY n DESC LIMIT 6"
         )
-        rows = [(r["ym"], r["n"]) async for r in res]
+        rows = [(r["ym"], r["n"]) async for r in res if r["ym"] and r["ym"].isdigit() and len(r["ym"]) == 4]
     if len(rows) < 2:
         return None
     (recent_ym, n_recent), (prior_ym, n_prior) = sorted(rows[:2], key=lambda r: r[0], reverse=True)
-    return recent_ym, prior_ym, n_recent, n_prior
+    return [recent_ym], [prior_ym], n_recent, n_prior, recent_ym, prior_ym
 
 
-async def _concepts(driver: AsyncDriver, label: str, rel: str, recent: str, prior: str) -> list[tuple]:
-    """Per concept of `label`: (key, name, total, recent_n, prior_n)."""
+async def _concepts(driver: AsyncDriver, label: str, rel: str, recent: list[str], prior: list[str]) -> list[tuple]:
+    """Per concept of `label`: (key, name, total, recent_n, prior_n) over the recent/prior month SETS."""
     q = (
         f"MATCH (n:{label})<-[:{rel}]-(p:Paper) "
         f"WITH n, count(DISTINCT p) AS total, "
-        f"     count(DISTINCT CASE WHEN left(p.arxiv_id,4) = $recent THEN p END) AS recent_n, "
-        f"     count(DISTINCT CASE WHEN left(p.arxiv_id,4) = $prior  THEN p END) AS prior_n "
+        f"     count(DISTINCT CASE WHEN left(p.arxiv_id,4) IN $recent THEN p END) AS recent_n, "
+        f"     count(DISTINCT CASE WHEN left(p.arxiv_id,4) IN $prior  THEN p END) AS prior_n "
         f"RETURN n.key AS key, n.name AS name, total, recent_n, prior_n"
     )
     async with driver.session() as s:
@@ -62,7 +71,10 @@ async def _concepts(driver: AsyncDriver, label: str, rel: str, recent: str, prio
 def _classify(
     total: int, recent_n: int, prior_n: int, n_recent: int, n_prior: int, sat_threshold: int
 ) -> tuple[str, float]:
-    """(trend_state, velocity) from prominence + share-normalized growth."""
+    """(trend_state, velocity) from prominence + share-normalized growth. Velocity is only TRUSTED
+    for a hot/declining verdict when the prior window has a real base (>= MIN_PRIOR_FOR_VELOCITY);
+    'emerging' additionally requires share to actually be gaining (velocity > 0), so a concept that
+    is shrinking in share is never served as 'new, gaining'."""
     rs = recent_n / n_recent if n_recent else 0.0
     ps = prior_n / n_prior if n_prior else 0.0
     if ps > 0:
@@ -71,17 +83,18 @@ def _classify(
         velocity = 1.0  # appeared from nothing
     else:
         velocity = 0.0
+    trusted = prior_n >= MIN_PRIOR_FOR_VELOCITY  # enough history to believe the share shift
 
-    if prior_n <= 2 and recent_n >= 5 and total < sat_threshold:
-        state = "emerging"  # genuinely new — little base AND not already prominent all-time
-    elif recent_n >= 5 and velocity >= 0.25:
-        state = "hot"  # established and gaining share (incl. prominent fields resurging)
-    elif prior_n >= 3 and velocity <= -0.40:
+    if prior_n <= 2 and recent_n >= 5 and total < sat_threshold and velocity > 0:
+        state = "emerging"  # genuinely new — little base, not already prominent, AND gaining share
+    elif trusted and recent_n >= 5 and velocity >= 0.25:
+        state = "hot"  # established base and gaining share (incl. prominent fields resurging)
+    elif trusted and velocity <= -0.40:
         state = "declining"  # shrinking from a real base
     elif total >= sat_threshold and -0.25 < velocity < 0.25:
         state = "saturated"  # lots of all-time work, flat share — well-trodden
     else:
-        state = "stable"
+        state = "stable"  # incl. too-little-history-to-trend (prior_n below the floor)
     return state, round(velocity, 3)
 
 
@@ -90,11 +103,11 @@ async def build_field_model(driver: AsyncDriver, pool) -> dict:
     w = await _windows(driver)
     if not w:
         raise RuntimeError("field model: graph has < 2 dated paper cohorts — nothing to trend")
-    recent_ym, prior_ym, n_recent, n_prior = w
+    recent_set, prior_set, n_recent, n_prior, recent_label, prior_label = w
 
     gathered: list[tuple] = []  # (label, key, name, total, recent_n, prior_n)
     for label, rel in KIND_RELS.items():
-        for key, name, total, recent_n, prior_n in await _concepts(driver, label, rel, recent_ym, prior_ym):
+        for key, name, total, recent_n, prior_n in await _concepts(driver, label, rel, recent_set, prior_set):
             if total >= MIN_TOTAL and key and name:
                 gathered.append((label, key, name, total, recent_n, prior_n))
 
@@ -104,7 +117,7 @@ async def build_field_model(driver: AsyncDriver, pool) -> dict:
     rows: list[tuple] = []
     for label, key, name, total, recent_n, prior_n in gathered:
         state, velocity = _classify(total, recent_n, prior_n, n_recent, n_prior, sat_threshold)
-        rows.append((label, key, name, total, recent_n, prior_n, velocity, state, recent_ym, prior_ym))
+        rows.append((label, key, name, total, recent_n, prior_n, velocity, state, recent_label, prior_label))
 
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute("DELETE FROM field_model")
@@ -116,8 +129,8 @@ async def build_field_model(driver: AsyncDriver, pool) -> dict:
         )
 
     return {
-        "recent": recent_ym,
-        "prior": prior_ym,
+        "recent": recent_label,
+        "prior": prior_label,
         "n_recent": n_recent,
         "n_prior": n_prior,
         "concepts": len(rows),

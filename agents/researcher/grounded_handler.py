@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from agents.researcher.feedback import (
     aggregate_direction,
@@ -25,6 +26,7 @@ from agents.researcher.feedback import (
 )
 from agents.researcher.grounded import grade_finding, investigate_task
 from harness.agent_modes import get_agent_mode
+from library.graph.tools import FINDING_ID_RESEARCHER, link_finding_cites_paper, merge_finding_grounds_claim
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
     # the task — a failure here would leave it 'running', get reaped to 'pending', and re-loop. So we
     # always complete the task below, even if steering failed.
     try:
-        disp = await refine_disposition(state, ctx["claim_id"], disposition(finding))
+        disp = await refine_disposition(state, ctx["claim_id"], disposition(finding, grade["grounded"]))
         fb = aggregate_direction(
             ctx["claim_id"],
             ctx["direction"],
@@ -69,7 +71,35 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
         applied = await apply_feedback(state, fb)  # confidence / last_evidence_at / self-healing acquire
     except Exception as e:  # noqa: BLE001 — steering is best-effort; the finding still completes
         log.exception("grounded researcher: feedback failed for T%s", task.id)
-        disp, applied = disposition(finding), {"feedback_error": str(e)[:200]}
+        disp, applied = disposition(finding, grade["grounded"]), {"feedback_error": str(e)[:200]}
+
+    # Project this finding into the trace graph: it GROUNDS its claim and CITES the EXTERNAL papers
+    # it actually rests on (the researcher's resolved refs → real provenance the synthesis path loses).
+    # Namespaced finding id so it never collides with market-era findings. Best-effort — never strands
+    # the task (Neo4j is a projection, not the source of truth).
+    claim_id = ctx.get("claim_id")
+    if claim_id is not None and refs:
+        try:
+            fid = FINDING_ID_RESEARCHER + task.id
+            now = datetime.now(UTC).isoformat()
+            supports = True if finding.verdict == "supports" else False if finding.verdict == "contradicts" else None
+            await merge_finding_grounds_claim(
+                finding_id=fid,
+                claim_id=claim_id,
+                source="researcher",
+                url=None,
+                title=(finding.headline or finding.summary or "")[:200],
+                summary=finding.summary or "",
+                relevance_score=round(float(finding.confidence) * 10, 1),
+                supports_claim=supports,
+                audit_verdict=disp,
+                created_at=now,
+            )
+            for r in refs:
+                if getattr(r, "document_id", None):
+                    await link_finding_cites_paper(fid, r.document_id, created_at=now)
+        except Exception:  # noqa: BLE001 — trace-graph projection is best-effort
+            log.exception("grounded researcher: trace-graph projection failed for T%s", task.id)
 
     # needs_experiment: literature can't settle this number — hand it to the experiments agent.
     # The feedback seam makes NO confidence move for this blocker; emitting here turns the dead-end

@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -480,6 +481,28 @@ def _arxiv_id_from_entry_id(raw: str) -> str:
     return tail or raw
 
 
+_ARXIV_VERSION_RE = re.compile(r"v\d+$")
+
+
+def normalize_arxiv_id(raw: str | None) -> str | None:
+    """Canonical arXiv id for dedup: strip any host/path AND the trailing version suffix so
+    'https://ar5iv.org/abs/2406.10251v3', 'http://arxiv.org/abs/2406.10251', '2406.10251v2' and
+    '2406.10251' all collapse to '2406.10251'. The version suffix is exactly why the same paper
+    slipped past uq_documents_arxiv as separate rows (ar5iv vN vs arxiv abs). Returns None for
+    blanks. Conservative: only strips a trailing 'vN', so old-style ids ('hep-th/9901001') survive."""
+    if not raw:
+        return None
+    s = raw.strip()
+    if "/abs/" in s:
+        s = s.rsplit("/abs/", 1)[-1]
+    elif "/pdf/" in s:
+        s = s.rsplit("/pdf/", 1)[-1]
+    s = s.split("?", 1)[0].split("#", 1)[0].strip()
+    if s.endswith(".pdf"):
+        s = s[:-4]
+    return _ARXIV_VERSION_RE.sub("", s) or None
+
+
 def _parse_arxiv_atom(xml_text: str) -> list[ArxivResult]:
     """Parse an arXiv Atom feed body into ArxivResult rows.
 
@@ -496,7 +519,9 @@ def _parse_arxiv_atom(xml_text: str) -> list[ArxivResult]:
     results: list[ArxivResult] = []
     for entry in root.findall("atom:entry", _ATOM_NS):
         id_el = entry.find("atom:id", _ATOM_NS)
-        arxiv_id = _arxiv_id_from_entry_id(id_el.text if id_el is not None else "")
+        raw_arxiv_id = _arxiv_id_from_entry_id(id_el.text if id_el is not None else "")
+        # Store the VERSION-LESS id (the dedup key); keep raw_arxiv_id for the exact-version PDF URL.
+        arxiv_id = normalize_arxiv_id(raw_arxiv_id)
         if not arxiv_id:
             continue
 
@@ -519,8 +544,8 @@ def _parse_arxiv_atom(xml_text: str) -> list[ArxivResult]:
             if link_el.get("title") == "pdf" or link_el.get("type") == "application/pdf":
                 pdf_url = link_el.get("href")
                 break
-        if pdf_url is None and arxiv_id:
-            pdf_url = f"http://arxiv.org/pdf/{arxiv_id}"
+        if pdf_url is None and raw_arxiv_id:
+            pdf_url = f"http://arxiv.org/pdf/{raw_arxiv_id}"
 
         # Categories: <arxiv:primary_category> + every <atom:category term=...>.
         categories: list[str] = []
