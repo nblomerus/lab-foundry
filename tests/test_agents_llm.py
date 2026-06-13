@@ -359,7 +359,9 @@ async def test_record_run_persists_when_session_present(monkeypatch, set_session
         step_name="ask",
     )
     assert out == "answer"
-    inserts = [c for c in pool.calls if c[0] == "execute" and "INSERT INTO agent_runs" in c[1]]
+    # _record_run inserts via fetchval(... RETURNING id) — it captures the new run id to expose
+    # as last_run_id — so the agent_runs insert is a `fetchval` call, not `execute`.
+    inserts = [c for c in pool.calls if c[0] == "fetchval" and "INSERT INTO agent_runs" in c[1]]
     assert len(inserts) == 1
     args = inserts[0][2]
     assert args[0] == "mimir"  # agent derived from invocation_type prefix

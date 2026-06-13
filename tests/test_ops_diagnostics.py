@@ -134,6 +134,8 @@ async def test_env_register_vector_codec_failure(monkeypatch, capsys):
 def _doctor_clean_rules():
     """Rules giving a fully-healthy lab (no flags raised)."""
     return [
+        # NOW / lab.pulse heartbeat — a RECENT pulse (age_s small) → not stale → no flag.
+        ("event_type = 'lab.pulse'", {"emitted_at": "2026-06-09 10:00", "payload": {}, "age_s": 60}),
         ("max(emitted_at) FROM events", "2026-06-09 10:00"),
         ("max(started_at) FROM agent_runs", "2026-06-09 10:01"),
         # events-by-status (last Nh)
