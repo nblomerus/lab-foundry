@@ -145,8 +145,9 @@ def _build_cmd(
 
 
 def _parse_result(stdout: str) -> dict | None:
-    """The script prints one JSON object = its result. Be lenient: try the whole
-    output, else scan lines from the bottom for the last JSON object."""
+    """The script prints one JSON object = its result. Be lenient: try the whole output, then the
+    last single-line JSON object, then the last balanced {...} block (handles json.dumps(indent=…)
+    pretty-printing and trailing prints — the #1 cause of 'produced no JSON result' failures)."""
     stdout = (stdout or "").strip()
     if not stdout:
         return None
@@ -160,6 +161,20 @@ def _parse_result(stdout: str) -> dict | None:
         if line.startswith("{") and line.endswith("}"):
             with contextlib.suppress(ValueError):
                 return json.loads(line)
+    # Last balanced {...} block: walk back from the final '}' counting braces to its match.
+    end = stdout.rfind("}")
+    depth = 0
+    for i in range(end, -1, -1):
+        if stdout[i] == "}":
+            depth += 1
+        elif stdout[i] == "{":
+            depth -= 1
+            if depth == 0:
+                with contextlib.suppress(ValueError):
+                    obj = json.loads(stdout[i : end + 1])
+                    if isinstance(obj, dict):
+                        return obj
+                break
     return None
 
 
@@ -192,6 +207,14 @@ async def run_in_container(
     script_path = os.path.join(workdir, "exp.py")
     with open(script_path, "w") as f:
         f.write(code)
+    # Cheap pre-launch syntax gate: a SyntaxError would otherwise burn a full container launch just
+    # to surface — catch it here so the debug loop gets the error immediately. (Runtime ImportErrors
+    # still surface from the container as before.)
+    try:
+        compile(code, "exp.py", "exec")
+    except SyntaxError as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return SandboxResult("failed", None, f"SyntaxError before launch: {e}", {"duration_s": 0.0})
     cmd = _build_cmd(
         name,
         script_path,
