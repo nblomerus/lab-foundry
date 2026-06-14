@@ -342,6 +342,7 @@ class GPULock:
         self._per_model_locks: dict[str, asyncio.Lock] = {}
         self._per_model_lock_lock = asyncio.Lock()
         self._in_flight: dict[str, int] = {}  # for observability / debug
+        self._last_active = 0.0  # monotonic time of the last local-GPU call's end (for busy())
 
     async def _model_lock(self, model_name: str) -> asyncio.Lock:
         # Lazy init under a tiny meta-lock so two concurrent callers don't
@@ -363,8 +364,32 @@ class GPULock:
             yield
         finally:
             self._in_flight[model_name] -= 1
+            self._last_active = time.monotonic()
             lock.release()
             self._global.release()
+
+    def busy(self, cooldown_s: float = 0.0) -> bool:
+        """True while the lab is using the LOCAL GPU — any call in flight, or within `cooldown_s` of
+        the last one finishing (the model is still resident/warm, so its VRAM isn't actually free).
+        The Quartermaster reads this so it never launches an experiment into VRAM the lab's own
+        retrieval/serving (the priority tenant) needs. Cloud calls don't take this lock, so it's a
+        true local-GPU signal."""
+        if any(n > 0 for n in self._in_flight.values()):
+            return True
+        return cooldown_s > 0 and self._last_active > 0 and (time.monotonic() - self._last_active) < cooldown_s
+
+
+_SHARED_GPU_LOCK: GPULock | None = None
+
+
+def shared_gpu_lock() -> GPULock:
+    """The one process-wide GPULock, so the Router, the experiment LLM broker, graph extraction, and
+    the Quartermaster all SEE and SERIALIZE against the same local-GPU activity. (Created on first use;
+    main.py grabs it at startup and hands it to the Router + broker.)"""
+    global _SHARED_GPU_LOCK
+    if _SHARED_GPU_LOCK is None:
+        _SHARED_GPU_LOCK = GPULock()
+    return _SHARED_GPU_LOCK
 
 
 # -------------------------------------------------------------------------

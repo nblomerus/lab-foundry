@@ -47,7 +47,7 @@ from agents.synthesis.article import handle_synthesis_article
 from agents.synthesis.handler import handle_finding_synthesize
 from harness.curator import Curator
 from harness.dispatch import Dispatcher
-from harness.router import GPULock, Router, build_cloud_chain, build_premium_chain
+from harness.router import Router, build_cloud_chain, build_premium_chain, shared_gpu_lock
 from library.graph.sink import handle_graph_sink_claim_created
 from memory.client import ZepClient
 from skills.client import LessonsClient
@@ -226,7 +226,7 @@ async def main() -> int:
         await memory.ensure_session(session)
 
     curator = Curator(state=state, memory=memory, lessons=lessons)
-    gpu_lock = GPULock()
+    gpu_lock = shared_gpu_lock()
     router = Router(
         pool=pool,
         gpu_lock=gpu_lock,

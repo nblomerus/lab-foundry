@@ -28,12 +28,19 @@ import re
 
 import httpx
 
+from harness.router import shared_gpu_lock
 from library.graph.tools import _get_driver
 
 log = logging.getLogger(__name__)
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 GRAPH_EXTRACT_MODEL = os.environ.get("GRAPH_EXTRACT_MODEL", "qwen2.5:14b-instruct-q4_K_M")
+# How long Ollama keeps the 14B extraction model resident after a call. Long enough to stay warm
+# through an active extraction burst (papers seconds apart), short enough to RELEASE its ~9.4GB of
+# GPU0 VRAM soon after extraction idles — otherwise it starves the GPU experiment lane (a single
+# sporadic call held the model for 30m, blocking every queued experiment). Bump it if extraction
+# cold-reloads too often for your cadence.
+GRAPH_EXTRACT_KEEP_ALIVE = os.environ.get("GRAPH_EXTRACT_KEEP_ALIVE", "60s")
 
 _PROMPT = """You extract structured metadata from an AI/ML research paper.
 Return ONLY a JSON object with keys "methods", "datasets", "tasks" — each a list of
@@ -169,19 +176,20 @@ async def extract_paper_concepts(title: str, body: str, *, model: str = GRAPH_EX
     Deterministic JSON via Ollama's format=json. Empty lists on any failure."""
     prompt = _PROMPT.format(title=(title or "Untitled")[:300], body=(body or "")[:4000])
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        # Hold the SHARED GPU lock for the 14B call so the Quartermaster sees this as the lab using
+        # the GPU (busy()) and won't launch an experiment on top of it — retrieval/extraction is the
+        # priority tenant of GPU0.
+        async with shared_gpu_lock().acquire(model), httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 f"{OLLAMA_URL}/api/generate",
-                # keep_alive holds the model resident between papers — without it the
-                # discovery pump's embedding bursts let the 14B idle out and cold-reload
-                # every call (~2-3x slower; ollama ps shows nothing loaded). 30m >> the
-                # per-paper gap, so it stays warm for the whole backfill.
+                # keep_alive keeps the model warm DURING an extraction burst but releases its GPU0
+                # VRAM soon after idle so the experiment lane isn't starved (see GRAPH_EXTRACT_KEEP_ALIVE).
                 json={
                     "model": model,
                     "prompt": prompt,
                     "format": "json",
                     "stream": False,
-                    "keep_alive": "30m",
+                    "keep_alive": GRAPH_EXTRACT_KEEP_ALIVE,
                     "options": {"temperature": 0.0},
                 },
             )
