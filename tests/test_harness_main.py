@@ -10,7 +10,7 @@ Ariadne pacemaker starts.
 Mocking strategy (all patched on harness.main):
   * asyncpg.create_pool   → AsyncMock → a _BootPool (company_state seeded → bootstrapped)
   * _preflight            → AsyncMock(True)  (skips httpx/ollama/neo4j/zep entirely)
-  * Curator/Router/GPULock/PostgresClient/LessonsClient/ZepClient.from_env → cheap fakes
+  * Curator/Router/shared_gpu_lock/PostgresClient/LessonsClient/ZepClient.from_env → cheap fakes
   * build_cloud_chain / build_premium_chain → return [] (no provider chains logged)
   * Dispatcher            → _FakeDispatcher that RECORDS register(event_type, handler)
   * asyncio.Event         → _InstantEvent whose wait() returns at once → main() falls
@@ -160,7 +160,7 @@ def _install_mocks(monkeypatch, *, pace_records=None):
     monkeypatch.setattr(hm, "LessonsClient", lambda **kw: AsyncMock(name="lessons"))
     monkeypatch.setattr(hm.ZepClient, "from_env", staticmethod(lambda: AsyncMock(name="memory")))
     monkeypatch.setattr(hm, "Curator", lambda **kw: object())
-    monkeypatch.setattr(hm, "GPULock", lambda *a, **k: object())
+    monkeypatch.setattr(hm, "shared_gpu_lock", lambda *a, **k: object())
     monkeypatch.setattr(hm, "Router", lambda **kw: AsyncMock(name="router"))
     monkeypatch.setattr(hm, "Dispatcher", _FakeDispatcher)
     monkeypatch.setattr(hm.asyncio, "Event", _InstantEvent)

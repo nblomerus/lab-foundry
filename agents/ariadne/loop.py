@@ -239,17 +239,16 @@ async def _annotate_gaps(gaps: list[str]) -> list[str]:
     for g in gaps:
         try:
             hits = await corpus_search(g, k=8, exclude_lab=True)
+            ndocs = len({h.document_id for h in hits})
+            top = max((h.sim for h in hits), default=0.0)
+            if ndocs >= _GAP_COVERAGE_MIN_DOCS and top >= _GAP_COVERAGE_SIM:
+                out.append(
+                    f"{g}  [corpus check: ~{ndocs} on-topic papers already exist (top match {int(top * 100)}%) "
+                    "— confirm this is genuinely under-explored, not a retrieval blind spot, before targeting]"
+                )
+            else:
+                out.append(g)
         except Exception:  # noqa: BLE001 — corroboration is best-effort; keep the gap as-is
-            out.append(g)
-            continue
-        ndocs = len({h.document_id for h in hits})
-        top = max((h.sim for h in hits), default=0.0)
-        if ndocs >= _GAP_COVERAGE_MIN_DOCS and top >= _GAP_COVERAGE_SIM:
-            out.append(
-                f"{g}  [corpus check: ~{ndocs} on-topic papers already exist (top match {int(top * 100)}%) "
-                "— confirm this is genuinely under-explored, not a retrieval blind spot, before targeting]"
-            )
-        else:
             out.append(g)
     return out
 

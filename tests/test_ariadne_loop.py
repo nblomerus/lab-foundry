@@ -76,6 +76,7 @@ def _chunk(
         source_url=source_url,
         trust_tier=trust_tier,
         text=text,
+        sim=0.42,
     )
 
 
@@ -215,11 +216,12 @@ async def test_mimir_brief_happy_path_with_anchors_and_gaps(monkeypatch):
     pool = ScriptedPool(rules=[("FROM field_model", rows)])
     captured = {}
 
-    async def _aq(question, k, state, asker):
+    async def _aq(question, k, state, asker, exclude_lab=False):
         captured["question"] = question
         captured["k"] = k
         captured["state"] = state
         captured["asker"] = asker
+        captured["exclude_lab"] = exclude_lab
         return _mimir_answer(gaps=["trust-aware reranking", "stale-doc decay"])
 
     monkeypatch.setattr(loop, "answer_question", _aq)
@@ -231,6 +233,8 @@ async def test_mimir_brief_happy_path_with_anchors_and_gaps(monkeypatch):
     # anchors injected into the question, state threaded, asker tagged
     assert "agentic RAG, tool use" in captured["question"]
     assert captured["state"] == "STATE" and captured["asker"] == "ariadne" and captured["k"] == 8
+    # lab's own outputs are excluded from the brief so they can't pose as external prior art
+    assert captured["exclude_lab"] is True
 
 
 @pytest.mark.asyncio
@@ -241,7 +245,7 @@ async def test_mimir_brief_no_anchors_when_field_model_query_fails(monkeypatch):
 
     captured = {}
 
-    async def _aq(question, k, state, asker):
+    async def _aq(question, k, state, asker, exclude_lab=False):
         captured["question"] = question
         return _mimir_answer(gaps=[])
 

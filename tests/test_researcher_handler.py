@@ -135,7 +135,7 @@ def _patch_engine(monkeypatch, *, finding=None, grade=None, ctx=None, refs=None,
     refs = refs if refs is not None else ["r1", "r2"]
     monkeypatch.setattr(GH, "investigate_task", _aconst((ctx, refs, "mimir", finding)))
     monkeypatch.setattr(GH, "grade_finding", lambda f, r: grade or {"grounded": 0.9})
-    monkeypatch.setattr(GH, "disposition", lambda f: "supported")
+    monkeypatch.setattr(GH, "disposition", lambda f, g=None: "supported")
     monkeypatch.setattr(GH, "refine_disposition", _aconst("supported"))
     monkeypatch.setattr(GH, "finding_feedback", lambda *a, **k: SimpleNamespace())
     monkeypatch.setattr(GH, "aggregate_direction", lambda *a, **k: SimpleNamespace())
@@ -177,7 +177,7 @@ async def test_grounded_investigate_emit_true(monkeypatch):
     spy = AsyncMock(return_value=(_ctx(), ["r1"], "mimir", _finding()))
     monkeypatch.setattr(GH, "investigate_task", spy)
     monkeypatch.setattr(GH, "grade_finding", lambda f, r: {"grounded": 1.0})
-    monkeypatch.setattr(GH, "disposition", lambda f: "supported")
+    monkeypatch.setattr(GH, "disposition", lambda f, g=None: "supported")
     monkeypatch.setattr(GH, "refine_disposition", _aconst("supported"))
     monkeypatch.setattr(GH, "finding_feedback", lambda *a, **k: SimpleNamespace())
     monkeypatch.setattr(GH, "aggregate_direction", lambda *a, **k: SimpleNamespace())
@@ -196,7 +196,7 @@ async def test_grounded_feedback_failure_still_completes(monkeypatch):
     monkeypatch.setattr(GH, "investigate_task", _aconst((_ctx(), ["r1"], "mimir", finding)))
     monkeypatch.setattr(GH, "grade_finding", lambda f, r: {"grounded": 0.7})
     # disposition(finding) is used as the fallback when steering blows up
-    monkeypatch.setattr(GH, "disposition", lambda f: "contradicted")
+    monkeypatch.setattr(GH, "disposition", lambda f, g=None: "contradicted")
     monkeypatch.setattr(GH, "refine_disposition", _aconst("contradicted"))
     monkeypatch.setattr(GH, "finding_feedback", lambda *a, **k: SimpleNamespace())
     monkeypatch.setattr(GH, "aggregate_direction", lambda *a, **k: SimpleNamespace())
@@ -221,7 +221,7 @@ async def test_grounded_refine_disposition_failure_caught(monkeypatch):
     disp = _disp_with_state(claim_task=_task(31))
     monkeypatch.setattr(GH, "investigate_task", _aconst((_ctx(), ["r1"], "mimir", _finding())))
     monkeypatch.setattr(GH, "grade_finding", lambda f, r: {"grounded": 0.9})
-    monkeypatch.setattr(GH, "disposition", lambda f: "supported")
+    monkeypatch.setattr(GH, "disposition", lambda f, g=None: "supported")
 
     async def _boom(*_a, **_k):
         raise RuntimeError("refine failed")
@@ -244,7 +244,7 @@ async def test_grounded_result_truncates_lists(monkeypatch):
     )
     monkeypatch.setattr(GH, "investigate_task", _aconst((_ctx(), ["r1"], "mimir", finding)))
     monkeypatch.setattr(GH, "grade_finding", lambda f, r: {"grounded": 1.0})
-    monkeypatch.setattr(GH, "disposition", lambda f: "supported")
+    monkeypatch.setattr(GH, "disposition", lambda f, g=None: "supported")
     monkeypatch.setattr(GH, "refine_disposition", _aconst("supported"))
     monkeypatch.setattr(GH, "finding_feedback", lambda *a, **k: SimpleNamespace())
     monkeypatch.setattr(GH, "aggregate_direction", lambda *a, **k: SimpleNamespace())

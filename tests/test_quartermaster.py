@@ -22,6 +22,7 @@ off the module, so we monkeypatch them to control thresholds without a real cloc
 from __future__ import annotations
 
 import asyncio
+import types
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -67,6 +68,16 @@ async def _drain(running: dict) -> None:
     tasks = [t for t, _is_gpu in running.values() if isinstance(t, asyncio.Task)]
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.fixture(autouse=True)
+def _idle_gpu_lock(monkeypatch):
+    """Default the lab-activity gate to idle. The shared GPULock is a process-wide
+    singleton whose ``_last_active`` persists across tests, so without this an
+    earlier test that exercised the lock would make later GPU-allocate tests read
+    'lab busy' and defer — an order-dependent, flaky failure (seen in CI). Tests
+    that exercise the gate itself re-patch ``shared_gpu_lock`` to a busy stub."""
+    monkeypatch.setattr(qm, "shared_gpu_lock", lambda: types.SimpleNamespace(busy=lambda *a, **k: False))
 
 
 # ===========================================================================
@@ -297,19 +308,67 @@ async def test_allocate_gpu_lane_serialized(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_allocate_uses_explicit_gpu_mem_mb(monkeypatch):
-    """A per-experiment gpu_mem_mb is honoured over the default: a 30000MB need
-    leaves no headroom on a 20000MB-free GPU → not launched."""
+    """A per-experiment gpu_mem_mb (below the clamp) is honoured over the default:
+    a 7000MB need leaves no headroom on an 8000MB-free GPU, even though the 4096
+    default would have fit → not launched."""
     monkeypatch.setattr(qm, "run_experiment", AsyncMock())
     monkeypatch.setattr(qm, "MAX_GPU", 1)
+    monkeypatch.setattr(qm, "GPU_MEM_DEFAULT", 4096)
+    monkeypatch.setattr(qm, "GPU_MEM_MAX", 16384)  # high so the explicit 7000 isn't clamped
     monkeypatch.setattr(qm, "GPU_RESERVE_MB", 2048)
     st = _state()
-    st.get_queued_experiments.return_value = [_exp(7, requires_gpu=True, gpu_mem_mb=30000)]
-    res = {"cpu_percent": 1.0, "mem_percent": 1.0, "gpus": [_gpu(index=0, free_mb=20000.0)]}
+    st.get_queued_experiments.return_value = [_exp(7, requires_gpu=True, gpu_mem_mb=7000)]
+    # free 8000 - need 7000 = 1000 < reserve 2048 → no headroom (the 4096 default would have fit)
+    res = {"cpu_percent": 1.0, "mem_percent": 1.0, "gpus": [_gpu(index=0, free_mb=8000.0)]}
     running: dict = {}
 
     launched = await qm.allocate(st, AsyncMock(), AsyncMock(), res, running, {})
 
     assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_allocate_clamps_oversized_gpu_mem_to_max(monkeypatch):
+    """An over-estimated gpu_mem_mb is clamped to GPU_MEM_MAX so the experiment
+    stays schedulable: a 30000MB request is capped to 8192 and DOES launch on a
+    12000MB-free GPU it would never fit unclamped."""
+    monkeypatch.setattr(qm, "run_experiment", AsyncMock())
+    monkeypatch.setattr(qm, "MAX_GPU", 1)
+    monkeypatch.setattr(qm, "GPU_MEM_MAX", 8192)
+    monkeypatch.setattr(qm, "GPU_RESERVE_MB", 2048)
+    st = _state()
+    exp = _exp(8, requires_gpu=True, gpu_mem_mb=30000)
+    st.get_queued_experiments.return_value = [exp]
+    # clamped need 8192: free 12000 - 8192 = 3808 >= reserve 2048 → fits
+    res = {"cpu_percent": 1.0, "mem_percent": 1.0, "gpus": [_gpu(index=0, free_mb=12000.0)]}
+    running: dict = {}
+
+    launched = await qm.allocate(st, AsyncMock(), AsyncMock(), res, running, {})
+
+    assert launched == [8]
+    assert exp["_gpu_device"] == "0"
+    await _drain(running)
+
+
+@pytest.mark.asyncio
+async def test_allocate_defers_gpu_when_lab_busy(monkeypatch):
+    """When the shared GPULock reads busy (the lab is actively serving the RAG /
+    retrieval load on the GPU), a GPU experiment is deferred even with ample VRAM
+    headroom — the live lab keeps GPU priority over the experiment lane."""
+    monkeypatch.setattr(qm, "run_experiment", AsyncMock())
+    monkeypatch.setattr(qm, "MAX_GPU", 1)
+    monkeypatch.setattr(qm, "GPU_MEM_DEFAULT", 4096)
+    monkeypatch.setattr(qm, "GPU_RESERVE_MB", 2048)
+    monkeypatch.setattr(qm, "shared_gpu_lock", lambda: types.SimpleNamespace(busy=lambda *a, **k: True))
+    st = _state()
+    st.get_queued_experiments.return_value = [_exp(9, requires_gpu=True)]
+    res = {"cpu_percent": 1.0, "mem_percent": 1.0, "gpus": [_gpu(index=0, free_mb=40000.0)]}
+    running: dict = {}
+
+    launched = await qm.allocate(st, AsyncMock(), AsyncMock(), res, running, {})
+
+    assert launched == []
+    st.mark_experiment_running.assert_not_awaited()
 
 
 @pytest.mark.asyncio

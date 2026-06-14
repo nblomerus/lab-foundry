@@ -93,7 +93,7 @@ async def test_retrieve_builds_refs_no_llm(monkeypatch):
 
     refs = await ask.retrieve("attention", k=4)
 
-    mock.assert_awaited_once_with("attention", k=4)
+    mock.assert_awaited_once_with("attention", k=4, exclude_lab=False)
     assert chain_calls == []  # retrieve must NOT synthesize
     assert len(refs) == 3
     assert all(isinstance(r, ask.RetrievedRef) for r in refs)
@@ -192,7 +192,7 @@ async def test_answer_question_happy_with_emit(monkeypatch):
     assert "self-attention" in ans.related_concepts
     assert len(ans.gaps) == 7
 
-    corpus.assert_awaited_once_with("what is attention?", k=5)
+    corpus.assert_awaited_once_with("what is attention?", k=5, exclude_lab=False)
 
     # the user prompt fed to the LLM carries passages + graph context
     user_msg = chain_calls[0][0][1]["content"]

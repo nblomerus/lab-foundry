@@ -456,12 +456,12 @@ async def test_requested_infeasible_records_failed_run_and_skips_queue_path():
 
 
 async def test_requested_floors_tiny_wall_clock_budget():
-    """Design-estimated 10-60s budgets killed runs before one attempt finished — floor at 120s."""
+    """Design-estimated 10-60s budgets killed runs before one attempt finished — floor at 300s."""
     design = _design(est_wall_clock_s=10)
     disp = _disp(design=design, get_claim=_claim(), queue_experiment=1)
     await EH.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
     _, kw = disp.state.queue_experiment.await_args
-    assert kw["wall_clock_budget_s"] == 120
+    assert kw["wall_clock_budget_s"] == 300
 
 
 # ══════════════════════════════════════════════════════════════════════════════

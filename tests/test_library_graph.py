@@ -32,7 +32,7 @@ def test_canon_key_alias_acronym():
 def test_canon_key_mechanical_singular_and_hyphen():
     # No alias: lowercase, drop hyphens/spaces, conservative singular.
     assert extract_mod._canon_key("Fine-Tuning") == "finetuning"
-    assert extract_mod._canon_key("Diffusion Models") == "diffusionmodel"
+    assert extract_mod._canon_key("Diffusion Models") == "diffusion"
     # "ss" ending must NOT be singularized.
     assert extract_mod._canon_key("loss") == "loss"
     # short key (<=4) keeps trailing s.
@@ -371,8 +371,8 @@ async def test_windows_orders_recent_first():
         return [{"ym": "2505", "n": 200}, {"ym": "2506", "n": 150}, {"ym": "2504", "n": 50}]
 
     w = await fm_mod._windows(FakeNeoDriver(on_run))
-    recent, prior, n_recent, n_prior = w
-    assert recent == "2506" and prior == "2505"
+    recent, prior, n_recent, n_prior, recent_label, prior_label = w
+    assert recent == ["2506"] and prior == ["2505"]
     assert n_recent == 150 and n_prior == 200
 
 
