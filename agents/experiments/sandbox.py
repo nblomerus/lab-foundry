@@ -41,11 +41,18 @@ _MAX_OUTPUT_BYTES = 256 * 1024  # cap captured stdout/stderr — a runaway print
 # capability. Condition-driven: broker off → socket absent → nothing mounted.
 LLM_SOCKET = os.environ.get("EXPERIMENT_LLM_SOCKET", "/tmp/labfoundry-llm-broker.sock")
 _LLM_HELPER = os.path.join(os.path.dirname(__file__), "sandbox_llm.py")
+# The always-mounted result helper (/opt/lab/exp.py → exp.emit(result)); stdlib only, no broker needed.
+_EXP_HELPER = os.path.join(os.path.dirname(__file__), "sandbox_exp.py")
 
 # The offline benchmark pack (ops.build_benchmark_pack) — mounted read-only at /data when
 # present, same condition-driven shape as the LLM socket. Real evaluation data for
 # model-behaviour experiments; without it they must generate probe inputs in-code.
 DATASETS_DIR = os.environ.get("EXPERIMENT_DATASETS_DIR", "/mnt/data/labfoundry-benchmarks")
+
+# The offline HF model zoo (ops.build_model_zoo) — mounted read-only at /models when present, same
+# condition-driven shape as /data. Pre-staged weights for cross-encoder / NLI / encoder experiments;
+# the sandbox stays --network none (HF_HUB_OFFLINE forces local-only loads).
+MODELS_DIR = os.environ.get("EXPERIMENT_MODELS_DIR", "/mnt/data/labfoundry-hf-models")
 
 
 def read_manifest() -> list[dict]:
@@ -84,6 +91,7 @@ def _build_cmd(
     requires_gpu: bool,
     gpu_device: str | None,
     datasets_dir: str | None,
+    models_dir: str | None = None,
     llm_socket: str | None = None,
 ) -> list[str]:
     cmd = [
@@ -132,11 +140,25 @@ def _build_cmd(
         "MPLCONFIGDIR=/work/.mpl",
         "-v",
         f"{script_path}:/work/exp.py:ro",
+        # The result helper is ALWAYS available (exp.emit coerces numpy/torch → JSON); no broker needed.
+        "-v",
+        f"{_EXP_HELPER}:/opt/lab/exp.py:ro",
     ]
     if requires_gpu:
         cmd += ["--gpus", f"device={gpu_device}" if gpu_device is not None else "all"]
     if datasets_dir:
         cmd += ["-v", f"{datasets_dir}:/data:ro"]
+    if models_dir:
+        # Pre-staged HF weights, read-only; HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE force local-only loads
+        # (no network). Any HF cache writes go to /work via HOME/XDG_CACHE_HOME (set above).
+        cmd += [
+            "-v",
+            f"{models_dir}:/models:ro",
+            "-e",
+            "HF_HUB_OFFLINE=1",
+            "-e",
+            "TRANSFORMERS_OFFLINE=1",
+        ]
     if llm_socket:
         # The socket mount is rw (connecting writes); the helper is ro. Network stays none.
         cmd += ["-v", f"{llm_socket}:/sock/ollama.sock", "-v", f"{_LLM_HELPER}:/opt/lab/llm.py:ro"]
@@ -223,6 +245,7 @@ async def run_in_container(
         requires_gpu=requires_gpu,
         gpu_device=gpu_device,
         datasets_dir=datasets_dir or (DATASETS_DIR if os.path.isdir(DATASETS_DIR) else None),
+        models_dir=MODELS_DIR if os.path.isdir(MODELS_DIR) else None,
         llm_socket=LLM_SOCKET if os.path.exists(LLM_SOCKET) else None,
     )
     _RUNNING[exp_id] = name

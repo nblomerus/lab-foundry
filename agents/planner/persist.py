@@ -47,12 +47,15 @@ async def persist_plan(state, out, valid_ids, *, run_id: int | None = None) -> d
             room = MAX_TASKS_PER_DIRECTION - existing
             if room <= 0:
                 continue  # already has its lean pending set — don't pile on
+            # The direction's owner (set at approval) — denormalised onto each task so the
+            # researcher claims/filters its own work and the experiment it authors inherits it.
+            researcher_id = await conn.fetchval("SELECT researcher_id FROM claims WHERE id = $1", p.claim_id)
             for t in p.tasks[:room]:  # hard cap — leanest pending set per direction
                 if not t.description.strip() or t.task_type not in TASK_TYPES:
                     continue
                 await conn.execute(
-                    "INSERT INTO tasks (department, task_type, description, payload, priority, status, claim_id) "
-                    "VALUES ('research', $1, $2, $3, $4, 'pending', $5)",
+                    "INSERT INTO tasks (department, task_type, description, payload, priority, status, "
+                    "claim_id, researcher_id) VALUES ('research', $1, $2, $3, $4, 'pending', $5, $6)",
                     t.task_type,
                     t.description[:4000],
                     json.dumps(
@@ -66,6 +69,7 @@ async def persist_plan(state, out, valid_ids, *, run_id: int | None = None) -> d
                     ),
                     _PRIORITY.get(t.priority, 5),
                     p.claim_id,
+                    researcher_id,
                 )
                 n_tasks += 1
     log.info("planner: persisted %d task(s) across %d direction(s)", n_tasks, len(out.plans))

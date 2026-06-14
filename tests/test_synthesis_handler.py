@@ -19,8 +19,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import agents.experiments.handler as EH
+import agents.experiments.handler as EH  # for EH.sandbox.image_digest
 import agents.synthesis.handler as SH
+from agents.researcher import experiment_interpret as EI
 from agents.synthesis.handler import _graduate_to, handle_finding_synthesize
 from agents.synthesis.schemas import ResearchFinding
 from tests._helpers import make_dispatcher, make_state
@@ -189,7 +190,7 @@ async def test_experiment_completed_triggers_synthesis_when_enough(monkeypatch):
     disp.router.invoke = AsyncMock(return_value=(report, 7))
     disp.session = object()
 
-    out = await EH.handle_experiment_completed(_event(1, experiment_id=50, claim_id=61), disp)
+    out = await EI.handle_experiment_completed(_event(1, experiment_id=50, claim_id=61), disp)
     assert out["synthesis_triggered"] is True
     # one of the emit_corpus_event calls is the finding.synthesize trigger
     types = [(c.args[0] if c.args else c.kwargs.get("event_type")) for c in disp.state.emit_corpus_event.await_args_list]
@@ -213,7 +214,7 @@ async def test_experiment_completed_no_trigger_below_threshold(monkeypatch):
     disp.router.invoke = AsyncMock(return_value=(report, 7))
     disp.session = object()
 
-    out = await EH.handle_experiment_completed(_event(1, experiment_id=50, claim_id=61), disp)
+    out = await EI.handle_experiment_completed(_event(1, experiment_id=50, claim_id=61), disp)
     assert out["synthesis_triggered"] is False
     types = [c.args[0] for c in disp.state.emit_corpus_event.await_args_list]
     assert "finding.synthesize" not in types

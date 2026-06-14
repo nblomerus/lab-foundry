@@ -1,15 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { Inbox, ShieldCheck, Compass } from "lucide-react";
+import { Inbox, ShieldCheck, Compass, FlaskConical } from "lucide-react";
 import { DeltaBadge, KpiCard } from "./ui";
 import { compact } from "../lib/format";
 import type { KnowledgePulse } from "../lib/pulse";
 import type { AriadneOverview } from "../lib/api";
 
 // The mockup's 6-card header. Live: Current Mission, New Knowledge 24h, Certified
-// Documents, plus Active Directions / Requests (Ariadne's live agenda). Running
-// Experiments stays "Planned" — the execution loop isn't woken yet.
+// Documents, Active Directions / Requests (Ariadne's live agenda), and Running
+// Experiments — the count ACTIVELY running/queued now (not the lifetime total).
 export function KpiRow({
   pulse, mission, ariadne,
 }: { pulse: KnowledgePulse; mission?: string | null; ariadne?: AriadneOverview | null }) {
@@ -72,7 +72,17 @@ export function KpiRow({
       ) : (
         <KpiCard label="Active Requests" planned footer="research workflow" />
       )}
-      <KpiCard label="Running Experiments" planned footer="execution loop" />
+      {ag ? (
+        <KpiCard
+          label="Running Experiments"
+          icon={FlaskConical}
+          accent="live"
+          value={compact(ag.experiments_running)}
+          footer={`${compact(ag.experiments_total)} run · QM ${ag.quartermaster_mode ?? "off"}`}
+        />
+      ) : (
+        <KpiCard label="Running Experiments" planned footer="execution loop" />
+      )}
     </div>
   );
 }

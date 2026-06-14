@@ -41,6 +41,9 @@ def _exp_row(r) -> dict:
         "status": r["status"],
         "data_realism": r["data_realism"],
         "realism_mismatch": r["realism_mismatch"],
+        "failure_class": r["failure_class"],
+        "researcher_id": r["researcher_id"],
+        "researcher_name": r["researcher_name"],
         "claim_id": params.get("claim_id"),
         "claim_statement": r["claim_statement"],
         "claim_confidence": float(r["claim_confidence"]) if r["claim_confidence"] is not None else None,
@@ -73,7 +76,8 @@ async def experiments(request: Request, limit: int = 50) -> dict:
             for r in await conn.fetch("SELECT status, count(*) AS n FROM experiment_runs GROUP BY status")
         }
         rows = await conn.fetch(
-            "SELECT e.id, e.kind, e.status, e.data_realism, e.realism_mismatch, e.params, "
+            "SELECT e.id, e.kind, e.status, e.data_realism, e.realism_mismatch, e.failure_class, "
+            "e.researcher_id, rr.name AS researcher_name, e.params, "
             "e.resource_usage, e.researcher_notes, "
             "e.interpretation, e.error, e.requires_gpu, e.gpu_mem_mb, e.priority, "
             "e.wall_clock_budget_s, e.mem_budget_mb, e.kill_reason, e.ingested_doc_id, "
@@ -82,6 +86,7 @@ async def experiments(request: Request, limit: int = 50) -> dict:
             "FROM experiment_runs e "
             "LEFT JOIN tasks t ON t.id = e.task_id "
             "LEFT JOIN claims c ON c.id = t.claim_id "
+            "LEFT JOIN researchers rr ON rr.id = e.researcher_id "
             "ORDER BY e.id DESC LIMIT $1",
             limit,
         )
@@ -109,7 +114,9 @@ async def experiment_detail(experiment_id: int, request: Request) -> dict:
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         r = await conn.fetchrow(
-            "SELECT e.id, e.kind, e.status, e.data_realism, e.realism_mismatch, e.params, e.code, "
+            "SELECT e.id, e.kind, e.status, e.data_realism, e.realism_mismatch, e.failure_class, "
+            "e.researcher_id, rr.name AS researcher_name, rr.specialty AS researcher_specialty, "
+            "e.params, e.code, "
             "e.result, e.error, e.resource_usage, "
             "e.provenance, e.dataset_refs, e.researcher_notes, e.interpretation, e.requires_gpu, "
             "e.gpu_mem_mb, e.priority, e.wall_clock_budget_s, e.mem_budget_mb, e.kill_reason, "
@@ -118,6 +125,7 @@ async def experiment_detail(experiment_id: int, request: Request) -> dict:
             "FROM experiment_runs e "
             "LEFT JOIN tasks t ON t.id = e.task_id "
             "LEFT JOIN claims c ON c.id = t.claim_id "
+            "LEFT JOIN researchers rr ON rr.id = e.researcher_id "
             "WHERE e.id = $1",
             experiment_id,
         )
@@ -131,6 +139,10 @@ async def experiment_detail(experiment_id: int, request: Request) -> dict:
         "status": r["status"],
         "data_realism": r["data_realism"],
         "realism_mismatch": r["realism_mismatch"],
+        "failure_class": r["failure_class"],
+        "researcher_id": r["researcher_id"],
+        "researcher_name": r["researcher_name"],
+        "researcher_specialty": r["researcher_specialty"],
         "claim_id": params.get("claim_id"),
         "claim_statement": r["claim_statement"],
         "claim_confidence": float(r["claim_confidence"]) if r["claim_confidence"] is not None else None,

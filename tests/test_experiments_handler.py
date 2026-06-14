@@ -23,8 +23,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import agents.experiments.handler as EH
+import agents.experiments.handler as EH  # prompt builders + realism classifiers stayed here
 from agents.experiments.schemas import ExperimentDesign, ExperimentReport
+from agents.researcher import experiment_design as ED  # the handlers moved under the researcher
+from agents.researcher import experiment_interpret as EI
 from tests._helpers import make_dispatcher, make_state
 
 pytestmark = pytest.mark.asyncio
@@ -96,7 +98,7 @@ def _disp(*, design=None, report=None, run_id=7, **state_returns):
 async def test_requested_happy_path_queues_experiment():
     design = _design()
     disp = _disp(design=design, run_id=11, get_claim=_claim(), queue_experiment=42)
-    out = await EH.handle_experiment_requested(
+    out = await ED.handle_experiment_requested(
         _event(5, claim_id=3, task_id=99, hypothesis="kernels win", goal="settle the number"),
         disp,
     )
@@ -122,7 +124,7 @@ async def test_requested_happy_path_queues_experiment():
 async def test_requested_curator_and_router_invoked_correctly():
     design = _design()
     disp = _disp(design=design, get_claim=_claim(statement="my direction"), queue_experiment=1)
-    await EH.handle_experiment_requested(_event(8, claim_id=2, task_id=1, hypothesis="h", goal="g"), disp)
+    await ED.handle_experiment_requested(_event(8, claim_id=2, task_id=1, hypothesis="h", goal="g"), disp)
 
     _, ckw = disp.curator.build.await_args
     assert ckw["invocation_type"] == "experiments.design"
@@ -151,7 +153,7 @@ async def test_requested_passes_prior_hypotheses_to_vary_the_series():
             {"params": {}},  # no hypothesis → dropped
         ],
     )
-    await EH.handle_experiment_requested(_event(3, claim_id=7, task_id=1), disp)
+    await ED.handle_experiment_requested(_event(3, claim_id=7, task_id=1), disp)
     _, ckw = disp.curator.build.await_args
     assert ckw["context"]["prior_hypotheses"] == [
         "8-bit GP within 2% RMSE of XGBoost",
@@ -162,7 +164,7 @@ async def test_requested_passes_prior_hypotheses_to_vary_the_series():
 async def test_requested_wall_clock_capped_at_1800():
     design = _design(est_wall_clock_s=1800)  # schema caps at 1800; handler also min(1800, ...)
     disp = _disp(design=design, get_claim=_claim(), queue_experiment=1)
-    await EH.handle_experiment_requested(_event(1, claim_id=1, task_id=1), disp)
+    await ED.handle_experiment_requested(_event(1, claim_id=1, task_id=1), disp)
     _, kw = disp.state.queue_experiment.await_args
     assert kw["wall_clock_budget_s"] == 1800
 
@@ -170,7 +172,7 @@ async def test_requested_wall_clock_capped_at_1800():
 async def test_requested_gpu_default_mem_when_requires_gpu():
     design = _design(requires_gpu=True, gpu_mem_mb=None)
     disp = _disp(design=design, get_claim=_claim(), queue_experiment=1)
-    await EH.handle_experiment_requested(_event(1, claim_id=1, task_id=1), disp)
+    await ED.handle_experiment_requested(_event(1, claim_id=1, task_id=1), disp)
     _, kw = disp.state.queue_experiment.await_args
     assert kw["requires_gpu"] is True
     assert kw["gpu_mem_mb"] == 4096  # falls back to 4096 when GPU needed but unspecified
@@ -178,7 +180,7 @@ async def test_requested_gpu_default_mem_when_requires_gpu():
 
 async def test_requested_missing_task_id_skips():
     disp = _disp(design=_design(), queue_experiment=42)
-    out = await EH.handle_experiment_requested(_event(1, claim_id=3), disp)  # no task_id
+    out = await ED.handle_experiment_requested(_event(1, claim_id=3), disp)  # no task_id
     assert out["skipped"] is True
     assert "task_id" in out["reason"]
     disp.state.queue_experiment.assert_not_awaited()
@@ -188,7 +190,7 @@ async def test_requested_missing_task_id_skips():
 async def test_requested_claim_not_found_falls_back_to_empty_statement():
     disp = _disp(design=_design(), queue_experiment=42)
     disp.state.get_claim = AsyncMock(side_effect=ValueError("no such claim"))
-    out = await EH.handle_experiment_requested(_event(1, claim_id=404, task_id=7), disp)
+    out = await ED.handle_experiment_requested(_event(1, claim_id=404, task_id=7), disp)
     assert out["queued_experiment"] == 42
     _, ckw = disp.curator.build.await_args
     assert ckw["context"]["claim_statement"] == ""  # fell back to empty on ValueError
@@ -196,7 +198,7 @@ async def test_requested_claim_not_found_falls_back_to_empty_statement():
 
 async def test_requested_no_claim_id_skips_lookup():
     disp = _disp(design=_design(), queue_experiment=42)
-    out = await EH.handle_experiment_requested(_event(1, task_id=7), disp)  # claim_id absent
+    out = await ED.handle_experiment_requested(_event(1, task_id=7), disp)  # claim_id absent
     assert out["queued_experiment"] == 42
     assert out["claim_id"] is None
     disp.state.get_claim.assert_not_awaited()
@@ -219,7 +221,7 @@ def _exp(**over):
 async def test_completed_happy_path_interprets_moves_conf_ingests():
     report = _report(confidence_delta=0.1)
     disp = _disp(report=report, run_id=9, get_experiment=_exp(), get_claim=_claim(confidence=0.5))
-    out = await EH.handle_experiment_completed(_event(2, experiment_id=42, claim_id=3, task_id=1), disp)
+    out = await EI.handle_experiment_completed(_event(2, experiment_id=42, claim_id=3, task_id=1), disp)
 
     # interpretation persisted with the narrative note
     disp.state.set_experiment_interpretation.assert_awaited_once()
@@ -254,7 +256,7 @@ async def test_completed_happy_path_interprets_moves_conf_ingests():
 
 async def test_completed_curator_and_router_invoked_correctly():
     disp = _disp(report=_report(), get_experiment=_exp(), get_claim=_claim())
-    await EH.handle_experiment_completed(_event(3, experiment_id=7, claim_id=2), disp)
+    await EI.handle_experiment_completed(_event(3, experiment_id=7, claim_id=2), disp)
     _, ckw = disp.curator.build.await_args
     assert ckw["invocation_type"] == "experiments.interpret"
     assert ckw["context"]["result"] == {"acc": 0.9, "delta": 0.06}
@@ -266,7 +268,7 @@ async def test_completed_curator_and_router_invoked_correctly():
 
 async def test_completed_no_experiment_skips():
     disp = _disp(report=_report(), get_experiment=None)
-    out = await EH.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
+    out = await EI.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
     assert out["skipped"] is True
     disp.state.set_experiment_interpretation.assert_not_awaited()
     disp.router.invoke.assert_not_awaited()
@@ -274,21 +276,21 @@ async def test_completed_no_experiment_skips():
 
 async def test_completed_missing_experiment_id_skips():
     disp = _disp(report=_report(), get_experiment=_exp())
-    out = await EH.handle_experiment_completed(_event(1, claim_id=3), disp)  # no experiment_id
+    out = await EI.handle_experiment_completed(_event(1, claim_id=3), disp)  # no experiment_id
     assert out["skipped"] is True
     disp.state.get_experiment.assert_not_awaited()
 
 
 async def test_completed_empty_result_skips():
     disp = _disp(report=_report(), get_experiment=_exp(result=None))
-    out = await EH.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
+    out = await EI.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
     assert out["skipped"] is True
     disp.router.invoke.assert_not_awaited()
 
 
 async def test_completed_zero_delta_does_not_move_confidence():
     disp = _disp(report=_report(confidence_delta=0.0), get_experiment=_exp(), get_claim=_claim())
-    out = await EH.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
+    out = await EI.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
     disp.state.update_claim_confidence.assert_not_awaited()  # zero delta → no move
     assert out["confidence"] is None
     assert disp.state.emit_corpus_event.await_count == 2  # note + dataset ingested
@@ -296,7 +298,7 @@ async def test_completed_zero_delta_does_not_move_confidence():
 
 async def test_completed_no_claim_id_skips_confidence():
     disp = _disp(report=_report(confidence_delta=0.2), get_experiment=_exp())
-    out = await EH.handle_experiment_completed(_event(1, experiment_id=42), disp)  # claim_id absent
+    out = await EI.handle_experiment_completed(_event(1, experiment_id=42), disp)  # claim_id absent
     disp.state.update_claim_confidence.assert_not_awaited()
     assert out["claim_id"] is None
     assert disp.state.emit_corpus_event.await_count == 2  # note + dataset
@@ -306,7 +308,7 @@ async def test_completed_claim_not_found_skips_confidence_but_ingests():
     disp = _disp(report=_report(confidence_delta=0.2), get_experiment=_exp())
     # get_claim raises ValueError when confidence move is attempted (claim inactive / missing)
     disp.state.get_claim = AsyncMock(side_effect=ValueError("claim not active"))
-    out = await EH.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
+    out = await EI.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
     disp.state.update_claim_confidence.assert_not_awaited()
     assert out["confidence"] is None
     assert disp.state.emit_corpus_event.await_count == 2  # experiment stands -> note + dataset
@@ -315,7 +317,7 @@ async def test_completed_claim_not_found_skips_confidence_but_ingests():
 async def test_completed_confidence_clamped_to_one():
     # 0.95 + 0.3 would be 1.25 → clamped to 1.0
     disp = _disp(report=_report(confidence_delta=0.3), get_experiment=_exp(), get_claim=_claim(confidence=0.95))
-    await EH.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
+    await EI.handle_experiment_completed(_event(1, experiment_id=42, claim_id=3), disp)
     cargs, _ = disp.state.update_claim_confidence.await_args
     assert cargs[1] == 1.0
 
@@ -325,7 +327,7 @@ async def test_completed_confidence_clamped_to_one():
 # ══════════════════════════════════════════════════════════════════════════════
 async def test_failed_records_failure_note():
     disp = _disp(get_experiment={"error": "boom"})
-    out = await EH.handle_experiment_failed(_event(1, experiment_id=42, claim_id=3, task_id=1), disp)
+    out = await EI.handle_experiment_failed(_event(1, experiment_id=42, claim_id=3, task_id=1), disp)
     assert out["failed"] is True
     assert out["experiment_id"] == 42
     assert out["handled"] is True
@@ -341,7 +343,7 @@ async def test_failed_records_failure_note():
 
 async def test_failed_no_error_recorded_uses_placeholder():
     disp = _disp(get_experiment={})  # no "error" key
-    out = await EH.handle_experiment_failed(_event(1, experiment_id=7), disp)
+    out = await EI.handle_experiment_failed(_event(1, experiment_id=7), disp)
     assert out["failed"] is True
     args, _ = disp.state.set_experiment_interpretation.await_args
     assert "no error recorded" in args[3]
@@ -349,7 +351,7 @@ async def test_failed_no_error_recorded_uses_placeholder():
 
 async def test_failed_experiment_none_uses_placeholder():
     disp = _disp(get_experiment=None)
-    out = await EH.handle_experiment_failed(_event(1, experiment_id=7), disp)
+    out = await EI.handle_experiment_failed(_event(1, experiment_id=7), disp)
     assert out["failed"] is True
     args, _ = disp.state.set_experiment_interpretation.await_args
     assert "no error recorded" in args[3]
@@ -357,7 +359,7 @@ async def test_failed_experiment_none_uses_placeholder():
 
 async def test_failed_missing_experiment_id_skips():
     disp = _disp(get_experiment={"error": "boom"})
-    out = await EH.handle_experiment_failed(_event(1, claim_id=3), disp)  # no experiment_id
+    out = await EI.handle_experiment_failed(_event(1, claim_id=3), disp)  # no experiment_id
     assert out["skipped"] is True
     disp.state.get_experiment.assert_not_awaited()
     disp.state.set_experiment_interpretation.assert_not_awaited()
@@ -442,7 +444,7 @@ async def test_requested_infeasible_records_failed_run_and_skips_queue_path():
     run, and NO sandbox code is queued. Simulating the outcome instead is forbidden upstream."""
     design = _design(code="", infeasible=True, infeasible_reason="needs a pretrained 7B model")
     disp = _disp(design=design, get_claim=_claim(), queue_experiment=51)
-    out = await EH.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
+    out = await ED.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
     assert out["infeasible"] is True and out["experiment_id"] == 51
     assert "pretrained 7B model" in out["reason"]
     _, kw = disp.state.queue_experiment.await_args
@@ -459,7 +461,7 @@ async def test_requested_floors_tiny_wall_clock_budget():
     """Design-estimated 10-60s budgets killed runs before one attempt finished — floor at 300s."""
     design = _design(est_wall_clock_s=10)
     disp = _disp(design=design, get_claim=_claim(), queue_experiment=1)
-    await EH.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
+    await ED.handle_experiment_requested(_event(5, claim_id=3, task_id=99), disp)
     _, kw = disp.state.queue_experiment.await_args
     assert kw["wall_clock_budget_s"] == 300
 

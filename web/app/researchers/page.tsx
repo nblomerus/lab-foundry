@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Users, RefreshCw, Microscope, Search, ShieldCheck, ShieldAlert, Inbox } from "lucide-react";
-import { api, type ResearcherOverview, type ResearcherTask } from "../lib/api";
+import { api, type ResearcherOverview, type ResearcherTask, type RosterMember } from "../lib/api";
 import { Badge, Card, SectionTitle, cx } from "../components/ui";
 import { ago } from "../lib/format";
 
@@ -123,12 +123,39 @@ function FindingCard({ t }: { t: ResearcherTask }) {
   );
 }
 
+// One named full-stack researcher — the roster card that drills into their page.
+function RosterCard({ r }: { r: RosterMember }) {
+  const tot = r.done + r.failed;
+  return (
+    <Link
+      href={`/researchers/${r.id}`}
+      className="block rounded-2xl border border-slate-200 bg-white p-4 transition hover:border-indigo-300 hover:shadow-sm"
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-base font-semibold text-slate-900">{r.name}</span>
+        <Badge tone={MODE_TONE[r.status] ?? "default"}>{r.status}</Badge>
+        {r.win_rate != null && <span className="ml-auto text-sm font-semibold tabular-nums text-slate-700">{r.win_rate}% win</span>}
+      </div>
+      <div className="mt-0.5 text-xs text-indigo-600">{r.specialty}</div>
+      {r.persona && <p className="mt-2 line-clamp-2 text-[13px] leading-snug text-slate-500">{r.persona}</p>}
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <Badge tone="blue">{r.owned_directions} directions</Badge>
+        <Badge tone="green">{r.done} done</Badge>
+        <Badge tone={r.failed ? "red" : "default"}>{r.failed} failed</Badge>
+        <span className="ml-auto text-[11px] text-slate-400">{tot ? `${tot} runs` : "no runs yet"}{r.last_at ? ` · ${ago(r.last_at)}` : ""}</span>
+      </div>
+    </Link>
+  );
+}
+
 export default function ResearchersPage() {
   const [ov, setOv] = useState<ResearcherOverview | null>(null);
+  const [roster, setRoster] = useState<RosterMember[] | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
     setLoading(true);
+    api.researcherRoster().then((d) => setRoster(d.researchers)).catch(() => setRoster(null));
     api.researcherOverview(40).then(setOv).catch(() => setOv(null)).finally(() => setLoading(false));
   }, []);
   useEffect(() => {
@@ -166,6 +193,15 @@ export default function ResearchersPage() {
           <RefreshCw className={cx("h-4 w-4", loading && "animate-spin")} /> Refresh
         </button>
       </div>
+
+      {roster && roster.length > 0 && (
+        <Card>
+          <SectionTitle icon={Users} title="The roster" subtitle="the lab's full-stack researchers — each owns directions end-to-end and authors their own experiments" />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {roster.map((r) => <RosterCard key={r.id} r={r} />)}
+          </div>
+        </Card>
+      )}
 
       <Card>
         <SectionTitle icon={Microscope} title="At a glance" subtitle="the research throughput + how the corpus is answering" />

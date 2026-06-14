@@ -173,6 +173,20 @@ export default function AriadnePage() {
             <Compass className="h-7 w-7 text-violet-600" />
             <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Ariadne</h1>
             <Badge tone={MODE_TONE[ov.mode] ?? "default"}>{ov.mode}</Badge>
+            {g.thinking && (
+              g.thinking.active ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                  thinking — {g.thinking.last_kind ?? "deliberating"}
+                </span>
+              ) : g.thinking.stalled ? (
+                <Badge tone="red">stalled · last thought {g.thinking.last_run_at ? ago(g.thinking.last_run_at) : "—"} ago</Badge>
+              ) : (
+                <span className="text-xs text-slate-400">
+                  last thought {g.thinking.last_run_at ? `${ago(g.thinking.last_run_at)} ago` : "—"} · {g.thinking.runs_24h}/24h
+                </span>
+              )
+            )}
           </div>
           <p className="mt-2 max-w-2xl text-sm text-slate-500">
             Scientific Director &amp; Domain Expert — {g.status}. Frames the mission, scores &amp;

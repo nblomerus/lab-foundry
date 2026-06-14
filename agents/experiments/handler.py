@@ -1,32 +1,26 @@
 """
-The experiments agent — the lab's hands.
+The experiment "design language" — the curator recipes + prompt builders for the lab's experiments.
 
-When literature can't settle a number, the Researcher parks a direction with
-`needs_experiment`; this agent turns that into a small, reproducible run:
+This module owns the THREE experiment LLM steps as curator recipes (registered idempotently at import):
+    experiments.design     — write a self-contained script for a hypothesis under test
+    experiments.debug      — read failed code + the error and return corrected code (the QM's fixer)
+    experiments.interpret  — read a completed run's result honestly
 
-    experiment.requested  →  design a self-contained script  →  queue it
-                          (the Quartermaster runs it in the sandbox)
-    experiment.completed  →  interpret the numbers  →  nudge the direction's
-                          confidence + ingest a first-party lab note into the Library
-    experiment.failed     →  record the failure as data (a killed/failed run is also a result)
-
-Two LLM steps bookend the sandboxed run — `experiments.design` (write the code)
-and `experiments.interpret` (read the result honestly). Both register their
-curator recipe + route tier at module import (idempotent, like the researcher
-loop). The mode-dial agent name is `experiments` (this module's path).
+The HANDLERS that drive these moved under the researcher (migration 022): the direction's OWNER authors
+the experiment (agents.researcher.experiment_design) and interprets its own result
+(agents.researcher.experiment_interpret), in their own full-stack voice. The Quartermaster owns the
+off-slot run→debug→rerun loop (agents.experiments.session, which calls the debug recipe). What stays
+here is the shared prompt language both of them build on.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import re
 
 from agents.experiments import sandbox
-from agents.experiments.schemas import ExperimentDesign, ExperimentReport
-from agents.synthesis.handler import SYNTHESIS_MIN_EXPERIMENTS, SYNTHESIS_RESYNTH_STEP
 from harness.curator import RECIPES, SYSTEM_PROMPTS, PromptLayer, Recipe
 from harness.router import ROUTE, Tier
 
@@ -73,22 +67,21 @@ local Ollama over a unix socket; the sandbox still has NO network). Local models
     text = llm.generate("mistral:7b-instruct-q4_K_M", prompt, temperature=0.0, seed=seed)
     reply = llm.chat(model, [{{"role": "user", "content": "..."}}], temperature=0.8)
     vecs = llm.embed("nomic-embed-text", [s1, s2])
-Use it to MEASURE real model behaviour: sampling/decoding strategies, self-consistency (majority
-vote over samples), prompt-format effects, embedding geometry. NOTE the helper returns TEXT ONLY —
-no token logprobs / probabilities — so calibration must use ANSWER-LEVEL signals (e.g. vote-share or
-agreement across samples as a confidence proxy), NOT softmax/logprob ECE or perplexity. Calls
-serialize with the lab's other GPU work — roughly seconds per 7B call, tens of seconds at 14B+. Budget honestly:
-n_calls × per-call seconds must fit est_wall_clock_s (cap 1800); prefer ≤7B models and a
-modest call count. Generate probe INPUTS in-code (arithmetic/logic problems with known
-answers are fine); model OUTPUTS must come from llm.* calls, never be fabricated.
+    lp = llm.chat_logprobs(model, msgs, top_logprobs=5)  # per-token logprobs (OpenAI-compat)
+Use it to MEASURE real model behaviour: sampling/decoding strategies, self-consistency (majority vote
+over samples), prompt-format effects, embedding geometry. TOKEN LOGPROBS ARE AVAILABLE via
+llm.chat_logprobs (returns [{{"token","logprob","top_logprobs":[...]}}]) — so confidence CALIBRATION,
+ECE, and perplexity ARE computable from real model probabilities (not just answer-level vote-share).
+Calls serialize with the lab's other GPU work — roughly seconds per 7B call, tens of seconds at 14B+.
+Budget honestly: n_calls × per-call seconds must fit est_wall_clock_s (cap 1800); prefer ≤7B models and
+a modest call count. Generate probe INPUTS in-code (arithmetic/logic problems with known answers are
+fine); model OUTPUTS must come from llm.* calls, never be fabricated.
 """
     return (
         block,
         " (plus the mounted /opt/lab/llm.py helper described above)",
-        "it needs models beyond the local zoo, a cross-encoder / reranker model, token-level logprobs "
-        "or probabilities from the LLM (the helper returns text only — so softmax/logprob ECE, "
-        "perplexity, or true confidence calibration are NOT computable), fine-tuning or training of "
-        "pretrained weights, network access, or an external dataset",
+        "it needs to fine-tune or train pretrained weights, a model beyond the local Ollama zoo and the "
+        "staged /models, network access, or an external dataset",
     )
 
 
@@ -116,10 +109,60 @@ dataset, slice size, seed + sha256 in the result's `dataset`.
 """
 
 
+def _models_block() -> str:
+    """The design/debug prompt's offline HF model-zoo section, rendered from the zoo manifest
+    (ops.build_model_zoo) at call time — absent zoo (EXPERIMENT_MODELS_DIR), absent section. Mounted
+    read-only at /models so cross-encoder / NLI / encoder experiments run offline."""
+    d = os.environ.get("EXPERIMENT_MODELS_DIR", "")
+    if not d:
+        return ""
+    try:
+        with open(os.path.join(d, "manifest.json")) as f:
+            zoo = json.load(f) or []
+    except (OSError, ValueError):
+        return ""
+    if not zoo:
+        return ""
+    lines = "\n".join(f"- /models/{m['path']} — [{m.get('task', '?')}] {m.get('name', '')}" for m in zoo)
+    return f"""
+## Offline PRETRAINED models mounted READ-ONLY at /models (no network — load by LOCAL PATH only)
+{lines}
+Load (reranker):  from sentence_transformers import CrossEncoder; ce = CrossEncoder("/models/<path>")
+Load (encoder):   from sentence_transformers import SentenceTransformer; m = SentenceTransformer("/models/<path>")
+`transformers` / `sentence_transformers` ARE available for THESE staged models — load by the /models
+path above, NEVER an arbitrary HF hub name (there is no network; HF_HUB_OFFLINE is set).
+"""
+
+
+def _denylist_block() -> str:
+    """What is NOT importable + the substitution. A positive allowlist alone didn't stop the author
+    reaching for transformers / requests (a live audit's #1 + network failures), so name them."""
+    md = os.environ.get("EXPERIMENT_MODELS_DIR", "")
+    zoo_on = bool(md) and os.path.isdir(md)
+    hf = (
+        "- transformers / sentence_transformers: ONLY for the pre-staged /models zoo above — load by a "
+        "LOCAL /models PATH, never an arbitrary HF hub name (no network).\n"
+        if zoo_on
+        else "- transformers / sentence_transformers / datasets / tokenizers: NOT installed — use the "
+        "/opt/lab/llm.py helper for model behaviour instead.\n"
+    )
+    return (
+        "## NOT available — do NOT import these (the sandbox has NO network; importing them crashes the run)\n"
+        "- requests / httpx / urllib.request / aiohttp / a raw network socket: for ANY model call use the "
+        "mounted /opt/lab/llm.py helper — never a URL or socket.\n"
+        f"{hf}"
+        "- tensorflow / jax / keras / cv2 / PIL / nltk / spacy: not in the image.\n"
+    )
+
+
 async def _build_design(ctx: dict, state, memory) -> PromptLayer:
     hypothesis = ctx.get("hypothesis") or ""
     goal = ctx.get("goal") or ""
     claim_statement = ctx.get("claim_statement") or ""
+    # The OWNING researcher authors this (migration 022) — their full-stack persona leads the prompt
+    # so the experiment is written in their voice, not a generic experimentalist's.
+    persona = ctx.get("researcher_persona") or ""
+    persona_block = f"{persona}\n\n---\n\n" if persona else ""
     lab_constraints = ctx.get("lab_constraints") or _LAB_CONSTRAINTS
     prior_hypotheses = ctx.get("prior_hypotheses") or []
     proposal_hypotheses = ctx.get("proposal_hypotheses") or []
@@ -151,6 +194,7 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
             "experiment that decides it by ITS metric and threshold.\n\n"
         )
     data_block = _datasets_block()
+    models_block = _models_block()
     data_hint = " (pick from the /data catalog above)" if data_block else ""
     prior_block = (
         "## Experiments ALREADY run on this direction — test a DISTINCT facet, do NOT repeat these\n"
@@ -162,7 +206,7 @@ async def _build_design(ctx: dict, state, memory) -> PromptLayer:
         else ""
     )
 
-    content = f"""## Direction under test
+    content = f"""{persona_block}## Direction under test
 {claim_statement or "(no direction statement)"}
 
 ## Goal of the task that spawned this
@@ -207,9 +251,11 @@ HARD RULES — reject these and derive a real claim from the direction instead:
   An honest infeasible beats fake support.
 If the stated hypothesis is meta/degenerate, DERIVE the most load-bearing testable claim about the
 direction's method and test that — name it explicitly in `hypothesis`.
-{real_required_block}{llm_block}{data_block}
+{real_required_block}{llm_block}{data_block}{models_block}
+{_denylist_block()}
 Write `code` as a COMPLETE, self-contained Python script:
-- Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch{llm_import}.
+- Import ONLY the preinstalled stack: numpy, scipy, pandas, scikit-learn, xgboost, statsmodels, torch{llm_import}
+  (see the NOT-available list above — never reach for transformers/requests/urllib; there is no network).
 - DATA — real first. NO network; file reads only from the cwd and the read-only /data mount.
   PREFER a REAL /data dataset whose [modality/task_type] matches the claim{data_hint}; if the PI's
   proposal named a `dataset_plan`, use that dataset. Synthesize / use a sklearn-builtin toy set
@@ -223,12 +269,15 @@ Write `code` as a COMPLETE, self-contained Python script:
 - In your result JSON, include a `dataset` object capturing what you built/used so it's reproducible
   and inspectable: {{"n_samples", "n_features" (or shape), "source" (the generator/loader call),
   "sha256" (hashlib.sha256 of the data bytes, e.g. of X.tobytes())}}.
-- EMIT THE RESULT as the LAST thing on stdout via `print(json.dumps(result))` — `result` is a dict of
-  the numbers you want interpreted (metrics, deltas, counts, p-values, timings) PLUS the `dataset`
-  object. Use a COMPACT single line (do NOT pass `indent=`), and print nothing after it. If stdout
-  has no parseable JSON object the run is scored a FAILURE, so make that result line unmissable.
+- EMIT THE RESULT as the LAST thing on stdout. PREFER the lab helper (handles numpy/torch types):
+      import sys; sys.path.insert(0, "/opt/lab"); import exp; exp.emit(result)
+  (or `print(json.dumps(result))` if every value is a plain Python type). `result` is a dict of the
+  numbers you want interpreted (metrics, deltas, counts, p-values, timings) PLUS the `dataset` object.
+  Print nothing after it. If stdout has no parseable JSON object the run is scored a FAILURE, so make
+  that result line unmissable — and never `print(numpy_value)` directly, use exp.emit.
 
-Set `requires_gpu` true ONLY if the run genuinely needs the GPU. Cap `est_wall_clock_s` at 1800.
+Set `requires_gpu` true ONLY if the run genuinely needs the GPU. Cap `est_wall_clock_s` at 1800; note
+each ATTEMPT is capped near half that, so size a single run to finish well inside the budget.
 Return JSON conforming to ExperimentDesign.
 """
     return PromptLayer(name="task_data", content=content, priority=1)
@@ -295,8 +344,10 @@ async def _build_interpret(ctx: dict, state, memory) -> PromptLayer:
     }[realism]
     if realism_mismatch:
         realism_note += " ⚠ The plan named a REAL dataset but the run did NOT use one — flag this in the summary."
+    persona = ctx.get("researcher_persona") or ""
+    persona_block = f"{persona}\n\n---\n\n" if persona else ""
 
-    content = f"""## Direction under test
+    content = f"""{persona_block}## Direction under test
 {claim_statement or "(no direction statement)"}
 
 ## Hypothesis the experiment tested
@@ -339,6 +390,11 @@ async def _build_debug(ctx: dict, state, memory) -> PromptLayer:
     claim_statement = ctx.get("claim_statement") or ""
     iteration = ctx.get("iteration") or 1
     lab_constraints = ctx.get("lab_constraints") or _LAB_CONSTRAINTS
+    # The debugger gets the SAME environment context the designer has — without it, it was blind to the
+    # libs/helper/manifest and oscillated (transformers→noJSON→transformers; /data path hallucinations).
+    llm_block, _llm_import, _cannot = _llm_endpoint_blocks()
+    data_block = _datasets_block()
+    models_block = _models_block()
 
     content = f"""## Debugging an experiment (attempt {iteration})
 You wrote a Python experiment to test a hypothesis; it FAILED to produce a usable result.
@@ -352,7 +408,7 @@ Read your own code and the failure, find the bug, and return CORRECTED code.
 
 ## Lab compute envelope (the fix MUST still fit this)
 {lab_constraints}
-
+{_denylist_block()}{llm_block}{data_block}{models_block}
 ## The code that failed
 ```python
 {code[:8000]}
@@ -365,11 +421,16 @@ Read your own code and the failure, find the bug, and return CORRECTED code.
 
 ---
 
-Diagnose the actual failure (an import error, a shape/type mismatch, an API misuse, a NaN/inf,
-a timeout because it was too slow, or no JSON printed) and FIX it. Common fixes:
-- ImportError → use only numpy/scipy/pandas/scikit-learn/xgboost/statsmodels/torch.
+Diagnose the actual failure and FIX it — use the environment described ABOVE, don't guess. Common fixes:
+- ImportError / ModuleNotFound → the lib isn't installed (see the NOT-available list). Use only the
+  preinstalled stack; for model behaviour use the /opt/lab/llm.py helper, NOT transformers/requests.
+  Do NOT re-add the same missing import you just failed on.
+- Network error (ConnectionRefused/urlopen) → there is NO network; replace the call with the
+  /opt/lab/llm.py helper or remove it.
+- FileNotFoundError on /data → the pack is FLAT; use an EXACT filename from the /data catalog above.
 - Timeout (the run was killed) → make it cheaper: fewer samples/iterations, a smaller model.
-- No result → ensure the LAST stdout line is a single JSON object and nothing prints after it.
+- "not JSON serializable" / no result → emit with the helper: `import sys; sys.path.insert(0,"/opt/lab");
+  import exp; exp.emit(result)` (coerces numpy/torch); ensure it is the LAST stdout line.
 - Wrong numbers → fix the logic so the metric actually bears on the hypothesis.
 NEVER "fix" a failure by replacing real computation with a simulation of the expected outcome
 (e.g. an unavailable model swapped for sampled answers at an assumed accuracy) — if the real
@@ -439,399 +500,3 @@ for _itype, _desc, _budget, _schema, _builder in _EXPERIMENT_RECIPES:
 ROUTE.setdefault("experiments.design", Tier.EXPERIMENT)
 ROUTE.setdefault("experiments.debug", Tier.EXPERIMENT)
 ROUTE.setdefault("experiments.interpret", Tier.WORKHORSE)
-
-
-# -------------------------------------------------------------------------
-# Handlers
-# -------------------------------------------------------------------------
-
-
-async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
-    """`experiment.requested` → design a script and queue it for the Quartermaster.
-
-    Payload: {claim_id, task_id?, inquiry_id?, hypothesis?, goal?}. We require a `task_id`
-    (the caller — the grounded researcher — has it in scope and provides it); the queued
-    experiment_runs row FKs to a task, so we can't queue without one.
-    """
-    state = dispatcher.state
-    payload = event.get("payload") or {}
-    claim_id = payload.get("claim_id")
-    task_id = payload.get("task_id")
-    if task_id is None:
-        return {"skipped": True, "reason": "no task_id in experiment.requested payload"}
-
-    claim_statement = ""
-    prior_hypotheses: list[str] = []
-    if claim_id is not None:
-        try:
-            claim = await state.get_claim(claim_id)
-            claim_statement = claim.statement
-        except ValueError:
-            claim_statement = ""
-        # Prior experiments on this direction → tell the designer to test a DISTINCT facet, so a
-        # driven series accumulates a varied picture (ablations/sweeps), not three near-copies.
-        try:
-            prior = await state.get_completed_experiments_for_claim(claim_id, limit=10)
-            prior_hypotheses = [h for e in prior if (h := (e.get("params") or {}).get("hypothesis"))]
-        except Exception:  # noqa: BLE001 — best-effort context
-            prior_hypotheses = []
-
-    proposal_hypotheses: list[dict] = []
-    if claim_id is not None and hasattr(state, "get_research_document"):
-        try:
-            proposal = await state.get_research_document(claim_id, "proposal")
-            if proposal:
-                proposal_hypotheses = (proposal.get("meta") or {}).get("hypotheses") or []
-        except Exception:  # noqa: BLE001 — the proposal is best-effort context
-            log.exception("experiments: failed to load proposal for claim %s", claim_id)
-
-    require_real_data = bool(payload.get("require_real_data"))  # A5 escalation: confirm a synthetic pilot on REAL data
-    prompt = await dispatcher.curator.build(
-        invocation_type="experiments.design",
-        context={
-            "hypothesis": payload.get("hypothesis") or "",
-            "goal": payload.get("goal") or "",
-            "claim_statement": claim_statement,
-            "lab_constraints": _LAB_CONSTRAINTS,
-            "prior_hypotheses": prior_hypotheses,
-            "proposal_hypotheses": proposal_hypotheses,
-            "require_real_data": require_real_data,
-        },
-    )
-    design, run_id = await dispatcher.router.invoke(
-        prompt=prompt,
-        output_schema_class=ExperimentDesign,
-        triggered_by_event_id=event["id"],
-        session=dispatcher.session,
-        step_name="experiments.design",
-    )
-
-    if design.infeasible:
-        # The honest dead-end: the hypothesis cannot be COMPUTED in the offline sandbox and
-        # simulating it would be fabricated evidence. Record a failed attempt with the reason
-        # as the run's note — the coverage driver counts attempts (its give-up cap stops
-        # re-driving the direction), the spine re-armer sees a handled run (no churn), and
-        # Ariadne's reflect reads WHY the direction can't be tested on this hardware.
-        reason = (design.infeasible_reason or "not computable with the offline sandbox stack").strip()
-        exp_id = await state.queue_experiment(
-            task_id=task_id,
-            inquiry_id=payload.get("inquiry_id"),
-            kind="code",
-            params={"hypothesis": design.hypothesis, "claim_id": claim_id, "infeasible": True},
-            code="",
-            wall_clock_budget_s=0,
-            mem_budget_mb=0,
-            requires_gpu=False,
-            gpu_mem_mb=None,
-            priority=0,
-            provenance={"infeasible": True},
-            dataset_refs=None,
-        )
-        await state.record_experiment_result(exp_id, status="failed", error=f"infeasible on lab sandbox: {reason}")
-        await state.set_experiment_interpretation(
-            exp_id,
-            None,
-            None,
-            f"Untestable on the lab's offline sandbox: {reason}. The direction needs capabilities "
-            "the sandbox lacks (pretrained models / network / external data) — fabricating a "
-            "simulation instead would not bear on the claim.",
-        )
-        log.info("experiments: design INFEASIBLE for claim %s (task %s): %s", claim_id, task_id, reason[:120])
-        # A5: an infeasible REAL-DATA confirmation = the lab wants a real dataset it doesn't have.
-        # Surface it as a concrete signal to curate one (feeds the dataset-pack), not a silent dead end.
-        if require_real_data and claim_id is not None:
-            day = await state.pool.fetchval("SELECT to_char(now(), 'YYYY-MM-DD')")
-            await state.emit_corpus_event(
-                "loop.unclosed",
-                target_type="system",
-                target_id=0,
-                payload={"kind": "needs_real_dataset", "claim_id": claim_id, "reason": reason[:300]},
-                dedup_key=f"needs-real-dataset-{claim_id}-{day}",
-            )
-        return {"infeasible": True, "experiment_id": exp_id, "claim_id": claim_id, "reason": reason}
-
-    code_hash = hashlib.sha256(design.code.encode()).hexdigest()[:16]
-    # Provenance = the reproducibility basis. Capture the image DIGEST (immutable),
-    # not just the tag (a rebuild repoints it), alongside seed + code hash. With
-    # these + the code, the run — including its synthesized dataset — is recreatable.
-    provenance = {
-        "image": sandbox.IMAGE,
-        "image_digest": await sandbox.image_digest(),
-        "seed": design.seed,
-        "code_hash": code_hash,
-        "dataset_plan": design.dataset_plan,
-        "synthesis_justification": design.synthesis_justification,
-    }
-    exp_id = await state.queue_experiment(
-        task_id=task_id,
-        inquiry_id=payload.get("inquiry_id"),
-        kind="code",
-        params={
-            "hypothesis": design.hypothesis,
-            "claim_id": claim_id,
-            "dataset_plan": design.dataset_plan,
-            "synthesis_justification": design.synthesis_justification,
-        },
-        code=design.code,
-        # Floor at 300s: the session budget is shared across retries (EXPERIMENT_MAX_ITERS), and a
-        # 120s floor still killed real GPU runs mid-attempt ("session budget 120s exhausted after 3
-        # attempt(s)") — model load + dataset inference needs room before the first attempt finishes.
-        wall_clock_budget_s=max(300, min(1800, design.est_wall_clock_s)),
-        mem_budget_mb=design.est_mem_mb,
-        requires_gpu=design.requires_gpu,
-        gpu_mem_mb=design.gpu_mem_mb or (4096 if design.requires_gpu else None),
-        priority=6,
-        provenance=provenance,
-        dataset_refs=None,
-    )
-    log.info("experiments: queued exp %s for claim %s (task %s, gpu=%s)", exp_id, claim_id, task_id, design.requires_gpu)
-    return {"queued_experiment": exp_id, "claim_id": claim_id, "design_run_id": run_id}
-
-
-async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
-    """`experiment.completed` → interpret the result, nudge the direction, ingest a lab note."""
-    state = dispatcher.state
-    payload = event.get("payload") or {}
-    experiment_id = payload.get("experiment_id")
-    claim_id = payload.get("claim_id")
-
-    exp = await state.get_experiment(experiment_id) if experiment_id is not None else None
-    if exp is None or not exp.get("result"):
-        return {"skipped": True, "reason": "experiment missing or has no result", "experiment_id": experiment_id}
-
-    params = exp.get("params") or {}
-    hypothesis = params.get("hypothesis") or ""
-
-    claim_statement = ""
-    if claim_id is not None:
-        try:
-            claim = await state.get_claim(claim_id)
-            claim_statement = claim.statement
-        except ValueError:
-            claim_statement = ""
-
-    # Classify the run's data realism (static, no LLM) from its code + self-reported source, and
-    # flag a plan-vs-actual mismatch — fed to the interpreter (discount synthetic) and persisted so
-    # synthesis can discount synthetic-only findings and the A5 escalation can drive a real-data run.
-    result_obj = exp["result"]
-    if isinstance(result_obj, str):
-        try:
-            result_obj = json.loads(result_obj)
-        except ValueError:
-            result_obj = {}
-    ds_obj = (result_obj.get("dataset") or result_obj.get("datasets") or {}) if isinstance(result_obj, dict) else {}
-    ds_source = ds_obj.get("source", "") if isinstance(ds_obj, dict) else ""
-    plan = (exp.get("provenance") or {}).get("dataset_plan") or params.get("dataset_plan") or ""
-    realism = _classify_realism(exp.get("code") or "", ds_source)
-    realism_mismatch = realism != "real" and _plan_wanted_real(plan, [d["name"] for d in sandbox.read_manifest()])
-
-    prompt = await dispatcher.curator.build(
-        invocation_type="experiments.interpret",
-        context={
-            "kind": exp.get("kind") or "code",
-            "params": params,
-            "result": exp["result"],
-            "hypothesis": hypothesis,
-            "claim_statement": claim_statement,
-            "data_realism": realism,
-            "realism_mismatch": realism_mismatch,
-        },
-    )
-    report, run_id = await dispatcher.router.invoke(
-        prompt=prompt,
-        output_schema_class=ExperimentReport,
-        triggered_by_event_id=event["id"],
-        session=dispatcher.session,
-        step_name="experiments.interpret",
-    )
-
-    await state.set_experiment_interpretation(experiment_id, report.summary, run_id, report.narrative_note)
-    await state.set_experiment_realism(experiment_id, realism, realism_mismatch)
-    if realism_mismatch:
-        log.warning("experiments: exp %s REALISM MISMATCH — plan wanted real data, run was %s", experiment_id, realism)
-
-    # Move the direction's confidence — best-effort: an inactive claim can't be steered.
-    conf_applied = None
-    if claim_id is not None and report.confidence_delta:
-        try:
-            claim = await state.get_claim(claim_id)
-            new_conf = max(0.0, min(1.0, claim.confidence + report.confidence_delta))
-            await state.update_claim_confidence(
-                claim_id,
-                new_conf,
-                reason=f"experiment {experiment_id}: {report.summary[:120]}",
-                run_id=run_id,
-            )
-            conf_applied = [round(float(claim.confidence), 3), round(new_conf, 3)]
-        except ValueError as e:  # claim not found or not active — the experiment still stands
-            log.warning("experiments: confidence move skipped for claim %s: %s", claim_id, e)
-
-    # Ingest a first-party lab note into the Library so Mimir / the corpus carry what the lab ran.
-    text = _lab_note_markdown(experiment_id, claim_id, hypothesis, exp, report)
-    await state.emit_corpus_event(
-        "source.discovered",
-        target_type="source",
-        target_id=experiment_id,
-        payload={
-            "source": {
-                "kind": "note",
-                "source_kind": "lab_experiment",
-                "canonical_key": f"exp:{experiment_id}",
-                "title": f"Experiment {experiment_id}",
-                "why": "first-party lab experiment",
-            },
-            "content": text,
-            "provenance": exp.get("provenance") or {},
-        },
-        dedup_key=f"exp-doc-{experiment_id}",
-    )
-
-    # Capture the DATASET as its own first-party Library doc so the corpus carries how
-    # the data was assembled (and how to regenerate it) — the loop's reproducibility
-    # record for the inputs, not just the result. The dataset's content sha256 (the
-    # script reports it) goes into the card's provenance so Mimir's lab_dataset trust
-    # gate can certify it (a hash present = the bytes are pinned), not quarantine it.
-    result = exp.get("result") or {}
-    ds_fp = result.get("dataset") or result.get("datasets") or {}
-    ds_sha = ds_fp.get("sha256") if isinstance(ds_fp, dict) else None
-    dataset_provenance = {**(exp.get("provenance") or {}), "sha256": ds_sha}
-    dataset_key = f"dataset:exp:{experiment_id}"
-    await state.emit_corpus_event(
-        "source.discovered",
-        target_type="source",
-        target_id=experiment_id,
-        payload={
-            "source": {
-                "kind": "dataset",
-                "source_kind": "lab_dataset",
-                "canonical_key": dataset_key,
-                "title": f"Dataset · experiment {experiment_id}",
-                "why": "first-party lab experiment dataset",
-            },
-            "content": _lab_dataset_markdown(experiment_id, claim_id, exp),
-            "provenance": dataset_provenance,
-        },
-        dedup_key=f"exp-dataset-{experiment_id}",
-    )
-    await state.set_experiment_dataset_refs(
-        experiment_id,
-        [
-            {
-                "canonical_key": dataset_key,
-                "kind": "lab_dataset",
-                "sha256": ds_sha,
-                "plan": (exp.get("provenance") or {}).get("dataset_plan"),
-                "fingerprint": ds_fp or None,
-            }
-        ],
-    )
-
-    # Condition-driven: once a direction has accumulated enough completed experiments, trigger the
-    # terminal cross-experiment SYNTHESIS (the paper-shaped finding). Bucketed dedup so it fires once
-    # per RESYNTH_STEP runs — not on every completion — and re-fires when materially more evidence lands.
-    synth_triggered = False
-    if claim_id is not None:
-        n_done = await state.count_completed_experiments_for_claim(claim_id)
-        if n_done >= SYNTHESIS_MIN_EXPERIMENTS:
-            bucket = n_done // max(1, SYNTHESIS_RESYNTH_STEP)
-            await state.emit_corpus_event(
-                "finding.synthesize",
-                target_type="claim",
-                target_id=claim_id,
-                payload={"claim_id": claim_id, "experiment_count": n_done},
-                dedup_key=f"synthesize-{claim_id}-{bucket}",
-            )
-            synth_triggered = True
-
-    log.info(
-        "experiments: interpreted exp %s (claim %s, supports=%s Δconf=%s, synth=%s)",
-        experiment_id,
-        claim_id,
-        report.supports_direction,
-        report.confidence_delta,
-        synth_triggered,
-    )
-    return {
-        "experiment_id": experiment_id,
-        "claim_id": claim_id,
-        "interpret_run_id": run_id,
-        "supports_direction": report.supports_direction,
-        "confidence": conf_applied,
-        "ingested_note": True,
-        "ingested_dataset": True,
-        "synthesis_triggered": synth_triggered,
-    }
-
-
-async def handle_experiment_failed(event: dict, dispatcher) -> dict | None:
-    """`experiment.failed` → record the failure as a researcher note. A killed/failed run is data
-    too: the approach as written didn't produce a usable result. No confidence move."""
-    state = dispatcher.state
-    payload = event.get("payload") or {}
-    experiment_id = payload.get("experiment_id")
-    if experiment_id is None:
-        return {"skipped": True, "reason": "no experiment_id in experiment.failed payload"}
-
-    exp = await state.get_experiment(experiment_id)
-    error = (exp.get("error") if exp else None) or "(no error recorded)"
-    note = (
-        f"Experiment failed: {error}. A failed/killed run is also data — the approach as written "
-        "didn't produce a usable result."
-    )
-    await state.set_experiment_interpretation(experiment_id, None, None, note)
-    log.info("experiments: recorded failure for exp %s: %s", experiment_id, error[:120])
-    return {"experiment_id": experiment_id, "handled": True, "failed": True}
-
-
-# -------------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------------
-
-
-def _provenance_line(provenance: dict) -> str:
-    """One-line reproducibility stamp: seed + image digest + code hash."""
-    return (
-        f"seed={provenance.get('seed')} "
-        f"image={provenance.get('image')}@{(provenance.get('image_digest') or '?')} "
-        f"code_hash={provenance.get('code_hash')}"
-    )
-
-
-def _lab_note_markdown(experiment_id: int, claim_id, hypothesis: str, exp: dict, report: ExperimentReport) -> str:
-    """A markdown lab note for the corpus — the human-readable record of one experiment."""
-    params = exp.get("params") or {}
-    provenance = exp.get("provenance") or {}
-    result = exp.get("result")
-    direction = f"T{claim_id}" if claim_id is not None else "(no direction)"
-    return (
-        f"## Experiment {experiment_id} on direction {direction}\n\n"
-        f"**Hypothesis:** {hypothesis or '(none recorded)'}\n\n"
-        f"**Dataset:** {provenance.get('dataset_plan') or '(synthesized in-code)'}\n\n"
-        f"**Method / params:** `{json.dumps(params)[:600]}`\n"
-        f"{_provenance_line(provenance)}\n\n"
-        f"**Result:**\n```json\n{json.dumps(result, indent=2)[:2000]}\n```\n\n"
-        f"**Interpretation:** {report.summary}\n\n"
-        f"**Supports direction:** {report.supports_direction}  |  "
-        f"Δconfidence: {report.confidence_delta}\n\n"
-        f"**Researcher note:** {report.narrative_note}\n"
-    )
-
-
-def _lab_dataset_markdown(experiment_id: int, claim_id, exp: dict) -> str:
-    """A markdown dataset card for the corpus — how the experiment's data was assembled,
-    captured so the dataset is reproducible (regenerate from the code+seed+image digest)
-    and discoverable. `dataset` in the result (shape/fingerprint, if the script reported
-    it) is included verbatim."""
-    provenance = exp.get("provenance") or {}
-    result = exp.get("result") or {}
-    plan = provenance.get("dataset_plan") or "Synthesized in the experiment script (seeded)."
-    direction = f"T{claim_id}" if claim_id is not None else "(no direction)"
-    ds = result.get("dataset") or result.get("datasets")
-    ds_block = f"\n**Reported shape / fingerprint:**\n```json\n{json.dumps(ds, indent=2)[:1200]}\n```\n" if ds else ""
-    return (
-        f"## Dataset for experiment {experiment_id} (direction {direction})\n\n"
-        f"**How it was assembled:** {plan}\n\n"
-        f"**Reproducibility:** regenerate by running the experiment's recorded code at "
-        f"{_provenance_line(provenance)} — the data is produced deterministically from the "
-        f"seed inside the pinned image, so the same bytes recur.{ds_block}\n"
-    )

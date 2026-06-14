@@ -26,6 +26,10 @@ log = logging.getLogger(__name__)
 # the gate also checks). Tunable via env; default 3 mirrors the self-score gate floors.
 ADJ_NOVELTY_MIN = int(os.environ.get("ADJUDICATE_NOVELTY_MIN", "3"))
 ADJ_IMPACT_MIN = int(os.environ.get("ADJUDICATE_IMPACT_MIN", "3"))
+# A HIGH-impact direction is worth running even at modest novelty (validating/extending prior art
+# under the lab's conditions IS decision-grade work). At/above this independent-impact bar, a
+# non-redundant, impactful direction passes without also clearing the novelty floor.
+ADJ_HIGH_IMPACT = int(os.environ.get("ADJUDICATE_HIGH_IMPACT", "4"))
 
 _ACTIVE_DIRECTION = ("proposed", "tested", "weakly_supported", "replicated")
 
@@ -79,22 +83,27 @@ async def _build_adjudicate(ctx: dict, state, memory) -> PromptLayer:
 You are an independent, skeptical reviewer. You did NOT propose this direction and you do not see
 the proposer's own scores — assess it on its merits against the evidence above.
 
-- `novelty_independent` (1-5): does this clearly advance BEYOND the nearest prior art shown? Default LOW
-  if the retrieved papers already answer it. Do not reward a re-skin of known work. Entries marked as
-  the lab's OWN output are not external prior art — weigh them only by their outcome tag below.
+- `novelty_independent` (1-5): how much does this ADD beyond the nearest prior art shown? This is an
+  APPLIED lab on consumer hardware — VALIDATING or EXTENDING known work under new conditions (small/open
+  models, out-of-distribution, tight compute, a real benchmark the prior work didn't use) is legitimately
+  worth doing even when it is not paper-novel. Score what it ADDS; reserve 1-2 only for an exact re-run
+  that contributes nothing new. Entries marked the lab's OWN output are NOT external prior art — NEVER let
+  them lower this score; weigh them only by their outcome tag below.
 - `impact_independent` (1-5): would a CLEAR answer change a real build/deploy decision a named practitioner
-  faces? Score the decision value, not how interesting it sounds.
-- `is_novel`: true ONLY if it genuinely goes beyond the prior art shown.
-- `is_impactful`: true ONLY if you can name the concrete decision a clear answer changes.
-- `redundant`: true ONLY if it re-asks a question a prior direction ANSWERED, or duplicates one marked
-  OPEN on the agenda right now. A direction marked ATTEMPTED BUT NOT ANSWERED settles nothing — the lab
-  tried and FAILED to answer it, so the question is still open and a re-ask is unfinished business, not
-  a rut. Never hold a direction because a failed attempt "already covered" its topic. If redundant,
-  name the direction in `redundant_note`.
-- `rationale`: 2-3 sentences — the closest prior work, what's actually new (or not), and the decision at stake.
+  faces? Score the decision value, not how interesting it sounds. A decision-grade question can be a 4-5
+  even if its novelty is modest.
+- `is_novel`: true if it adds something beyond the prior art shown — an extension/validation under new
+  conditions COUNTS. false only for an exact re-run that adds nothing.
+- `is_impactful`: true if you can name the concrete decision a clear answer changes.
+- `redundant`: true ONLY if it re-asks a question a prior direction ANSWERED (status ANSWERED). A direction
+  marked OPEN or ATTEMPTED BUT NOT ANSWERED settles nothing — the question is still open and a re-ask is
+  unfinished business, not a rut. NEVER set redundant=true (or lower novelty) because of the lab's OWN
+  directions unless one is explicitly marked ANSWERED. If redundant, name the direction in `redundant_note`.
+- `rationale`: 2-3 sentences — the closest prior work, what this ADDS (or not), and the decision at stake.
 
-Be honest and demanding. A gap nobody would act on, or a re-ask of an ANSWERED question, should NOT
-pass — but an unanswered question stays fair game no matter how many times the lab has failed at it.
+Be fair, not gatekeeping. A HIGH-IMPACT question worth a real decision PASSES even at modest novelty.
+HOLD only a re-ask of an ANSWERED question (redundant) or a direction no one would act on (not impactful).
+An unanswered question stays fair game no matter how many times the lab has failed at it.
 """
     return PromptLayer(name="task_data", content=content, priority=1)
 
@@ -106,12 +115,13 @@ pass — but an unanswered question stays fair game no matter how many times the
 SYSTEM_PROMPTS.setdefault(
     "novelty",
     (
-        "You are a tough, independent prior-art reviewer for an autonomous AI research lab. You judge whether a "
-        "proposed research direction is genuinely novel against the actual nearest literature and whether a clear "
-        "answer would change a real decision — and you flag re-treads of ground the lab already ANSWERED or is "
-        "actively working. A failed attempt leaves its question open: re-asking it is not a re-tread. You default "
-        "to skeptical: 'under-explored' is not 'worth doing', and a re-skin of known work is not novel. You never see "
-        "the proposer's own scores; your job is the external check they lack."
+        "You are an independent prior-art reviewer for an APPLIED autonomous AI lab on consumer hardware. You judge "
+        "whether a clear answer to a proposed direction would change a real build/deploy decision, and how much it "
+        "adds beyond the nearest literature. For this lab, VALIDATING or EXTENDING prior work under new conditions "
+        "(small/open models, OOD, tight compute, real benchmarks) is worth doing — judge decision value, not "
+        "paper-publishable novelty. Flag a re-tread ONLY of ground the lab already ANSWERED; a failed or open attempt "
+        "leaves its question open, so re-asking it is not a re-tread, and the lab's own outputs are never prior art "
+        "that defeats novelty. You never see the proposer's own scores; your job is the external check they lack."
     ),
 )
 
@@ -132,15 +142,19 @@ ROUTE.setdefault("novelty.adjudicate", Tier.WORKHORSE)
 
 
 def _verdict(adj: DirectionAdjudication) -> str:
-    """Derive pass/hold deterministically from the independent scores + flags (not LLM-set)."""
-    passes = (
-        adj.novelty_independent >= ADJ_NOVELTY_MIN
-        and adj.impact_independent >= ADJ_IMPACT_MIN
-        and adj.is_novel
-        and adj.is_impactful
-        and not adj.redundant
-    )
-    return "pass" if passes else "hold"
+    """Derive pass/hold deterministically from the independent scores + flags (not LLM-set).
+
+    HOLD only for the things that genuinely disqualify a direction for THIS applied lab: it re-asks
+    an ANSWERED question (redundant), or no decision rides on it (not impactful / low impact). Novelty
+    is NOT a hard veto — a direction that's impactful and non-redundant passes if EITHER it's genuinely
+    novel OR it's high-impact (an extension/validation under the lab's conditions is worth running even
+    if it doesn't clear the publishable-novelty bar). This breaks the single-axis novelty veto that was
+    holding 67% of directions (incl. strong ones like #143)."""
+    if adj.redundant or not adj.is_impactful or adj.impact_independent < ADJ_IMPACT_MIN:
+        return "hold"
+    novel_enough = adj.is_novel and adj.novelty_independent >= ADJ_NOVELTY_MIN
+    high_impact = adj.impact_independent >= ADJ_HIGH_IMPACT
+    return "pass" if (novel_enough or high_impact) else "hold"
 
 
 # -------------------------------------------------------------------------

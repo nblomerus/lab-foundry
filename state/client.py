@@ -94,6 +94,7 @@ class Task(BaseModel):
     payload: dict
     priority: int
     status: str
+    researcher_id: int | None = None  # the owning researcher (migration 022); None for legacy/unassigned
 
     # Backward compatibility
     @property
@@ -1074,17 +1075,19 @@ class PostgresClient:
         priority: int = 5,
         provenance: dict | None = None,
         dataset_refs: list | dict | None = None,
+        researcher_id: int | None = None,
     ) -> int:
-        """Enqueue a code experiment for the Quartermaster to schedule (status='queued')."""
+        """Enqueue a code experiment for the Quartermaster to schedule (status='queued').
+        `researcher_id` links the run to the researcher who authored it (migration 022)."""
         async with self.pool.acquire() as conn:
             return await conn.fetchval(
                 """
                 INSERT INTO experiment_runs (
                     task_id, inquiry_id, kind, params, status, code,
                     wall_clock_budget_s, mem_budget_mb, requires_gpu, gpu_mem_mb,
-                    priority, provenance, dataset_refs
+                    priority, provenance, dataset_refs, researcher_id
                 )
-                VALUES ($1, $2, $3, $4::jsonb, 'queued', $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)
+                VALUES ($1, $2, $3, $4::jsonb, 'queued', $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13)
                 RETURNING id
                 """,
                 task_id,
@@ -1099,6 +1102,7 @@ class PostgresClient:
                 priority,
                 json.dumps(provenance) if provenance is not None else None,
                 json.dumps(dataset_refs) if dataset_refs is not None else None,
+                researcher_id,
             )
 
     async def get_queued_experiments(self, limit: int = 20) -> list[dict]:
@@ -1151,9 +1155,11 @@ class PostgresClient:
         result: dict | None = None,
         error: str | None = None,
         resource_usage: dict | None = None,
+        failure_class: str | None = None,
     ) -> None:
         """Write the sandbox outcome (status in completed|failed) — the QM calls this
-        when the container exits. Interpretation + notes land later via the handler."""
+        when the container exits. Interpretation + notes land later via the handler.
+        `failure_class` buckets WHY a run failed (migration 023) for the audit + feedback loop."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -1162,6 +1168,7 @@ class PostgresClient:
                     result = COALESCE($3::jsonb, result),
                     error = COALESCE($4, error),
                     resource_usage = COALESCE($5::jsonb, resource_usage),
+                    failure_class = COALESCE($6, failure_class),
                     completed_at = NOW()
                 WHERE id = $1
                 """,
@@ -1170,6 +1177,7 @@ class PostgresClient:
                 json.dumps(result) if result is not None else None,
                 (error or "")[:2000] if error is not None else None,
                 json.dumps(resource_usage) if resource_usage is not None else None,
+                failure_class,
             )
 
     async def kill_experiment(self, experiment_id: int, reason: str) -> None:

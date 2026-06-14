@@ -6,7 +6,7 @@
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { AlertTriangle, CheckCircle2, Cpu, Gauge, Library, ShieldCheck, Zap } from "lucide-react";
 import { MiniBar, cx } from "../ui";
-import { compact } from "../../lib/format";
+import { compact, ago } from "../../lib/format";
 import { useNodeMeter, type ActivityState } from "./useNodeActivity";
 import type { AriadneOverview, DebugCosts, HostStats, KnowledgeStats, MimirPanel, ScoutPanel } from "../../lib/api";
 import type { NodeDef } from "./topology";
@@ -416,7 +416,17 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
   const ag = ariadne.at_a_glance;
   const on = (m: string | null | undefined) => m === "advisory" || m === "active";
   if (def.id === "ariadne") {
-    return { value: `${ag.active_directions} directions`, sub: ag.status, enabled: on(ariadne.mode), mode: ariadne.mode };
+    // Surface whether she's THINKING (a deliberate/reflect run just finished), stalled, or when she
+    // last thought — so the floorplan answers "is the PI working?" not just "how many directions".
+    const t = ag.thinking;
+    const sub = t?.active
+      ? `thinking — ${t.last_kind ?? "deliberating"}`
+      : t?.stalled
+        ? "stalled — no recent thought"
+        : t?.last_run_at
+          ? `last thought ${ago(t.last_run_at)} ago`
+          : ag.status;
+    return { value: `${ag.active_directions} directions`, sub, enabled: on(ariadne.mode), mode: ariadne.mode };
   }
   if (def.id === "request-queue") {
     // Headline is the live QUEUE DEPTH (pending) — the real "backed up?" signal,
@@ -442,7 +452,14 @@ function dormantLive(def: NodeDef, ariadne?: AriadneOverview | null):
   if (def.id === "experiments") {
     const m = ag.experiments_mode ?? "off";
     const running = ag.experiments_running ?? 0;
-    return { value: `${ag.experiments_total ?? 0} runs`, sub: on(m) ? (running > 0 ? `${running} in flight` : "idle — awaiting a request") : "paused", enabled: on(m), mode: m };
+    const total = ag.experiments_total ?? 0;
+    // Show what's ACTIVELY experimenting now, not the lifetime run count (total moves to the subtitle).
+    return {
+      value: running > 0 ? `${running} active` : "idle",
+      sub: on(m) ? (running > 0 ? `${running} running/queued · ${total} run` : `awaiting a request · ${total} run`) : "paused",
+      enabled: on(m),
+      mode: m,
+    };
   }
   if (def.id === "critic") {
     const m = ag.critic_mode ?? "off";

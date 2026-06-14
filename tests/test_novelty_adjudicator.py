@@ -85,12 +85,21 @@ def _disp(monkeypatch, *, adj=None, run_id=7, directions=None, prior=None, held=
 
 # ── _verdict ─────────────────────────────────────────────────────────────────
 async def test_verdict_pass_and_hold_paths():
+    # PASS: novel AND impactful (the clean case)
     assert _verdict(_adj()) == "pass"
-    assert _verdict(_adj(redundant=True)) == "hold"  # a rut never passes
-    assert _verdict(_adj(is_novel=False)) == "hold"
+    # PASS: a HIGH-impact direction passes even at modest novelty — the OR-verdict breaks the single-axis
+    # novelty veto that used to hold strong directions (the #143 echo-chamber profile: impact 4, novelty 2).
+    assert _verdict(_adj(is_novel=False, novelty_independent=2)) == "pass"  # impact_independent=4 carries it
+    # PASS: genuinely novel passes even at modest (but >=floor) impact
+    assert _verdict(_adj(impact_independent=3)) == "pass"
+    # HOLD: a rut never passes
+    assert _verdict(_adj(redundant=True)) == "hold"
+    # HOLD: no decision rides on it
     assert _verdict(_adj(is_impactful=False)) == "hold"
-    assert _verdict(_adj(novelty_independent=2)) == "hold"  # below the independent floor
+    # HOLD: below the impact floor
     assert _verdict(_adj(impact_independent=1)) == "hold"
+    # HOLD: neither novel ENOUGH nor high-impact (modest impact + not novel)
+    assert _verdict(_adj(is_novel=False, novelty_independent=2, impact_independent=3)) == "hold"
 
 
 # ── _prior_outcome ───────────────────────────────────────────────────────────

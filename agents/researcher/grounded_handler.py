@@ -25,6 +25,7 @@ from agents.researcher.feedback import (
     refine_disposition,
 )
 from agents.researcher.grounded import grade_finding, investigate_task
+from agents.researcher.identity import researcher_for_task
 from harness.agent_modes import get_agent_mode
 from library.graph.tools import FINDING_ID_RESEARCHER, link_finding_cites_paper, merge_finding_grounds_claim
 
@@ -44,7 +45,11 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
     if task is None:
         return {"skipped": True, "reason": "no claimable research task"}
 
-    log.info("researcher %s claimed T%s: %s", worker, task.id, (task.description or "")[:80])
+    # The acting identity: the task's owning researcher (migration 022). The worker label is just
+    # compute; the IDENTITY is the owner, carried onto every experiment this run authors.
+    researcher = await researcher_for_task(state.pool, task)
+    who = researcher.name if researcher else "researcher"
+    log.info("%s (%s) claimed T%s: %s", who, worker, task.id, (task.description or "")[:80])
     try:
         # emit=True → the Ariadne↔Mimir conversation shows live (floorplan + history).
         result = await investigate_task(state, task.id, emit=True)
@@ -113,6 +118,7 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
                 payload={
                     "claim_id": ctx["claim_id"],
                     "task_id": task.id,
+                    "researcher_id": researcher.id if researcher else None,
                     "hypothesis": "; ".join(finding.gaps) if finding.gaps else finding.summary,
                     "goal": ctx.get("expectation") or ctx.get("direction") or "",
                 },

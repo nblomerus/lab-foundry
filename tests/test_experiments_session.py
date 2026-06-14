@@ -202,6 +202,29 @@ async def test_give_up_after_max_iters(monkeypatch):
     assert router.invoke.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_failure_surfaces_informative_error_not_no_result(monkeypatch):
+    """The headline error is the MOST INFORMATIVE attempt (a real traceback), not the generic
+    'no JSON result' that masked it — and the failure_class buckets the true cause."""
+    monkeypatch.setattr(sess, "MAX_ITERS", 3, raising=True)
+    state = _state()
+    router, curator = _router_curator()
+    _patch_sandbox(
+        monkeypatch,
+        [
+            SandboxResult("failed", None, "ModuleNotFoundError: No module named 'transformers'", {"exit_code": 1}),
+            SandboxResult("failed", None, "experiment produced no JSON result on stdout", {"exit_code": 0}),
+            SandboxResult("failed", None, "experiment produced no JSON result on stdout", {"exit_code": 0}),
+        ],
+    )
+
+    out = await sess.run_code_session(state, router, curator, _exp())
+
+    assert out["status"] == "failed"
+    assert "transformers" in out["error"]  # the informative error wins over "no JSON result"
+    assert out["meta"]["failure_class"] == "env_missing_lib"
+
+
 # ── kill ──────────────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_kill_after_failed_run(monkeypatch):
@@ -236,7 +259,7 @@ async def test_no_code(monkeypatch):
 
     assert out["status"] == "failed"
     assert out["error"].startswith("no code")
-    assert out["meta"] == {"iterations": 0, "attempts": []}
+    assert out["meta"] == {"iterations": 0, "attempts": [], "failure_class": "genuine_bug"}
     # Never touched the sandbox or the router.
     sb.assert_not_awaited()
     router.invoke.assert_not_awaited()
@@ -317,5 +340,5 @@ async def test_session_budget_exhausted_before_first_run(monkeypatch):
 
     assert out["status"] == "failed"
     assert "session budget 5s exhausted" in out["error"]
-    assert out["meta"] == {"iterations": 0, "attempts": []}
+    assert out["meta"] == {"iterations": 0, "attempts": [], "failure_class": "timeout", "usage": {}}
     sb.assert_not_awaited()
