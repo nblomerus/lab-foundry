@@ -143,6 +143,17 @@ async def overview(request: Request) -> dict:
                 "ORDER BY (trend_state = 'hot') DESC, total_papers DESC LIMIT 5"
             )
         ]
+        # Is Ariadne THINKING? Her LLM runs are stamped on completion (no in-flight row), so derive a
+        # recency signal: active = a deliberate/reflect/review/propose run finished in the last ~2 min;
+        # stale = nothing in 6h while she's dialed on (the pacemaker expects a beat within REFLECT_MAX_AGE).
+        think = await conn.fetchrow(
+            "SELECT max(completed_at) AS last_at, "
+            "(array_agg(invocation_type ORDER BY completed_at DESC))[1] AS last_kind, "
+            "count(*) FILTER (WHERE completed_at > now() - interval '24 hours') AS runs_24h, "
+            "bool_or(completed_at > now() - interval '120 seconds') AS recent, "
+            "(max(completed_at) < now() - interval '6 hours') AS stale "
+            "FROM agent_runs WHERE agent_name = 'ariadne'"
+        )
 
     scored = [d for d in directions if d["composite"] is not None and not d["retired"]]
     top_priority = scored[0]["title"] if scored else next((d["title"] for d in directions if not d["retired"]), None)
@@ -163,7 +174,9 @@ async def overview(request: Request) -> dict:
             "top_priority": top_priority,
             "focus": focus,
             "status": status,
-            "approved": sum(1 for d in directions if d["gate"] == "approved"),
+            # Only count LIVE approved directions — a retired/invalidated direction keeps its old
+            # 'approved' gate row, which otherwise inflates the KPI (e.g. "1/6 approved" while 0 are active).
+            "approved": sum(1 for d in directions if d["gate"] == "approved" and not d["retired"]),
             "gate_budget": GATE_BUDGET,
             "claims_total": claims_total,
             "acquire_requests_24h": acquire_24h,
@@ -184,6 +197,13 @@ async def overview(request: Request) -> dict:
             "experiments_total": exp_total,
             "concluded_directions": concluded_directions,
             "findings": findings_total,
+            "thinking": {
+                "active": bool(think["recent"]) if think else False,
+                "last_run_at": think["last_at"].isoformat() if think and think["last_at"] else None,
+                "last_kind": think["last_kind"] if think else None,
+                "runs_24h": (think["runs_24h"] or 0) if think else 0,
+                "stalled": (bool(think["stale"]) and mode in ("advisory", "active")) if think else False,
+            },
         },
         "mission": {
             "id": mission["id"],

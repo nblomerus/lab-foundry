@@ -39,12 +39,15 @@ CALL_TIMEOUT_S = float(os.environ.get("EXPERIMENT_LLM_TIMEOUT_S", "300"))
 MAX_BODY_BYTES = int(os.environ.get("EXPERIMENT_LLM_MAX_BODY", str(2 * 1024 * 1024)))
 
 # path -> method. The whole admitted surface; everything else is 404.
+# /v1/chat/completions is the OpenAI-compat endpoint — the ONLY one that returns token logprobs
+# (native /api/generate does not), so calibration / ECE / perplexity experiments are testable.
 _ALLOWED = {
     "/api/generate": "POST",
     "/api/chat": "POST",
     "/api/embed": "POST",
     "/api/embeddings": "POST",
     "/api/tags": "GET",
+    "/v1/chat/completions": "POST",
 }
 
 

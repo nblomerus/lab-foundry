@@ -107,7 +107,9 @@ async def run_experiment(state, router, curator, exp: dict, running: dict, kill_
                 dedup_key=f"exp-fail-{eid}",
             )
         else:
-            await state.record_experiment_result(eid, status="failed", error=out.get("error"), resource_usage=meta)
+            await state.record_experiment_result(
+                eid, status="failed", error=out.get("error"), resource_usage=meta, failure_class=meta.get("failure_class")
+            )
             await state.emit_corpus_event(
                 "experiment.failed",
                 target_type="experiment",

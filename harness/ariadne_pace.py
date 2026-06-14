@@ -26,6 +26,7 @@ import logging
 import os
 import time
 
+from agents.researcher.assign import assign_direction
 from harness import loop_engine
 from harness.agent_modes import get_agent_mode
 from harness.loop_predicates import ACTIVE_SQL as _ACTIVE
@@ -113,6 +114,13 @@ async def _auto_approve(pool) -> int:
                 "ON CONFLICT (claim_id) DO UPDATE SET status = 'approved', decided_by = 'auto', decided_at = now()",
                 r["id"],
             )
+    # Every approved direction gets an OWNER (the researcher who authors/runs/interprets its
+    # experiments). Best-effort per direction — an assignment hiccup must never block the gate.
+    for r in rows:
+        try:
+            await assign_direction(pool, r["id"])
+        except Exception:  # noqa: BLE001 — assignment is best-effort; the direction is still approved
+            log.exception("ariadne pace: researcher assignment failed for direction %s", r["id"])
     if rows:
         log.info("ariadne pace: auto-approved %d direction(s)", len(rows))
     return len(rows)

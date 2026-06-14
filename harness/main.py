@@ -33,15 +33,15 @@ from agents.ariadne.scholarship import handle_ariadne_propose, handle_ariadne_re
 from agents.critic.handler import handle_finding_high_signal
 from agents.evaluation.handler import handle_task_completed
 from agents.evaluation.slop_handler import handle_audit_slop_detected
-from agents.experiments.handler import (
-    handle_experiment_completed,
-    handle_experiment_failed,
-    handle_experiment_requested,
-)
 from agents.novelty.handler import handle_direction_adjudicate
 from agents.planner.decompose import handle_planner_decompose
 from agents.planner.handler import handle_queue_empty
 from agents.reflection.handler import handle_reflection_requested
+from agents.researcher.experiment_design import handle_experiment_requested
+from agents.researcher.experiment_interpret import (
+    handle_experiment_completed,
+    handle_experiment_failed,
+)
 from agents.researcher.grounded_handler import handle_grounded_research
 from agents.synthesis.article import handle_synthesis_article
 from agents.synthesis.handler import handle_finding_synthesize

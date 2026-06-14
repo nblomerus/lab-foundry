@@ -10,6 +10,7 @@
 // the moment the sandbox prints them.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { api, QmExperimentDetail, QmExperiments } from "../lib/api";
 
 
@@ -45,6 +46,46 @@ function RealismPill({ realism, mismatch }: { realism?: string | null; mismatch?
     >
       {realism}{mismatch ? " ⚠" : ""}
     </span>
+  );
+}
+
+const FAILURE_TONE: Record<string, string> = {
+  env_missing_lib: "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700",
+  network_attempt: "border-rose-200 bg-rose-50 text-rose-600",
+  serialization: "border-orange-200 bg-orange-50 text-orange-700",
+  timeout: "border-amber-200 bg-amber-50 text-amber-700",
+  no_result: "border-slate-300 bg-slate-100 text-slate-500",
+  infeasible: "border-violet-200 bg-violet-50 text-violet-700",
+  genuine_bug: "border-red-200 bg-red-50 text-red-700",
+};
+
+// Why a run failed (session-loop classification) — the triage signal.
+function FailurePill({ fc }: { fc?: string | null }) {
+  if (!fc) return null;
+  return (
+    <span
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${FAILURE_TONE[fc] ?? "border-slate-200 bg-slate-50 text-slate-500"}`}
+      title={`failure class: ${fc}`}
+    >
+      {fc}
+    </span>
+  );
+}
+
+// The researcher who authored the run — a chip that drills into their page.
+function ResearcherChip({ id, name }: { id?: number | null; name?: string | null }) {
+  if (!name) return null;
+  const body = (
+    <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">
+      {name}
+    </span>
+  );
+  return id ? (
+    <Link href={`/researchers/${id}`} onClick={(e) => e.stopPropagation()} className="hover:opacity-80">
+      {body}
+    </Link>
+  ) : (
+    body
   );
 }
 
@@ -103,6 +144,12 @@ export default function ExperimentsPage() {
     return () => clearInterval(t);
   }, [selectedId, refreshDetail]);
 
+  // deep-link: /experiments?id=<n> (from a researcher's experiment list) preselects that run
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get("id");
+    if (q) setSelectedId(Number(q));
+  }, []);
+
   // default-select the newest run once the ledger arrives
   useEffect(() => {
     if (selectedId == null && ledger?.experiments?.length) setSelectedId(ledger.experiments[0].id);
@@ -153,7 +200,9 @@ export default function ExperimentsPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-[12px] font-semibold tabular-nums text-slate-700">#{r.id}</span>
                   <StatusPill status={r.status} />
+                  <ResearcherChip id={r.researcher_id} name={r.researcher_name} />
                   <RealismPill realism={r.data_realism} mismatch={r.realism_mismatch} />
+                  <FailurePill fc={r.failure_class} />
                   {r.requires_gpu && <span className="rounded border border-violet-200 bg-violet-50 px-1 text-[9px] font-semibold text-violet-600">GPU</span>}
                   <span className="ml-auto text-[10px] text-slate-400">{ago(r.at)}</span>
                 </div>
@@ -177,7 +226,9 @@ export default function ExperimentsPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[15px] font-semibold text-slate-800">Experiment #{detail.id}</span>
                 <StatusPill status={detail.status} />
+                <ResearcherChip id={detail.researcher_id} name={detail.researcher_name} />
                 <RealismPill realism={detail.data_realism} mismatch={detail.realism_mismatch} />
+                <FailurePill fc={detail.failure_class} />
                 {(detail.status === "running" || detail.status === "queued") && (
                   <button onClick={() => kill(detail.id)} className="rounded-md border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600 hover:bg-rose-100">
                     kill

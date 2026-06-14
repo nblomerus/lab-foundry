@@ -14,6 +14,7 @@ Usage from generated experiment code:
     text = llm.generate("mistral:7b-instruct-q4_K_M", "What is 17*23?", temperature=0.0)
     reply = llm.chat("qwen2.5:14b-instruct-q4_K_M", [{"role": "user", "content": "hi"}])
     vecs = llm.embed("nomic-embed-text", ["a sentence", "another"])
+    lp = llm.chat_logprobs("mistral:7b-instruct-q4_K_M", msgs, top_logprobs=5)  # per-token logprobs
     names = llm.models()
 
 Calls are serialized with the lab's other GPU work and take seconds (7B) to a minute+
@@ -73,6 +74,17 @@ def embed(model, inputs, timeout=DEFAULT_TIMEOUT_S):
     """Embeddings for a string or list of strings; returns list[list[float]]."""
     out = _request("POST", "/api/embed", {"model": model, "input": inputs}, timeout)
     return out["embeddings"]
+
+
+def chat_logprobs(model, messages, top_logprobs=5, timeout=DEFAULT_TIMEOUT_S, **options):
+    """One chat turn WITH per-token logprobs (OpenAI-compatible endpoint — the local models DO expose
+    these). Returns choices[0].logprobs.content: a list of
+        {"token": str, "logprob": float, "top_logprobs": [{"token": str, "logprob": float}, ...]}
+    Use it for calibration / ECE / perplexity / confidence work. `options` are OpenAI params at the top
+    level (temperature, max_tokens, seed, ...). The plain text reply is choices[0].message.content."""
+    payload = {"model": model, "messages": messages, "logprobs": True, "top_logprobs": top_logprobs, **options}
+    out = _request("POST", "/v1/chat/completions", payload, timeout)
+    return out["choices"][0]["logprobs"]["content"]
 
 
 def models():

@@ -34,6 +34,17 @@ RUN python -m pip install --upgrade pip==24.2 \
 # (>=570 / CUDA 12.8) runs these.
 RUN python -m pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 
+# The offline pretrained-model stack — for cross-encoder / reranker / NLI / encoder experiments that
+# load PRE-STAGED weights from the read-only /models mount (ops.build_model_zoo). The sandbox stays
+# --network none; HF_HUB_OFFLINE (set by the Quartermaster) forces local-only loads, so these never
+# reach the hub at runtime. Version-pinned for reproducibility.
+RUN python -m pip install \
+        transformers==4.46.3 \
+        sentence-transformers==3.3.1 \
+        safetensors==0.4.5 \
+        tokenizers==0.20.3 \
+        accelerate==1.1.1
+
 # Non-root: experiments never need privileges; combined with --cap-drop ALL and
 # --security-opt no-new-privileges this is the in-container least-privilege floor.
 RUN useradd --create-home --uid 10001 experiment

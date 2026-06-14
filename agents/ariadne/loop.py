@@ -44,14 +44,28 @@ _SANDBOX_LLM_MODELS = os.environ.get(
     "EXPERIMENT_LLM_MODELS",
     "mistral:7b-instruct-q4_K_M, qwen2.5:14b-instruct-q4_K_M, qwen2.5-coder:7b, nomic-embed-text",
 )
+# The offline HF model zoo (ops.build_model_zoo) — when staged, cross-encoder/NLI/encoder experiments
+# become testable too, so advertise them to Ariadne.
+_SANDBOX_MODELS_DIR = os.environ.get("EXPERIMENT_MODELS_DIR", "")
+_ZOO_ON = bool(_SANDBOX_MODELS_DIR) and os.path.isdir(_SANDBOX_MODELS_DIR)
+_ZOO_CLAUSE = (
+    "A small OFFLINE pretrained-model zoo is mounted at /models (cross-encoder reranker, NLI, sentence "
+    "encoder), so RETRIEVAL-RERANKING, NLI, and embedding experiments with real pretrained encoders are "
+    "fair game (loaded by local path). "
+    if _ZOO_ON
+    else ""
+)
 _SANDBOX_MODEL_CLAUSE = (
     (
         "- The sandbox HAS a brokered LOCAL-MODEL endpoint: inference-time behaviour of these local "
         f"models IS testable — {_SANDBOX_LLM_MODELS} (≤7B fast, 14B moderate, 27B+ slow). Directions "
-        "about sampling/decoding, self-consistency, calibration, prompt-format effects, or embedding "
-        "geometry OF THESE MODELS are fair game; probe inputs come from the mounted benchmark pack "
-        "or are generated in-code. Still NOT testable: fine-tuning or training pretrained weights, "
-        "models beyond the local zoo, web-scale benchmarks or internet-fetched datasets.\n"
+        "about sampling/decoding, self-consistency, prompt-format effects, or embedding geometry OF "
+        "THESE MODELS are fair game. TOKEN LOGPROBS are exposed, so confidence CALIBRATION / ECE / "
+        "perplexity on real model probabilities are testable too. "
+        f"{_ZOO_CLAUSE}"
+        "Probe inputs come from the mounted benchmark pack or are generated in-code. Still NOT testable: "
+        "fine-tuning or training pretrained weights, models beyond the local Ollama zoo and the staged "
+        "/models, web-scale benchmarks, multi-GPU / distributed training, or internet-fetched datasets.\n"
     )
     if _SANDBOX_LLM_ON
     else (

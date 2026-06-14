@@ -337,6 +337,7 @@ export interface AriadneOverview {
     experiments_running: number; experiments_total: number;
     critic_mode?: string; evaluation_mode?: string; synthesis_mode?: string; novelty_mode?: string;
     critic_verdicts?: number; findings?: number; concluded_directions?: number;
+    thinking?: { active: boolean; last_run_at: string | null; last_kind: string | null; runs_24h: number; stalled: boolean };
   };
   mission: { id: number; statement: string; framed_at: string } | null;
   directions: AriadneDirection[];
@@ -398,6 +399,27 @@ export interface ResearcherOverview {
   by_disposition: Record<string, number>;
   acquire: { fired_24h: number; replied: number; outcomes: Record<string, number>; pending: number };
   tasks: ResearcherTask[];
+}
+// The named full-stack researcher roster (migration 022) + each one's ownership/track record.
+export interface RosterMember {
+  id: number; name: string; persona: string; specialty: string; status: string;
+  owned_directions: number; done: number; failed: number; win_rate: number | null; last_at: string | null;
+}
+export interface ResearcherRoster { researchers: RosterMember[] }
+export interface ResearcherDirection {
+  id: number; statement: string; status: string; gate: string | null; confidence: number | null;
+}
+export interface ResearcherExperiment {
+  id: number; status: string; data_realism?: string | null; realism_mismatch?: boolean | null;
+  failure_class?: string | null; requires_gpu?: boolean | null;
+  hypothesis?: string | null; claim_statement?: string | null; at?: string | null;
+}
+export interface ResearcherDetail {
+  id: number; name: string; persona: string; specialty: string; status: string;
+  model: string | null; created_at: string | null; win_rate: number | null;
+  by_status: Record<string, number>; by_failure_class: Record<string, number>;
+  directions: ResearcherDirection[]; experiments: ResearcherExperiment[];
+  error?: string;
 }
 export interface PlannerPanel {
   mode: string;
@@ -631,6 +653,9 @@ export interface QmExperiment {
   status: string;
   data_realism?: "real" | "builtin" | "synthetic" | null;
   realism_mismatch?: boolean | null;
+  failure_class?: string | null;
+  researcher_id?: number | null;
+  researcher_name?: string | null;
   claim_id?: number | null;
   claim_statement?: string | null;
   claim_confidence?: number | null;
@@ -663,6 +688,10 @@ export interface QmExperimentDetail {
   status: string;
   data_realism?: "real" | "builtin" | "synthetic" | null;
   realism_mismatch?: boolean | null;
+  failure_class?: string | null;
+  researcher_id?: number | null;
+  researcher_name?: string | null;
+  researcher_specialty?: string | null;
   claim_id?: number | null;
   claim_statement?: string | null;
   claim_confidence?: number | null;
@@ -754,6 +783,8 @@ export const api = {
     jget<{ conversations: AriadneConversation[] }>(`/ariadne/conversations?limit=${limit}`),
   ariadnePlanner: () => jget<PlannerPanel>("/ariadne/planner"),
   researcherOverview: (limit = 30) => jget<ResearcherOverview>(`/researcher/overview?limit=${limit}`),
+  researcherRoster: () => jget<ResearcherRoster>("/researcher/roster"),
+  researcherDetail: (id: number) => jget<ResearcherDetail>(`/researcher/roster/${id}`),
   ariadneGate: (claimId: number, decision: string, note?: string) =>
     jpost<{ ok: boolean; error?: string; budget_full?: boolean; decision?: string }>(
       `/ariadne/gate/${claimId}`, { decision, note }),
