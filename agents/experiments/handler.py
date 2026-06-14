@@ -73,9 +73,11 @@ local Ollama over a unix socket; the sandbox still has NO network). Local models
     text = llm.generate("mistral:7b-instruct-q4_K_M", prompt, temperature=0.0, seed=seed)
     reply = llm.chat(model, [{{"role": "user", "content": "..."}}], temperature=0.8)
     vecs = llm.embed("nomic-embed-text", [s1, s2])
-Use it to MEASURE real model behaviour: sampling/decoding strategies, self-consistency,
-calibration, prompt-format effects, embedding geometry. Calls serialize with the lab's
-other GPU work — roughly seconds per 7B call, tens of seconds at 14B+. Budget honestly:
+Use it to MEASURE real model behaviour: sampling/decoding strategies, self-consistency (majority
+vote over samples), prompt-format effects, embedding geometry. NOTE the helper returns TEXT ONLY —
+no token logprobs / probabilities — so calibration must use ANSWER-LEVEL signals (e.g. vote-share or
+agreement across samples as a confidence proxy), NOT softmax/logprob ECE or perplexity. Calls
+serialize with the lab's other GPU work — roughly seconds per 7B call, tens of seconds at 14B+. Budget honestly:
 n_calls × per-call seconds must fit est_wall_clock_s (cap 1800); prefer ≤7B models and a
 modest call count. Generate probe INPUTS in-code (arithmetic/logic problems with known
 answers are fine); model OUTPUTS must come from llm.* calls, never be fabricated.
@@ -83,8 +85,10 @@ answers are fine); model OUTPUTS must come from llm.* calls, never be fabricated
     return (
         block,
         " (plus the mounted /opt/lab/llm.py helper described above)",
-        "it needs models beyond the local zoo, fine-tuning or training of pretrained weights, "
-        "network access, or an external dataset",
+        "it needs models beyond the local zoo, a cross-encoder / reranker model, token-level logprobs "
+        "or probabilities from the LLM (the helper returns text only — so softmax/logprob ECE, "
+        "perplexity, or true confidence calibration are NOT computable), fine-tuning or training of "
+        "pretrained weights, network access, or an external dataset",
     )
 
 
@@ -219,8 +223,10 @@ Write `code` as a COMPLETE, self-contained Python script:
 - In your result JSON, include a `dataset` object capturing what you built/used so it's reproducible
   and inspectable: {{"n_samples", "n_features" (or shape), "source" (the generator/loader call),
   "sha256" (hashlib.sha256 of the data bytes, e.g. of X.tobytes())}}.
-- The script's LAST stdout line MUST be a single JSON object = the result (the numbers you want
-  interpreted: metrics, deltas, counts, p-values, timings — plus the `dataset` object). Print nothing after it.
+- EMIT THE RESULT as the LAST thing on stdout via `print(json.dumps(result))` — `result` is a dict of
+  the numbers you want interpreted (metrics, deltas, counts, p-values, timings) PLUS the `dataset`
+  object. Use a COMPACT single line (do NOT pass `indent=`), and print nothing after it. If stdout
+  has no parseable JSON object the run is scored a FAILURE, so make that result line unmissable.
 
 Set `requires_gpu` true ONLY if the run genuinely needs the GPU. Cap `est_wall_clock_s` at 1800.
 Return JSON conforming to ExperimentDesign.
@@ -567,9 +573,10 @@ async def handle_experiment_requested(event: dict, dispatcher) -> dict | None:
             "synthesis_justification": design.synthesis_justification,
         },
         code=design.code,
-        # Floor at 120s: designs have estimated 10-60s and the session budget killed runs
-        # before a single attempt finished ("session budget 10s exhausted after 0 attempt(s)").
-        wall_clock_budget_s=max(120, min(1800, design.est_wall_clock_s)),
+        # Floor at 300s: the session budget is shared across retries (EXPERIMENT_MAX_ITERS), and a
+        # 120s floor still killed real GPU runs mid-attempt ("session budget 120s exhausted after 3
+        # attempt(s)") — model load + dataset inference needs room before the first attempt finishes.
+        wall_clock_budget_s=max(300, min(1800, design.est_wall_clock_s)),
         mem_budget_mb=design.est_mem_mb,
         requires_gpu=design.requires_gpu,
         gpu_mem_mb=design.gpu_mem_mb or (4096 if design.requires_gpu else None),

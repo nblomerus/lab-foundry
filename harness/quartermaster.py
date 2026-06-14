@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from agents.experiments import sandbox
 from agents.experiments.session import run_code_session
 from harness.agent_modes import get_agent_mode
+from harness.router import shared_gpu_lock
 from ops.resources import best_gpu_with_headroom, sample_resources
 from state.client import PostgresClient
 
@@ -35,6 +36,11 @@ MAX_CPU = int(os.environ.get("MAX_CONCURRENT_EXPERIMENTS", "2"))
 MAX_GPU = int(os.environ.get("MAX_CONCURRENT_GPU_EXPERIMENTS", "1"))
 CPUS = float(os.environ.get("EXPERIMENT_CPUS", "1.0"))
 GPU_MEM_DEFAULT = int(os.environ.get("EXPERIMENT_GPU_MEM_MB", "4096"))
+# Hard cap on a single experiment's VRAM RESERVATION. Designers over-estimate (e.g. 12000MB for a
+# 7B-class run), and a request larger than any GPU's free VRAM stalls the queue forever (it never
+# fits). Clamp to what a modest experiment actually needs (a 14B-q4 model ≈ 8GB) so it stays
+# schedulable on the 16GB card alongside Ollama + headroom.
+GPU_MEM_MAX = int(os.environ.get("EXPERIMENT_GPU_MEM_MAX", "8192"))
 GPU_RESERVE_MB = int(os.environ.get("EXPERIMENT_GPU_HEADROOM_MB", "2048"))
 # Restrict experiments to specific GPU indices (comma-separated). Use this to
 # EXCLUDE a card whose compute capability the pinned torch build can't run — e.g.
@@ -42,6 +48,11 @@ GPU_RESERVE_MB = int(os.environ.get("EXPERIMENT_GPU_HEADROOM_MB", "2048"))
 # up to sm_90. Empty/unset = any GPU with headroom.
 _gpu_devs = os.environ.get("EXPERIMENT_GPU_DEVICES", "").strip()
 GPU_ALLOWED: set[int] | None = {int(x) for x in _gpu_devs.split(",") if x.strip()} or None
+# The lab's own retrieval/serving is the PRIORITY tenant of the GPU. Don't launch an experiment while
+# a local model call is in flight OR within this cooldown of the last one (the model is still resident,
+# holding VRAM) — gauged via the shared GPULock (router local + broker + graph extraction). Keep it
+# ≈ the extraction keep-alive so an experiment only starts once the lab's model has actually released.
+LAB_GPU_COOLDOWN_S = float(os.environ.get("EXPERIMENT_GPU_LAB_COOLDOWN_S", "45"))
 CPU_HEADROOM_PCT = float(os.environ.get("EXPERIMENT_CPU_HEADROOM_PCT", "80"))
 MEM_HEADROOM_PCT = float(os.environ.get("EXPERIMENT_MEM_HEADROOM_PCT", "85"))
 NO_PROGRESS_S = float(os.environ.get("EXPERIMENT_NO_PROGRESS_S", "180"))
@@ -128,7 +139,9 @@ async def allocate(state, router, curator, res: dict, running: dict, kill_reason
         if is_gpu:
             if gpu_running >= MAX_GPU:
                 continue
-            need = int(exp.get("gpu_mem_mb") or GPU_MEM_DEFAULT)
+            if shared_gpu_lock().busy(LAB_GPU_COOLDOWN_S):
+                continue  # the lab's retrieval/serving (priority tenant) is using the GPU — defer
+            need = min(int(exp.get("gpu_mem_mb") or GPU_MEM_DEFAULT), GPU_MEM_MAX)
             device = best_gpu_with_headroom(res.get("gpus") or [], need, GPU_RESERVE_MB, GPU_ALLOWED)
             if device is None:
                 continue  # no GPU with VRAM headroom beyond Ollama's footprint
