@@ -51,6 +51,7 @@ branch = true
 omit = [
     "tests/*",
     "*/server.py",                  # thin MCP/FastMCP wrappers (run, not unit-tested)
+    "ops/build_model_zoo.py",       # build-time tool; needs optional `huggingface_hub`, not a CI dep
 ]
 
 [tool.coverage.report]
