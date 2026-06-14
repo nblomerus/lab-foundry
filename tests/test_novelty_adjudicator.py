@@ -62,6 +62,7 @@ class _Chunk:
         self.source_kind = source_kind
         self.document_id = 1
         self.trust_tier = "certified"
+        self.source_url = None
 
 
 def _disp(monkeypatch, *, adj=None, run_id=7, directions=None, prior=None, held=None, chunks=None):

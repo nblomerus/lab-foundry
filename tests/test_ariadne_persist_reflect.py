@@ -717,8 +717,8 @@ async def test_mimir_reflect_brief_emit_on_with_anchors_and_gaps(monkeypatch):
     state = SimpleNamespace(pool=pool)
     captured = {}
 
-    async def _aq(question, k, state, asker):
-        captured.update(question=question, k=k, state=state, asker=asker)
+    async def _aq(question, k, state, asker, exclude_lab=False):
+        captured.update(question=question, k=k, state=state, asker=asker, exclude_lab=exclude_lab)
         return SimpleNamespace(answer="landscape shifted", gaps=["trust decay", "stale docs"])
 
     monkeypatch.setattr(reflect, "answer_question", _aq)
@@ -730,6 +730,8 @@ async def test_mimir_reflect_brief_emit_on_with_anchors_and_gaps(monkeypatch):
     assert "agentic RAG, tool use" in captured["question"]
     assert captured["state"] is state
     assert captured["asker"] == "ariadne" and captured["k"] == 8
+    # reflection excludes the lab's own proposals from the GraphRAG grounding
+    assert captured["exclude_lab"] is True
 
 
 @pytest.mark.asyncio
@@ -738,7 +740,7 @@ async def test_mimir_reflect_brief_emit_off_state_none_no_gaps(monkeypatch):
     state = SimpleNamespace(pool=pool)
     captured = {}
 
-    async def _aq(question, k, state, asker):
+    async def _aq(question, k, state, asker, exclude_lab=False):
         captured["state"] = state
         return SimpleNamespace(answer="ans", gaps=[])
 
@@ -766,7 +768,7 @@ async def test_mimir_reflect_brief_anchor_query_failure_still_runs(monkeypatch):
 
     captured = {}
 
-    async def _aq(question, k, state, asker):
+    async def _aq(question, k, state, asker, exclude_lab=False):
         captured["question"] = question
         return SimpleNamespace(answer="ans", gaps=[])
 

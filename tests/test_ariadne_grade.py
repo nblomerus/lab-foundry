@@ -289,7 +289,7 @@ async def test_grade_citations_at_80_percent_passes(monkeypatch):
     resolving = "A Survey of Hybrid Retrieval"
     nonresolving = "Totally Unrelated Title About Birds"
 
-    async def _search(title, k=6):
+    async def _search(title, k=6, exclude_lab=False):
         return [_chunk(resolving)] if title == resolving else [_chunk("Quantum Error Correction")]
 
     monkeypatch.setattr(grade, "corpus_search", _search)

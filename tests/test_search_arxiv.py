@@ -81,7 +81,7 @@ async def test_search_arxiv_parses_fields():
     assert len(results) == 2
     first = results[0]
     assert isinstance(first, ArxivResult)
-    assert first.arxiv_id == "2401.01234v2"
+    assert first.arxiv_id == "2401.01234"  # version-stripped canonical id
     assert first.title == "Retrieval-Augmented Generation for Knowledge Tasks"
     assert first.authors == ["Ada Lovelace", "Alan Turing"]
     assert "retrieval augmented generation" in first.abstract.lower()
@@ -132,7 +132,7 @@ async def test_search_arxiv_robust_to_missing_authors():
         results = await search_arxiv("anything")
 
     second = results[1]
-    assert second.arxiv_id == "2402.05678v1"
+    assert second.arxiv_id == "2402.05678"  # version-stripped canonical id
     assert second.authors == []  # no <author> elements -> empty, not crash
     assert second.categories == ["stat.ML"]
 
@@ -182,9 +182,9 @@ async def test_scout_arxiv_returns_paper_descriptors():
     assert isinstance(d, SourceDescriptor)
     assert d.kind == "paper"
     assert d.source_kind == "arxiv"
-    assert d.canonical_key == "2401.01234v2"
-    assert d.arxiv_id == "2401.01234v2"
-    assert d.url == "http://arxiv.org/pdf/2401.01234v2"
+    assert d.canonical_key == "2401.01234"  # version-stripped canonical id
+    assert d.arxiv_id == "2401.01234"  # version-stripped canonical id
+    assert d.url == "http://arxiv.org/pdf/2401.01234v2"  # PDF URL retains the version
     assert d.title == "Retrieval-Augmented Generation for Knowledge Tasks"
     assert "retrieval augmented generation" in (d.why or "")
 
