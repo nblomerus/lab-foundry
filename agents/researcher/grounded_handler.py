@@ -88,7 +88,7 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
                 claim_id=claim_id,
                 source="researcher",
                 url=None,
-                title=(finding.headline or finding.summary or "")[:200],
+                title=(finding.summary or "")[:200],
                 summary=finding.summary or "",
                 relevance_score=round(float(finding.confidence) * 10, 1),
                 supports_claim=supports,
