@@ -46,6 +46,17 @@ def test_disposition_maps_verdict_then_blocker():
     assert disposition(_finding()) == "inconclusive"
 
 
+def test_disposition_force_experiment_overrides_inconclusive_blockers():
+    # the deterministic floor (runnable.runnable_target hit): a runnable task is needs_experiment even
+    # if the LLM said thin_corpus / none — but a DECISIVE verdict still stands (literature settled it).
+    assert disposition(_finding(blocker="thin_corpus"), force_experiment=True) == "needs_experiment"
+    assert disposition(_finding(blocker="none"), force_experiment=True) == "needs_experiment"
+    assert disposition(_finding(verdict="supports"), force_experiment=True) == "supported"
+    assert disposition(_finding(verdict="contradicts"), force_experiment=True) == "contradicted"
+    # default (floor not fired) is unchanged
+    assert disposition(_finding(blocker="thin_corpus")) == "thin_corpus"
+
+
 def test_supported_moves_confidence_only_when_grounded():
     f = _finding(verdict="supports", confidence=1.0)
     grounded = finding_feedback(_CTX, f, 1.0)

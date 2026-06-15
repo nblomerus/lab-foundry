@@ -9,6 +9,7 @@ prompt builder + recipe remain the shared "design language" in agents.experiment
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 
@@ -100,6 +101,12 @@ async def handle_experiment_completed(event: dict, dispatcher) -> dict | None:
             conf_applied = [round(float(claim.confidence), 3), round(new_conf, 3)]
         except ValueError as e:  # claim not found or not active — the experiment still stands
             log.warning("experiments: confidence move skipped for claim %s: %s", claim_id, e)
+
+    # An experiment landing on a direction IS evidence — stamp last_evidence_at so "has this been
+    # worked" reflects experiments too (the literature path already does; interpretation did not).
+    if claim_id is not None:
+        with contextlib.suppress(Exception):  # evidence stamp is best-effort
+            await state.mark_claim_evidence(claim_id)
 
     # Ingest a first-party lab note into the Library so Mimir / the corpus carry what the lab ran.
     text = _lab_note_markdown(experiment_id, claim_id, hypothesis, exp, report)

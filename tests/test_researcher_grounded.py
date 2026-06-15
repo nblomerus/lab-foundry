@@ -279,6 +279,36 @@ async def test_investigate_task_happy_path(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_investigate_prompt_includes_affordances_and_decision_rule_when_staged(monkeypatch):
+    pool = ScriptedPool(rules=_task_rules())
+    state = make_state(pool)
+    _patch_mimir(monkeypatch, refs=[_ref(1, "Paper A")])
+    calls = patch_chain(monkeypatch, grounded, content=[_QUERIES_JSON, _FINDING_JSON])
+    monkeypatch.setattr(
+        grounded,
+        "affordance_brief",
+        lambda: "- Datasets (READ-ONLY at /data): /data/adult.jsonl [tabular/classification]",
+    )
+    await investigate_task(state, 1)
+    user = calls[1][0][1]["content"]
+    assert "What the lab can RUN locally" in user  # the decider now knows what it can run
+    assert "/data/adult.jsonl" in user
+    assert "set blocker='needs_experiment'" in user  # the positive decision rule
+
+
+@pytest.mark.asyncio
+async def test_investigate_prompt_omits_affordances_when_nothing_staged(monkeypatch):
+    pool = ScriptedPool(rules=_task_rules())
+    state = make_state(pool)
+    _patch_mimir(monkeypatch, refs=[_ref(1, "Paper A")])
+    calls = patch_chain(monkeypatch, grounded, content=[_QUERIES_JSON, _FINDING_JSON])
+    monkeypatch.setattr(grounded, "affordance_brief", lambda: "")  # nothing staged
+    await investigate_task(state, 1)
+    user = calls[1][0][1]["content"]
+    assert "What the lab can RUN locally" not in user  # self-suppressing — never claims false runnability
+
+
+@pytest.mark.asyncio
 async def test_investigate_task_dedupes_refs_across_queries(monkeypatch):
     pool = ScriptedPool(rules=_task_rules())
     state = make_state(pool)

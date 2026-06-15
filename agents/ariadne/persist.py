@@ -75,6 +75,39 @@ async def request_evidence(state, requests) -> int:
     return n
 
 
+async def request_data(state, data_requests) -> int:
+    """Record Ariadne's DATASET demands — the data analogue of request_evidence (papers). When a
+    high-value direction needs data the lab hasn't staged, she emits a `data.requested` event: a DURABLE
+    DEMAND RECORD for Mimir/ops to fulfil. Fulfilment is still the operator step `ops.build_benchmark_pack`
+    — there is NO runtime dataset-acquire path yet (a kind='dataset' Mimir acquire currently resolves to an
+    arXiv search, so we deliberately do NOT fire one; the event is the load-bearing artifact). The event is
+    closure-exempt (harness/dispatch.py CLOSURE_EXEMPT_EVENTS). Best effort — a bad request must not fail
+    the deliberation. Returns the count recorded. (A held-not-gapped consumer is a planned follow-up.)"""
+    n = 0
+    for r in data_requests or []:
+        why = r.why if len(r.why or "") >= 30 else f"{r.why or r.dataset} — Ariadne needs this dataset to run a direction"
+        try:
+            await state.emit_corpus_event(
+                "data.requested",
+                target_type="system",
+                target_id=0,
+                payload={
+                    "dataset": r.dataset,
+                    "source": r.source,
+                    "modality": r.modality,
+                    "task_type": r.task_type,
+                    "why": why,
+                },
+                dedup_key=f"data-req-{(r.dataset or '').strip().lower()}",
+            )
+            n += 1
+        except Exception as e:  # noqa: BLE001 — demand record is best-effort
+            log.warning("ariadne: data.requested emit failed for %r: %s", r.dataset, e)
+    if n:
+        log.info("ariadne: recorded %d dataset demand(s) for Mimir/ops", n)
+    return n
+
+
 async def persist_directions(state, out, *, run_id: int | None = None) -> dict:
     """Write mission → directions → claim_goals + decision scores (all 'proposed'). Returns counts.
 
@@ -86,14 +119,30 @@ async def persist_directions(state, out, *, run_id: int | None = None) -> dict:
         # (transition='supersede') — the bulk flip below stays as-is (a wholesale agenda
         # re-frame, NOT a per-claim invalidation: no per-direction claim.invalidated, no
         # findings-stale sweep), but its outcome is now queryable in direction_transitions.
-        superseded_dirs = await conn.fetch(
-            f"SELECT id, status::text AS st FROM claims WHERE claim_kind='direction' AND status IN {ACTIVE_SQL}"
+        # Missions are always superseded (one active agenda frame at a time). Directions are superseded
+        # ONLY if UN-WORKED — a direction that already has a completed experiment or a research_finding
+        # SURVIVES the re-frame so it can run to a conclusion. This closes the "0 of N directions ever
+        # conclude" wall: previously every re-frame invalidated all active directions before they could
+        # accumulate the experiments + finding needed to graduate. Synthesis/Critic still close worked ones.
+        _UNWORKED = (
+            "NOT EXISTS (SELECT 1 FROM experiment_runs e JOIN tasks t ON t.id = e.task_id "
+            "            WHERE t.claim_id = c.id AND e.status = 'completed') "
+            "AND NOT EXISTS (SELECT 1 FROM research_findings rf WHERE rf.direction_claim_id = c.id)"
         )
-        superseded = await conn.execute(
+        superseded_dirs = await conn.fetch(
+            f"SELECT id, status::text AS st FROM claims c WHERE claim_kind='direction' AND status IN {ACTIVE_SQL} "
+            f"AND {_UNWORKED}"
+        )
+        await conn.execute(
             "UPDATE claims SET status='invalidated', invalidated_at=now(), "
             "invalidation_reason='superseded by a newer deliberation' "
-            "WHERE claim_kind IN ('mission','direction') "
-            "AND status IN ('proposed','tested','weakly_supported','replicated')"
+            "WHERE claim_kind = 'mission' AND status IN ('proposed','tested','weakly_supported','replicated')"
+        )
+        superseded = await conn.execute(
+            f"UPDATE claims c SET status='invalidated', invalidated_at=now(), "
+            f"invalidation_reason='superseded by a newer deliberation' "
+            f"WHERE claim_kind='direction' AND status IN ('proposed','tested','weakly_supported','replicated') "
+            f"AND {_UNWORKED}"
         )
         for r in superseded_dirs:
             await conn.execute(

@@ -239,20 +239,21 @@ async def _guard_rearm_conclude(conn) -> list[dict]:
 
 
 async def _guard_rearm_audit(conn) -> list[dict]:
+    # Research-era: re-arm the audit of synthesized research_findings (Aletheia via finding.composed),
+    # not the dead market-era findings/task.completed path. A finding left un-audited past the grace
+    # window (e.g. a missed NOTIFY) gets its finding.composed re-issued.
     rows = await conn.fetch(
-        f"SELECT DISTINCT t.id FROM findings f "
-        f"JOIN tasks t ON t.id = f.task_id "
-        f"JOIN claims c ON c.id = f.claim_id "
-        f"WHERE f.audit_verdict IS NULL AND t.status = 'completed' AND t.department = 'research' "
-        f"AND c.status IN {ACTIVE_SQL} "
-        f"AND t.completed_at < now() - make_interval(mins => $1::int) "
+        f"SELECT rf.id AS finding_id, rf.direction_claim_id AS claim_id FROM research_findings rf "
+        f"JOIN claims c ON c.id = rf.direction_claim_id "
+        f"WHERE rf.audit_verdict IS NULL AND c.status IN {ACTIVE_SQL} "
+        f"AND rf.created_at < now() - make_interval(mins => $1::int) "
         f"AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.status = 'pending' "
-        f"  AND ev.event_type = 'task.completed' AND ev.target_id = t.id) "
-        f"ORDER BY t.id LIMIT $2",
+        f"  AND ev.event_type = 'finding.composed' AND ev.target_id = rf.direction_claim_id) "
+        f"ORDER BY rf.id LIMIT $2",
         int(REARM_GRACE_MIN),
         REARM_CAP_PER_TICK,
     )
-    return [{"task_id": r["id"]} for r in rows]
+    return [{"claim_id": r["claim_id"], "finding_id": r["finding_id"]} for r in rows]
 
 
 async def _guard_rearm_attack(conn) -> list[dict]:
@@ -446,12 +447,12 @@ REGISTRY: list[Transition] = [
     Transition(
         name="rearm_audit",
         owner="evaluation",
-        emits="task.completed",
+        emits="finding.composed",
         from_guard=_guard_rearm_audit,
-        payload=lambda r: {"rearmed": True},
-        dedup=lambda r, day, ts: f"rearm-audit-{r['task_id']}-{day}",
-        target_type="task",
-        target_key="task_id",
+        payload=lambda r: {"claim_id": r["claim_id"], "finding_id": r["finding_id"], "rearmed": True},
+        dedup=lambda r, day, ts: f"rearm-audit-{r['finding_id']}-{day}",
+        target_type="claim",
+        target_key="claim_id",
     ),
     Transition(
         name="rearm_attack",

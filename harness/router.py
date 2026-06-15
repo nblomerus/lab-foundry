@@ -223,6 +223,7 @@ ROUTE: dict[str, Tier] = {
     # Fast — verifiers and high-volume classifiers
     # upgraded: slop gate needs a reliable, accurate model (DeepSeek), not 429→mistral:7b
     "evaluation.slop_score": Tier.WORKHORSE,
+    "evaluation.audit_finding": Tier.WORKHORSE,  # Aletheia audits a synthesized research_finding (verification spine)
     "evaluation.relevance_verify": Tier.FAST,
     "phase_adjudicator.check": Tier.FAST,
     "curator.compact_recall": Tier.FAST,

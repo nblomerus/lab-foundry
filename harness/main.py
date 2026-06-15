@@ -31,7 +31,7 @@ import httpx
 from agents.ariadne.handler import handle_ariadne_deliberate, handle_ariadne_reflect
 from agents.ariadne.scholarship import handle_ariadne_propose, handle_ariadne_review
 from agents.critic.handler import handle_finding_high_signal
-from agents.evaluation.handler import handle_task_completed
+from agents.evaluation.handler import handle_finding_composed, handle_task_completed
 from agents.evaluation.slop_handler import handle_audit_slop_detected
 from agents.novelty.handler import handle_direction_adjudicate
 from agents.planner.decompose import handle_planner_decompose
@@ -255,6 +255,7 @@ async def main() -> int:
     # Register handlers — covers the full frame → submit loop
     if not knowledge_core_only:
         dispatcher.register("task.completed", handle_task_completed)
+        dispatcher.register("finding.composed", handle_finding_composed)  # Aletheia audits synthesized findings
         dispatcher.register("finding.high_signal", handle_finding_high_signal)
         dispatcher.register("queue.empty", handle_queue_empty)
         dispatcher.register("reflection.requested", handle_reflection_requested)

@@ -16,7 +16,7 @@ import logging
 from agents.ariadne import loop as ariadne_loop
 from agents.ariadne.grade import grade, grade_feedback, grade_reflection
 from agents.ariadne.loop import run_shadow
-from agents.ariadne.persist import persist_directions, persist_reflection, request_evidence
+from agents.ariadne.persist import persist_directions, persist_reflection, request_data, request_evidence
 from agents.ariadne.reflect import run_reflection
 from agents.llm import current_run_id
 from harness.agent_modes import get_agent_mode
@@ -77,7 +77,8 @@ async def handle_ariadne_deliberate(event: dict, dispatcher) -> dict | None:
         return {**summary, "persisted": False, "reason": "failed_grading", "grade": report.model_dump()}
 
     counts = await persist_directions(state, out)
-    n_requests = await request_evidence(state, out.requests)  # demand side → Mimir acquire queue
+    n_requests = await request_evidence(state, out.requests)  # demand side → Mimir acquire queue (papers)
+    n_data = await request_data(state, out.data_requests)  # demand side → Mimir acquire queue (datasets)
     # The lessons this deliberation consumed become judgeable applications — without this,
     # Ariadne's recall path bypassed the Router's recording and no lesson could ever promote.
     lessons_client = getattr(dispatcher, "lessons", None)
@@ -86,8 +87,8 @@ async def handle_ariadne_deliberate(event: dict, dispatcher) -> dict | None:
             await lessons_client.record_applications(list(ariadne_loop.LAST_RECALLED_LESSON_IDS), current_run_id())
         except Exception:  # noqa: BLE001 — application accounting must not fail the deliberation
             log.exception("ariadne: recording lesson applications failed")
-    log.info("ariadne: %s — persisted %s, queued %d evidence requests", mode, counts, n_requests)
-    return {**summary, "persisted": True, **counts, "evidence_requests": n_requests}
+    log.info("ariadne: %s — persisted %s, queued %d evidence + %d data requests", mode, counts, n_requests, n_data)
+    return {**summary, "persisted": True, **counts, "evidence_requests": n_requests, "data_requests": n_data}
 
 
 async def handle_ariadne_reflect(event: dict, dispatcher) -> dict | None:

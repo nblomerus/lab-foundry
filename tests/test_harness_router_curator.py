@@ -64,6 +64,19 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(router_mod.asyncio, "sleep", _instant, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_identity_registry(monkeypatch):
+    """These curator tests assert the SYSTEM_PROMPTS code anchors, i.e. the no-registry fallback.
+    The positive persona-resolution path (registry row → system layer) is covered in
+    tests/test_agent_identity.py. Neutralise the lookup so an AsyncMock pool can't feed a
+    Mock-shaped persona into the system message."""
+
+    async def _none(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr("harness.curator.persona_for", _none, raising=False)
+
+
 def _prompt(invocation_type: str = "pi.exploration_kickoff", *, tokens: int = 42) -> BuiltPrompt:
     """A minimal BuiltPrompt the Router can persist + render."""
     return BuiltPrompt(
@@ -139,6 +152,7 @@ def test_route_table_resolves_known_invocation_types():
     assert router_mod.ROUTE["pi.claim_verdict"] == Tier.REASONING
     assert router_mod.ROUTE["planner.generate_tasks"] == Tier.WORKHORSE
     assert router_mod.ROUTE["evaluation.relevance_verify"] == Tier.FAST
+    assert router_mod.ROUTE["evaluation.audit_finding"] == Tier.WORKHORSE  # verification spine (Aletheia)
     # extract_evidence moved CODE -> WORKHORSE (2026-06-10) so researchers run on
     # cloud and parallelize instead of queueing on the local GPU lock.
     assert router_mod.ROUTE["researcher.extract_evidence"] == Tier.WORKHORSE
@@ -826,6 +840,10 @@ def _company_state(**over):
 
 def _curator(*, cs=None, lessons=None, recall=None):
     state = AsyncMock()
+    # No agent_identities registry in unit context → persona_for is skipped and the curator falls
+    # back to the SYSTEM_PROMPTS code constants. (A truthy AsyncMock pool would otherwise feed a
+    # Mock-shaped persona into the system layer.)
+    state.pool = None
     state.get_company_state.return_value = cs if cs is not None else _company_state()
     state.count_active_theses.return_value = 4
 
