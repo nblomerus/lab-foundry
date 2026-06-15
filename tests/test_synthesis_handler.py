@@ -107,14 +107,21 @@ async def test_synthesize_happy_path_persists_and_ingests():
     assert pkw["graduate_to"] == "concluded"  # supported @0.7 (decisive + confident) → concluded
     assert pkw["grounded_in"] == ["exp:10", "exp:11", "exp:12"]
 
-    # ingested as a first-party lab_finding doc
-    args, ekw = disp.state.emit_corpus_event.await_args
-    assert args[0] == "source.discovered"
+    # ingested as a first-party lab_finding doc (the source.discovered emit)
+    disc = next(c for c in disp.state.emit_corpus_event.await_args_list if c.args[0] == "source.discovered")
+    _, ekw = disc
     src = ekw["payload"]["source"]
     assert src["source_kind"] == "lab_finding"
     assert src["canonical_key"] == "finding:61:3"
     assert ekw["payload"]["provenance"]["grounded_in_experiments"] == ["exp:10", "exp:11", "exp:12"]
     assert ekw["dedup_key"] == "finding-doc-61-3"
+
+    # and the verification spine is armed: finding.composed targets the direction (Phase 3 reconnect)
+    comp = next(c for c in disp.state.emit_corpus_event.await_args_list if c.args[0] == "finding.composed")
+    assert comp.kwargs["target_type"] == "claim"
+    assert comp.kwargs["target_id"] == 61
+    assert comp.kwargs["payload"] == {"claim_id": 61, "finding_id": 5}
+    assert comp.kwargs["dedup_key"] == "finding-composed-5"
 
 
 async def test_synthesize_curator_and_router_wired():

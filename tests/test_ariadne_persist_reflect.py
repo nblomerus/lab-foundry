@@ -66,11 +66,12 @@ def _direction(title="Trust-weighted RRF", statement="Attack stale retrieval.", 
     )
 
 
-def _ariadne_out(mission="Make retrieval trustworthy.", directions=None, requests=None):
+def _ariadne_out(mission="Make retrieval trustworthy.", directions=None, requests=None, data_requests=None):
     return SimpleNamespace(
         mission_frame=mission,
         directions=[_direction()] if directions is None else directions,
         requests=[] if requests is None else requests,
+        data_requests=[] if data_requests is None else data_requests,
     )
 
 
@@ -135,7 +136,8 @@ async def test_persist_directions_happy_path_full_tree():
 async def test_persist_directions_supersede_count_parsed():
     pool = ScriptedPool(
         rules=[
-            ("UPDATE claims SET status='invalidated'", "UPDATE 3"),
+            # supersede is now two updates: missions (always) + UN-WORKED directions (the count returned).
+            ("UPDATE claims c SET status='invalidated'", "UPDATE 3"),
             ("'mission', 'proposed'", [{"id": 10}]),
             ("'direction', $2", [{"id": 20}]),
         ]
@@ -342,6 +344,35 @@ async def test_request_evidence_empty_and_none(monkeypatch):
     state = make_state()
     assert await persist.request_evidence(state, []) == 0
     assert await persist.request_evidence(state, None) == 0
+
+
+def _data_request(dataset="adult", source="openml", modality="tabular", task_type="classification", why="x" * 30):
+    return SimpleNamespace(dataset=dataset, source=source, modality=modality, task_type=task_type, why=why)
+
+
+@pytest.mark.asyncio
+async def test_request_data_emits_durable_demand_event():
+    # No Mimir acquire is fired (a kind='dataset' acquire mis-resolves to arXiv today) — the
+    # data.requested event IS the load-bearing demand record for Mimir/ops to fulfil.
+    state = make_state()
+    state.emit_corpus_event = AsyncMock()
+    n = await persist.request_data(state, [_data_request()])
+    assert n == 1
+    args, kw = state.emit_corpus_event.await_args
+    assert args[0] == "data.requested"
+    assert kw["target_type"] == "system"
+    assert kw["payload"]["dataset"] == "adult"
+    assert kw["payload"]["modality"] == "tabular"
+    assert kw["dedup_key"] == "data-req-adult"
+
+
+@pytest.mark.asyncio
+async def test_request_data_empty_and_none():
+    state = make_state()
+    state.emit_corpus_event = AsyncMock()
+    assert await persist.request_data(state, []) == 0
+    assert await persist.request_data(state, None) == 0
+    state.emit_corpus_event.assert_not_awaited()
 
 
 # ════════════════════════════════════════════════════════════════════════════════

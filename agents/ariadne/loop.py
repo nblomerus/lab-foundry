@@ -25,6 +25,7 @@ import re
 from agents.ariadne.schemas import AriadneOutput
 from agents.llm import _chain_complete, _strip_fences
 from agents.mimir.ask import answer_question
+from agents.researcher.runnable import affordance_brief
 from library.corpus.tools import corpus_search
 from library.graph.field_model import read_field_brief
 from library.graph.tools import _get_driver
@@ -129,6 +130,14 @@ ONLY for a SPECIFIC paper (its exact title, or an arxiv id) you believe is genui
 broad topic — the corpus already covers topics comprehensively, so a topic just comes back
 'already have'. Prior-art papers in the GROUNDING are tagged with their [arxiv:ID] — when you
 request one of them, copy that id into 'arxiv_id' for a precise, direct fetch.
+EXPERIMENTS RUN ON STAGED DATA: a direction is only runnable if the dataset/model it needs is in
+the live "What the lab can ACTUALLY RUN now" list. If a HIGH-value direction needs a dataset the lab
+does NOT have, do NOT silently score feasibility low and drop it — add a `data_requests` entry naming
+the SPECIFIC, realistically-downloadable dataset (an exact HuggingFace / OpenML / UCI id); the lab
+records that demand for Mimir/ops to fulfil (the direction can't run until the dataset is staged, so
+PREFER directions runnable on data already staged). Only request data that genuinely exists and is
+downloadable; capability gaps a dataset can't fix (model internals/gradients, an open-domain retrieval
+corpus, a model not in the zoo) are NOT data_requests — avoid proposing those.
 Be sharp, concrete, and honest about uncertainty. Output ONLY JSON."""
 
 _SCHEMA_HINT = """Output JSON with exactly these keys:
@@ -147,6 +156,8 @@ _SCHEMA_HINT = """Output JSON with exactly these keys:
  "novelty_risks": [str],
  "requests": [ { "paper": "exact title or arxiv id of a SPECIFIC missing paper",
    "arxiv_id": "YYMM.NNNNN"|null, "why": str } ],
+ "data_requests": [ { "dataset": "exact HF/OpenML/UCI id of a dataset the lab lacks but needs",
+   "source": "huggingface|openml|uci"|null, "modality": str|null, "task_type": str|null, "why": str } ],
  "reflection": str
 }
 Every direction MUST include all nine integer scores (1=poor … 5=excellent); score novelty
@@ -351,11 +362,22 @@ async def _deliberate(
         bars += f"# Research stance — the bar EVERY direction must clear\n{stance}\n\n"
     if success:
         bars += f"# What success looks like\n{success}\n\n"
+    # Live run-capability (the SAME /data + /models manifest the experiment sandbox mounts) — so she
+    # proposes directions the lab can actually RUN, and names a data_request when a dataset is missing,
+    # instead of the stale prose constraints alone. Self-suppressing when nothing is staged.
+    brief = affordance_brief()
+    runnable_block = (
+        f"# What the lab can ACTUALLY RUN now (live /data + /models manifest — propose runnable "
+        f"directions; if a needed dataset is NOT here, add a data_requests entry)\n{brief}\n\n"
+        if brief
+        else ""
+    )
     user = (
         f"# Seed problem\n{seed}\n\n"
         f"{bars}"
         f"# Current agenda (the existing claims tree)\n{agenda}\n\n"
         f"# Grounding\n{prior_art}\n\n"
+        f"{runnable_block}"
         f"# Lab capabilities & constraints (every direction MUST fit this hardware)\n{LAB_CONSTRAINTS}\n\n"
         f"# Task\nFrame the mission and propose the direction tree. Each direction is a PAPER-SHAPED "
         f"CONTRIBUTION: 'We show that [novel finding] on [task], which means [a named practitioner should "
@@ -414,15 +436,25 @@ async def run_shadow(
     except Exception:  # noqa: BLE001
         agenda = "(empty — frame from scratch)"
 
-    # First-party experiment results on the active directions — so Ariadne re-frames over what the
-    # lab actually RAN (numbers + the researcher's narrative note), not just confidence deltas.
+    # First-party EXECUTION LEDGER — every direction the lab has actually RUN (active OR already
+    # killed), with done/failed counts + the latest researcher headline + why a killed one died.
+    # Unions active-unworked with worked-invalidated (status-agnostic) so she stops re-attacking
+    # ground the lab already ran and killed — the prior per-active-claim read was empty live because
+    # the active directions had zero experiments while the worked ones were already invalidated.
     try:
-        notes = await state.get_recent_experiment_notes_for_claims([c.id for c in claims], limit=8)
-        if notes:
-            agenda += "\n\n## Experiment results so far (first-party — what the lab ran)\n" + "\n".join(
-                f"- T{n['claim_id']}: {(n.get('researcher_notes') or n.get('interpretation') or '')[:240]}" for n in notes
+        ledger = await state.get_direction_execution_digest([c.id for c in claims], limit=12)
+        if ledger:
+            agenda += (
+                "\n\n## Execution ledger (first-party — what the lab has RUN; do NOT re-attack "
+                "worked-and-killed ground)\n"
+                + "\n".join(
+                    f"- T{r['claim_id']} [{r['status']}, {r['done']} done / {r['failed']} failed]"
+                    f"{(' KILLED: ' + (r['invalidation_reason'] or '')[:80]) if r['status'] == 'invalidated' else ''}"
+                    f"{(' — ' + r['headline'][:160]) if r.get('headline') else ''}"
+                    for r in ledger
+                )
             )
-    except Exception:  # noqa: BLE001 — experiment context is best-effort
+    except Exception:  # noqa: BLE001 — execution ledger is best-effort
         pass
 
     # Paper-shaped FINDINGS the lab has ESTABLISHED — its terminal conclusions (supported/refuted +

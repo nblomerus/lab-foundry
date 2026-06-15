@@ -208,6 +208,93 @@ if "evaluation.slop_score" not in RECIPES:
 
 
 # -------------------------------------------------------------------------
+# Research-era finding audit (Aletheia audits a synthesized research_finding)
+# -------------------------------------------------------------------------
+
+
+async def _build_audit_finding(ctx: dict, state, memory) -> PromptLayer:
+    """Audit ONE synthesized finding for groundedness/substance against the experiments it rests on."""
+    f = ctx.get("finding") or {}
+    exps = ctx.get("experiments") or []
+    blocks = []
+    for e in exps[:8]:
+        params = e.get("params") or {}
+        blocks.append(
+            f"- exp#{e.get('experiment_id') or e.get('id')}: {str(params.get('hypothesis', ''))[:160]} → "
+            f"result {str(e.get('result'))[:200]}; interp {str(e.get('interpretation') or '')[:200]}"
+        )
+    content = f"""## Synthesized finding to audit
+**Headline:** {f.get("headline", "")}
+**Claim:** {f.get("claim_text", "")}
+**Supported:** {f.get("supported")}  |  **Self-confidence:** {f.get("confidence")}  |  **Data:** {f.get("data_realism")}
+**Method:** {f.get("method", "")}
+**Key numbers:** {f.get("key_numbers", "")}
+**Limitations:** {f.get("limitations", "")}
+
+## The experiments it rests on
+{chr(10).join(blocks) or "(none recorded — a finding with no experiments is unsupported)"}
+
+---
+You are the lab's independent auditor of findings. Judge whether this finding is GROUNDED in the
+experiments above and SUBSTANTIVE — not slop, not over-claimed beyond what the numbers actually show
+(discount synthetic-data findings; a null/mixed result honestly reported is fine).
+- `audit_score` (0-1): 0 = slop / unsupported / generic; 1 = fully grounded + substantive.
+- `verdict`: pass / unclear / slop (we re-derive it from the score — be honest in `reasoning`).
+- `reasoning`: 1-2 sentences — does the claim trace to the experiments, and is the confidence warranted?
+- Set `finding_id` to {f.get("id")}.
+"""
+    return PromptLayer(name="task_data", content=content, priority=1)
+
+
+if "evaluation.audit_finding" not in RECIPES:
+    RECIPES["evaluation.audit_finding"] = Recipe(
+        invocation_type="evaluation.audit_finding",
+        description="Aletheia audits a synthesized research finding's groundedness against its experiments.",
+        agent="evaluation",
+        total_budget=10_000,
+        use_cold_path=False,
+        recall_sessions=[],
+        recall_k=0,
+        output_schema="AuditScore",
+        task_data_builder=_build_audit_finding,
+    )
+
+
+async def handle_finding_composed(event: dict, dispatcher) -> dict | None:
+    """`finding.composed` → Aletheia audits the synthesized finding; a confident pass arms Momus (critic)
+    via finding.high_signal (state.update_research_finding_audit). Reconnects the verification spine to
+    the research era (research_findings), replacing the dead market-era task.completed→findings path."""
+    state = dispatcher.state
+    payload = event.get("payload") or {}
+    finding_id = payload.get("finding_id")
+    if finding_id is None:
+        return {"skipped": True, "reason": "no finding_id in finding.composed payload"}
+    rf = await state.get_research_finding(finding_id)
+    if rf is None or rf.get("audit_verdict") is not None:
+        return {"skipped": True, "reason": "finding missing or already audited", "finding_id": finding_id}
+
+    claim_id = payload.get("claim_id") or rf["direction_claim_id"]
+    try:
+        exps = await state.get_completed_experiments_for_claim(claim_id, limit=10)
+    except Exception:  # noqa: BLE001 — best-effort context
+        exps = []
+    prompt = await dispatcher.curator.build(
+        invocation_type="evaluation.audit_finding", context={"finding": rf, "experiments": exps}
+    )
+    audit, run_id = await dispatcher.router.invoke(
+        prompt=prompt,
+        output_schema_class=AuditScore,
+        triggered_by_event_id=event["id"],
+        session=dispatcher.session,
+        step_name="evaluation.audit_finding",
+    )
+    verdict = _verdict_from_score(audit.audit_score)
+    await state.update_research_finding_audit(finding_id, audit.audit_score, verdict, run_id)
+    log.info("evaluation: audited finding %s → %s (score=%.2f)", finding_id, verdict, audit.audit_score)
+    return {"finding_id": finding_id, "verdict": verdict, "audit_score": audit.audit_score, "audit_run_id": run_id}
+
+
+# -------------------------------------------------------------------------
 # The handler
 # -------------------------------------------------------------------------
 

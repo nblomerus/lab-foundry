@@ -26,6 +26,7 @@ from agents.researcher.feedback import (
 )
 from agents.researcher.grounded import grade_finding, investigate_task
 from agents.researcher.identity import researcher_for_task
+from agents.researcher.runnable import runnable_target
 from harness.agent_modes import get_agent_mode
 from library.graph.tools import FINDING_ID_RESEARCHER, link_finding_cites_paper, merge_finding_grounds_claim
 
@@ -63,11 +64,19 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
 
     ctx, refs, _mimir, finding = result
     grade = grade_finding(finding, refs)
+    # Deterministic floor (the can't-regress backstop): if the task names a staged, locally-runnable
+    # dataset/model, an inconclusive read is a RUN-IT — escalate a thin_corpus blocker to
+    # needs_experiment regardless of what the LLM chose. A decisive verdict still stands.
+    runnable = runnable_target(task.description or "")
+    force_experiment = finding.blocker == "thin_corpus" and runnable is not None
+    treat_as_experiment = finding.blocker == "needs_experiment" or force_experiment
     # The feedback seam touches the DB (confidence / last_evidence / acquires). It must NEVER strand
     # the task — a failure here would leave it 'running', get reaped to 'pending', and re-loop. So we
     # always complete the task below, even if steering failed.
     try:
-        disp = await refine_disposition(state, ctx["claim_id"], disposition(finding, grade["grounded"]))
+        disp = await refine_disposition(
+            state, ctx["claim_id"], disposition(finding, grade["grounded"], force_experiment=force_experiment)
+        )
         fb = aggregate_direction(
             ctx["claim_id"],
             ctx["direction"],
@@ -76,7 +85,8 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
         applied = await apply_feedback(state, fb)  # confidence / last_evidence_at / self-healing acquire
     except Exception as e:  # noqa: BLE001 — steering is best-effort; the finding still completes
         log.exception("grounded researcher: feedback failed for T%s", task.id)
-        disp, applied = disposition(finding, grade["grounded"]), {"feedback_error": str(e)[:200]}
+        disp = disposition(finding, grade["grounded"], force_experiment=force_experiment)
+        applied = {"feedback_error": str(e)[:200]}
 
     # Project this finding into the trace graph: it GROUNDS its claim and CITES the EXTERNAL papers
     # it actually rests on (the researcher's resolved refs → real provenance the synthesis path loses).
@@ -106,10 +116,10 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
         except Exception:  # noqa: BLE001 — trace-graph projection is best-effort
             log.exception("grounded researcher: trace-graph projection failed for T%s", task.id)
 
-    # needs_experiment: literature can't settle this number — hand it to the experiments agent.
-    # The feedback seam makes NO confidence move for this blocker; emitting here turns the dead-end
-    # into a runnable experiment. Best-effort (deduped per task) — a failure must never strand the task.
-    if finding.blocker == "needs_experiment" and ctx.get("claim_id") is not None:
+    # needs_experiment (or the deterministic floor): literature can't settle this number — hand it to
+    # the experiments agent. The feedback seam makes NO confidence move for this blocker; emitting here
+    # turns the dead-end into a runnable experiment. Best-effort (deduped per task) — never strands it.
+    if treat_as_experiment and ctx.get("claim_id") is not None:
         try:
             await state.emit_corpus_event(
                 "experiment.requested",
@@ -134,6 +144,7 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
             "verdict": finding.verdict,
             "blocker": finding.blocker,
             "disposition": disp,
+            "runnable_backstop": runnable,  # staged dataset/model that escalated thin_corpus→experiment (or None)
             "grounded": grade["grounded"],
             "confidence": finding.confidence,
             "summary": finding.summary,
@@ -154,4 +165,4 @@ async def handle_grounded_research(event: dict, dispatcher) -> dict | None:
         applied.get("confidence"),
         applied.get("acquires_fired", 0),
     )
-    return {"task_id": task.id, "disposition": disp, "applied": applied}
+    return {"task_id": task.id, "disposition": disp, "applied": applied, "runnable_backstop": runnable}

@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 
 import tiktoken
 
+from agents.identity import persona_for  # agent persona registry (migration 024); leaf util, no cycle
+
 # -------------------------------------------------------------------------
 # Layered prompt
 # -------------------------------------------------------------------------
@@ -395,10 +397,17 @@ class Curator:
         if recipe.task_data_builder:
             task_data_task = asyncio.create_task(recipe.task_data_builder(context, self.state, self.memory))
 
+        # Resolve the agent's system persona from the identity registry (migration 024), falling back
+        # to the code SYSTEM_PROMPTS constant when there is no row (so a missing identity never breaks
+        # the prompt). persona_for is cached + never raises.
+        pool = getattr(self.state, "pool", None)
+        persona = (await persona_for(pool, recipe.agent)) if pool is not None else None
+        system_content = persona or SYSTEM_PROMPTS.get(recipe.agent, "")
+
         layers: list[PromptLayer] = [
             PromptLayer(
                 name="system",
-                content=SYSTEM_PROMPTS[recipe.agent],
+                content=system_content,
                 priority=0,
             ),
             await constitution_task,

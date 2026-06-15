@@ -22,6 +22,9 @@ _RUNNABLE = frozenset({"advisory", "active"})
 
 # Research-loop agents that the legacy KNOWLEDGE_CORE_ONLY flag gated off. Mimir (the
 # Library warden) is never gated by that flag; everything else defaults to active.
+# The research-era agent dials (KNOWLEDGE_CORE_ONLY gates these to 'off' by default). 'reviewer' and
+# 'auditor' were dropped (no such agent — reviewer was an empty stub; auditing is ops scripts + the
+# evaluation agent). 'pi' stays only as the dormant market-era dial (neutralized; not registered).
 _RESEARCH = frozenset(
     {
         "pi",
@@ -31,9 +34,7 @@ _RESEARCH = frozenset(
         "researcher",
         "evaluation",
         "novelty",
-        "reviewer",
         "reflection",
-        "auditor",
         "experiments",
         "quartermaster",
         "synthesis",

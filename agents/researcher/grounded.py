@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from agents.ariadne.loop import ARIADNE_MODEL
 from agents.llm import _chain_complete, _strip_fences
 from agents.mimir.ask import answer_question, retrieve
+from agents.researcher.runnable import affordance_brief
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +40,10 @@ class GroundedFinding(BaseModel):
     verdict: str = Field(..., description="supports | contradicts | inconclusive — re the direction's expectation")
     blocker: str = Field(
         "none",
-        description="when inconclusive, WHY: 'thin_corpus' (the Library lacks the papers to judge) "
-        "| 'needs_experiment' (the goal is empirical and needs a run no literature can settle) | 'none'",
+        description="when inconclusive, WHY: 'needs_experiment' (the goal is empirical AND the "
+        "data/model/metric it names is locally runnable here — a RUN settles it, not more reading) "
+        "| 'thin_corpus' (a genuinely CONCEPTUAL gap the corpus could settle once enriched — NOT an "
+        "empirical run-it task) | 'none'",
     )
     confidence: float = Field(..., ge=0.0, le=1.0, description="how load-bearing the corpus evidence is for this verdict")
     summary: str = Field(..., description="what the corpus actually shows for this task (2-4 sentences)")
@@ -54,7 +57,8 @@ class GroundedFinding(BaseModel):
     gaps: list[str] = Field(default_factory=list, description="what is still missing in the corpus to settle this")
     acquire_queries: list[str] = Field(
         default_factory=list,
-        description="ONLY when blocker=thin_corpus: 2-4 specific topics/papers to acquire so the next pass can judge",
+        description="ONLY when blocker=thin_corpus: 2-4 specific topics/papers to acquire so the next "
+        "pass can judge. Leave EMPTY when blocker=needs_experiment — the next step is a RUN, not a fetch.",
     )
     next_step: str = Field(..., description="the single most useful next task this finding implies")
 
@@ -68,10 +72,15 @@ Produce a grounded FINDING. Judge honestly against the goal:
 - contradicts   — the evidence pushes toward the kill-condition (the bet looks wrong/done).
 - inconclusive  — the corpus can't settle it yet (say so; do NOT manufacture a verdict).
 When inconclusive, set `blocker` to say WHY so the lab can act:
-- thin_corpus      — the Library simply lacks the papers to judge; fill `acquire_queries` with the
-                     specific literature to fetch so the next pass can settle it.
-- needs_experiment — the goal is EMPIRICAL (a number to hit, a run to do) that no amount of reading
-                     can settle; it needs the experiments agent, not more retrieval.
+- needs_experiment — the goal names a dataset to LOAD, a model to RUN, or a number/metric to HIT, AND
+                     that data/model is available locally (see "What the lab can RUN locally" below).
+                     The lab can RUN this today — running code is a first-class, ENCOURAGED action, NOT
+                     a last resort; do NOT ask to read more. reproduce / analyze / falsify tasks that
+                     name a /data path, a local model, or a measurable metric default HERE.
+- thin_corpus      — a genuinely CONCEPTUAL question the Library lacks the papers to settle (a
+                     definition, taxonomy, or prior-work finding) that NO local run could answer; fill
+                     `acquire_queries`. Do NOT use this for a runnable empirical task just because the
+                     corpus lacks the result — that is needs_experiment.
 - none             — genuinely ambiguous despite adequate evidence.
 Cite ONLY paper titles that appear in the evidence — never invent one. Be skeptical: an honest
 'inconclusive' with named gaps is worth more than a confident, ungrounded claim. Output ONLY JSON."""
@@ -187,16 +196,34 @@ async def investigate_task(state, task_id: int, *, model: str = ARIADNE_MODEL, e
     )
     mimir = await answer_question(question, k=8, state=(state if emit else None), asker="researcher", exclude_lab=True)
 
-    # (3) judge the evidence against the goal → a grounded finding.
+    # (3) judge the evidence against the goal → a grounded finding. The affordance block tells the
+    # decider what it can actually RUN locally (datasets/models/LLM broker) — without it the model is
+    # blind to its own run capability and defaults every empirical task to thin_corpus ("go read more").
+    # Self-suppressing: empty when nothing is staged, so the prompt never claims a runnability that
+    # doesn't exist (then the decision falls back to the literature frame, as before).
+    affordances = affordance_brief()
+    affordance_block = (
+        f"# What the lab can RUN locally (an experiment is an AVAILABLE action, not a last resort)\n{affordances}\n\n"
+        if affordances
+        else ""
+    )
+    decision_rule = (
+        "If this task names a dataset to load, a local model to run, or a metric to measure AND it "
+        "appears in 'What the lab can RUN locally', set blocker='needs_experiment' (a RUN settles it). "
+        "Reserve thin_corpus for conceptual gaps no run could answer."
+        if affordances
+        else "Judge the evidence against the goal."
+    )
     user = (
         f"# Task ({ctx['task_type']})\n{ctx['description']}\n\n"
         f"# Direction it serves\n{ctx['direction']}\n\n"
         f"# Goal\nEXPECTATION (what confirms it): {ctx['expectation']}\n"
         f"KILL-CONDITION (what refutes it / when to stop): {ctx['kill_condition']}\n\n"
+        f"{affordance_block}"
         f"# Retrieved corpus evidence (cite ONLY these titles)\n{evidence}\n\n"
         f"# Mimir's multi-hop synthesis\n{mimir.answer}\n"
         f"{('Gaps Mimir flags: ' + '; '.join(mimir.gaps)) if mimir.gaps else ''}\n\n"
-        f"# Task\nJudge the evidence against the goal and produce the finding. {_SCHEMA_HINT}"
+        f"# Produce the finding\n{decision_rule} {_SCHEMA_HINT}"
     )
     content = await _chain_complete(
         [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],

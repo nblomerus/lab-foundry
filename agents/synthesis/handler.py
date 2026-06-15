@@ -292,6 +292,18 @@ async def handle_finding_synthesize(event: dict, dispatcher) -> dict | None:
         dedup_key=f"finding-doc-{claim_id}-{n}",
     )
 
+    # Hand the finding to the verification spine: Aletheia (evaluation) audits its groundedness and,
+    # on a confident pass, arms Momus (critic) — the research-era reconnect (migration 025).
+    rf_id = persisted.get("finding_id")
+    if rf_id is not None:
+        await state.emit_corpus_event(
+            "finding.composed",
+            target_type="claim",
+            target_id=claim_id,
+            payload={"claim_id": claim_id, "finding_id": rf_id},
+            dedup_key=f"finding-composed-{rf_id}",
+        )
+
     log.info(
         "synthesis: composed finding for direction %s (supported=%s conf=%.2f, %d experiments → %s)",
         claim_id,

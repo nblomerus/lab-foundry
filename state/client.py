@@ -311,6 +311,67 @@ class PostgresClient:
                     f"highsig-{finding_id}",
                 )
 
+    async def get_research_finding(self, finding_id: int) -> dict | None:
+        """One synthesized finding by id (for Aletheia's audit), or None."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM research_findings WHERE id = $1", finding_id)
+            return dict(row) if row else None
+
+    async def update_research_finding_audit(
+        self,
+        finding_id: int,
+        audit_score: float,
+        audit_verdict: Literal["pass", "slop", "unclear"],
+        run_id: int | None = None,
+    ) -> None:
+        """Persist Aletheia's verdict on a synthesized finding. On a CONFIDENT pass (verdict=pass and the
+        finding's confidence >= 0.7) emit finding.high_signal targeting its DIRECTION so Momus (critic)
+        mounts an adversarial challenge. The research-era analogue of update_finding_audit."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE research_findings SET audit_score = $1, audit_verdict = $2
+                WHERE id = $3 AND audit_verdict IS NULL
+                RETURNING direction_claim_id, confidence
+                """,
+                audit_score,
+                audit_verdict,
+                finding_id,
+            )
+            if row is None:
+                return  # already audited; no-op
+            confident = (row["confidence"] or 0.0) >= 0.7  # only challenge findings the lab is sure of
+            if audit_verdict == "pass" and confident and row["direction_claim_id"] is not None:
+                await conn.execute(
+                    """
+                    INSERT INTO events (event_type, target_type, target_id, payload, emitted_by_run_id, dedup_key)
+                    VALUES ('finding.high_signal', 'claim', $1, $2::jsonb, $3, $4)
+                    ON CONFLICT (event_type, target_type, target_id, dedup_key) DO NOTHING
+                    """,
+                    row["direction_claim_id"],
+                    json.dumps(
+                        {"finding_id": finding_id, "score": round(float(row["confidence"]) * 10, 1), "research": True}
+                    ),
+                    run_id,
+                    f"highsig-rf-{finding_id}",
+                )
+
+    async def reap_orphan_research_tasks(self) -> int:
+        """One-off cleanup: HALT department='research' tasks sitting on a MISSION or FINDING claim.
+        Neither is ever a real research target; the migration-026 guard now blocks new ones at INSERT,
+        and this clears the historical zombies (e.g. the claim #65 finding-claim). Returns the count
+        halted. Idempotent — re-running halts nothing once clean."""
+        async with self.pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE tasks SET status = 'halted'
+                WHERE department = 'research'
+                  AND status IN ('pending', 'running')
+                  AND claim_id IN (SELECT id FROM claims WHERE claim_kind IN ('mission', 'finding'))
+                """
+            )
+        return int(status.split()[-1]) if status.startswith("UPDATE") else 0
+
     async def detect_slop_breaker(self, claim_id: int) -> bool:
         """
         Compute slop rate over last 24h for a claim; if >= 40% on >= 5 audited
@@ -1472,6 +1533,52 @@ class PostgresClient:
                 limit,
             )
             return [dict(r) for r in rows]
+
+    async def get_direction_execution_digest(self, active_claim_ids: list[int], limit: int = 12) -> list[dict]:
+        """Per-direction EXECUTION LEDGER for Ariadne's deliberate prompt: every direction that is
+        currently active OR has had experiments run on it (any status), with completed/failed counts,
+        its latest experiment headline, and — if invalidated — why it was killed. UNIONs the
+        active-but-unworked set with the worked-but-invalidated set (the cross-re-frame view no other
+        channel provides) so she stops re-proposing ground the lab already ran and killed. Read-only."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id AS claim_id, c.statement, c.status::text AS status, c.confidence,
+                       c.invalidation_reason,
+                       count(e.id) FILTER (WHERE e.status = 'completed') AS done,
+                       count(e.id) FILTER (WHERE e.status IN ('failed', 'killed')) AS failed,
+                       max(e.completed_at) AS last_exp_at,
+                       hl.headline
+                FROM claims c
+                LEFT JOIN tasks t ON t.claim_id = c.id
+                LEFT JOIN experiment_runs e ON e.task_id = t.id
+                LEFT JOIN LATERAL (
+                    SELECT left(e2.interpretation, 160) AS headline
+                    FROM experiment_runs e2 JOIN tasks t2 ON t2.id = e2.task_id
+                    WHERE t2.claim_id = c.id AND e2.interpretation IS NOT NULL
+                    ORDER BY e2.completed_at DESC NULLS LAST, e2.id DESC
+                    LIMIT 1
+                ) hl ON true
+                WHERE c.claim_kind = 'direction'
+                  AND (c.id = ANY($1::bigint[]) OR EXISTS (
+                      SELECT 1 FROM experiment_runs e3 JOIN tasks t3 ON t3.id = e3.task_id
+                      WHERE t3.claim_id = c.id))
+                GROUP BY c.id, c.statement, c.status, c.confidence, c.invalidation_reason, hl.headline
+                ORDER BY (c.id = ANY($1::bigint[])) DESC, max(e.completed_at) DESC NULLS LAST, c.id DESC
+                LIMIT $2
+                """,
+                active_claim_ids or [],
+                limit,
+            )
+            return [dict(r) for r in rows]
+
+    async def mark_claim_evidence(self, claim_id: int) -> None:
+        """Stamp last_evidence_at=now() on a direction because an EXPERIMENT landed on it. The
+        literature path already stamps this (agents/researcher/feedback.py), but experiment
+        interpretation did not — so experiment-worked directions under-reported as 'untouched' to
+        deliberation and the closure ladder. One UPDATE; harmless on an inactive claim."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE claims SET last_evidence_at = now() WHERE id = $1", claim_id)
 
     # ── independent novelty/impact adjudication (agents/novelty) ─────────────────────
     async def get_unadjudicated_directions(self, limit: int = 20) -> list[dict]:

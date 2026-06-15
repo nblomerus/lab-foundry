@@ -93,11 +93,30 @@ class AcquireRequest(BaseModel):
     why: str
 
 
+class DataRequest(BaseModel):
+    """A request to ACQUIRE a dataset the lab doesn't have staged — used when a HIGH-value direction
+    needs data NOT in the live /data list. Name a SPECIFIC, realistically-downloadable dataset (an exact
+    HuggingFace / OpenML / UCI id or name), not a vague topic. Recorded as a durable demand for Mimir/ops
+    to fulfil (today via ops.build_benchmark_pack); the direction can't run until the dataset is staged,
+    so don't request giant or gated sets."""
+
+    dataset: str = Field(..., description="a SPECIFIC dataset to acquire — its exact HF/OpenML/UCI id or name")
+    source: str | None = Field(None, description="where to get it: 'huggingface' | 'openml' | 'uci' (if known)")
+    modality: str | None = Field(None, description="tabular | text | image | … — the kind of data")
+    task_type: str | None = Field(None, description="classification | qa | regression | … — the task it supports")
+    why: str = Field(..., description="why this dataset is needed + which direction it unblocks")
+
+
 class AriadneOutput(BaseModel):
     mission_frame: str = Field(..., description="the research mission framed from the seed problem")
     directions: list[Direction] = Field(..., description="3-5 candidate directions")
     novelty_risks: list[str] = Field(default_factory=list, description="portfolio-level novelty/saturation risks")
     requests: list[AcquireRequest] = Field(default_factory=list, description="evidence Ariadne wants Mimir to acquire")
+    data_requests: list[DataRequest] = Field(
+        default_factory=list,
+        description="datasets to ACQUIRE when a high-value direction's data is NOT in the live '/data' list "
+        "— recorded as a durable demand for Mimir/ops to fulfil (the direction can't run until it's staged)",
+    )
     reflection: str = Field(..., description="what is uncertain; what would change the priorities")
 
 

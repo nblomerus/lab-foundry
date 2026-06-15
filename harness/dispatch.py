@@ -170,6 +170,9 @@ CLOSURE_EXEMPT_EVENTS = frozenset(
         # poll-consumed: the researcher's next run reads these (feedback.refine_disposition)
         "acquire.fulfilled",
         "acquire.rejected",
+        # Ariadne's dataset demand record (persist.request_data) — a durable signal for Mimir/ops to
+        # fulfil, not an event-driven handler. Deliberately unhandled, so exempt from the closure guard.
+        "data.requested",
         # market-PI lifecycle — DELIBERATELY unhandled (Stage 0 neutralization, see harness/main.py).
         # Dead by design, not a wiring regression; the closure ladder also emits claim.invalidated.
         "claim.invalidated",
@@ -222,6 +225,11 @@ REARM_GRACE_MIN = float(os.environ.get("CLOSURE_REARM_GRACE_MIN", "30"))
 REARM_CAP_PER_TICK = int(os.environ.get("CLOSURE_REARM_CAP_PER_TICK", "10"))
 # Same env var the synthesis agent reads — the re-armer's threshold must never drift from it.
 REARM_SYNTH_MIN = int(os.environ.get("SYNTHESIS_MIN_EXPERIMENTS", "3"))
+# Coverage guard: a direction MARCHING toward the synthesis threshold (1..MIN-1 completed experiments)
+# is spared a gap-kill only while it's still being worked — i.e. its last experiment is within this
+# window. Past it (stalled below the threshold), the gap proceeds and frees the slot. A direction that
+# already reached the threshold (or has a finding) is NEVER gap-killed regardless of this window.
+CLOSURE_COVERAGE_DEFER_MAX_MIN = float(os.environ.get("CLOSURE_COVERAGE_DEFER_MAX_MIN", "1440"))
 
 
 # -------------------------------------------------------------------------
@@ -906,6 +914,46 @@ class Dispatcher:
                 dedup=f"gap-{claim_id}",
             )
             return
+        # COVERAGE GUARD — never gap-kill a direction that has earned or produced synthesis. A direction
+        # with >= SYNTHESIS_MIN completed experiments (or an existing finding) must SYNTHESIZE, not be
+        # retired as a "research gap": gapping it destroys synthesizable work and makes Ariadne re-propose
+        # the same ground (observed: directions thin-killed at 1-2 experiments, before the synthesis gate).
+        # One still MARCHING toward the threshold (1..MIN-1, worked recently) is spared so it can reach it;
+        # only a stalled/unworked direction actually gaps. rearm_conclude then fires finding.synthesize.
+        try:
+            cov = await self.pool.fetchrow(
+                "SELECT count(e.id) FILTER (WHERE e.status = 'completed') AS done, "
+                "  EXTRACT(EPOCH FROM (now() - max(e.completed_at) FILTER (WHERE e.status = 'completed'))) / 60 "
+                "    AS since_min, "
+                "  EXISTS (SELECT 1 FROM research_findings rf WHERE rf.direction_claim_id = $1) AS has_finding, "
+                "  to_char(now(), 'YYYY-MM-DD') AS day "
+                "FROM tasks t LEFT JOIN experiment_runs e ON e.task_id = t.id WHERE t.claim_id = $1",
+                claim_id,
+            )
+            done = int(cov["done"] or 0) if cov else 0
+            has_finding = bool(cov["has_finding"]) if cov else False
+            since_min = cov["since_min"] if cov else None
+            synthesizable = has_finding or done >= REARM_SYNTH_MIN
+            marching = (
+                1 <= done < REARM_SYNTH_MIN and since_min is not None and since_min < CLOSURE_COVERAGE_DEFER_MAX_MIN
+            )
+            if synthesizable or marching:
+                overdue = done >= REARM_SYNTH_MIN and not has_finding
+                kind = "synthesis_overdue" if overdue else "gap_deferred_for_coverage"
+                await self._emit_indicator(
+                    "loop.unclosed",
+                    {"kind": kind, "claim_id": claim_id, "done": done, "has_finding": has_finding, "note": reason},
+                    dedup=f"gap-deferred-{claim_id}-{cov['day']}",
+                )
+                log.info(
+                    "closure: deferred gap for direction %s (done=%d, finding=%s) — synthesizable/marching, not a gap",
+                    claim_id,
+                    done,
+                    has_finding,
+                )
+                return
+        except Exception:  # noqa: BLE001 — the guard must never block the gap path; fall through to gap
+            log.exception("closure: coverage guard failed for %s; proceeding with gap", claim_id)
         try:
             # The single guarded write path stamps transition='gap' on the audit row, so a gap
             # is queryable apart from a retire/supersede (the free-text invalidation_reason no
